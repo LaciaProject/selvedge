@@ -423,12 +423,29 @@ async fn purge_expired(db: Db) {
 /// Deletes object store blobs that nothing references any more, ten minutes
 /// after they were released, so reads already streaming them can finish.
 async fn collect_garbage(db: Db, blobs: Blobs) {
+    // Tests shorten these; operators have no reason to.
+    let interval = std::env::var("SELVEDGE_GC_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(interval)).await;
         match selvedge_server::r2::collect_garbage(&db, &blobs, 600).await {
             Ok(0) => {}
             Ok(n) => tracing::debug!(n, "deleted unreferenced blobs"),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "deleting unreferenced blobs failed"),
+        }
+        // Static asset files no version uses, a day after their last use.
+        let grace = std::env::var("SELVEDGE_ASSET_GC_GRACE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(86_400);
+        match db.collect_asset_files(grace, 1000).await {
+            Ok(paths) => {
+                for p in &paths {
+                    if let Err(e) = blobs.delete(p).await {
+                        tracing::warn!(error = %format!("{e:#}"), path = %p, "deleting an asset blob failed");
+                    }
+                }
+                if !paths.is_empty() {
+                    tracing::info!(n = paths.len(), "deleted unused static asset files");
+                }
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "collecting static asset files failed"),
         }
     }
 }

@@ -193,7 +193,8 @@ Differences:
 
 - A service binding to a Worker that has code calls that code directly, which named entrypoints and
   RPC need. A service binding to a Worker with only assets reaches its assets.
-- Uploaded files are not deleted when no version uses them any more.
+- A file is deleted a day after the last version that uses it is deleted (versions are kept for
+  rollbacks, so deleting a script is what frees its files).
 - `assets.base_path` is ignored. Uploads use wrangler's bulk mode (several files per request).
 
 ## Workflows

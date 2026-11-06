@@ -26,6 +26,8 @@ export SELVEDGE_AGENT_LISTEN=127.0.0.1:$((PORT_BASE + 89))
 export SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$GATEWAY_PORT
 S3_PORT=$((PORT_BASE + 90))
 export SELVEDGE_R2_S3_LISTEN=127.0.0.1:$S3_PORT
+# Collect unused static asset files within seconds, not a day.
+export SELVEDGE_GC_INTERVAL_SECS=1 SELVEDGE_ASSET_GC_GRACE_SECS=2
 
 "$BIN" all > "$WORK/selvedge.log" 2>&1 &
 PID=$!
@@ -243,6 +245,12 @@ SHOST="static-site.$SUBDOMAIN.workers.test"
 check "a Worker with only assets serves them" "<h1>spa</h1>" "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/")"
 check "single-page-application serves index.html for unknown paths" "<h1>spa</h1>" \
   "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/deep/link")"
+asset_dirs() { find "$WORK/blobs/assets/$ACCOUNT" -type f | wc -l; }
+before=$(asset_dirs)
+awrangler delete -c site.jsonc --force > /dev/null 2>&1 || awrangler delete -c site.jsonc > /dev/null 2>&1
+after=$before
+for _ in $(seq 1 30); do after=$(asset_dirs); [ "$after" -lt "$before" ] && break; sleep 0.5; done
+check "deleting a site frees its asset files, and only those" "1" "$((before - after))"
 
 # Workflows: deployed by wrangler, driven through the binding and wrangler.
 WFA="$WORK/workflow-app"

@@ -106,6 +106,22 @@ d1() { curl -sf -X POST "$API/accounts/$ACCOUNT/d1/database/$DB/query" -H "Autho
 d1 '{"sql":"CREATE TABLE t (v TEXT)"}' > /dev/null
 d1 '{"sql":"INSERT INTO t VALUES (?)","params":["kept"]}' > /dev/null
 
+# Workflow instances run on Durable Objects too: start some that wait for an
+# event, so some are owned by the runner about to die.
+curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/workflow-app" -H "Authorization: Bearer $TOKEN" \
+  -F 'metadata={"main_module":"index.js","compatibility_date":"2026-10-01","bindings":[{"type":"workflow","name":"FLOW","workflow_name":"crash-flow","class_name":"Flow"}]};type=application/json' \
+  -F "index.js=@$ROOT/test/e2e/fixtures/workflow-app/index.js;filename=index.js;type=application/javascript+module" > /dev/null
+curl -sf -X PUT "$API/accounts/$ACCOUNT/workflows/crash-flow" -H "Authorization: Bearer $TOKEN" \
+  -d '{"script_name":"workflow-app","class_name":"Flow"}' > /dev/null
+wf() { curl -s -H "Host: workflow-app.$SUBDOMAIN.workers.test" "http://127.0.0.1:$((P + 80))$1"; }
+WIDS=()
+for n in 1 2 3 4 5 6; do
+  id=""
+  for _ in $(seq 1 20); do id=$(wf "/start?n=$n"); [ ${#id} = 36 ] && break; sleep 0.5; done
+  WIDS+=("$id")
+done
+check "workflow instances start on two runners" "6" "$(printf '%s\n' "${WIDS[@]}" | grep -c '^.\{36\}$')"
+
 # Spread objects over both runners, then kill one runner and its workerd.
 for n in a b c d e f g h; do get "/?name=$n" > /dev/null; done
 kill -9 "$PID_a1"; pkill -9 -f "$WORK/a1/" || true
@@ -135,6 +151,21 @@ d1_value() {
   done
 }
 check "D1 data survives a runner crash" "kept" "$(d1_value)"
+
+# The waiting instances carry on after the crash: an event completes each.
+wf_done=0
+for id in "${WIDS[@]}"; do
+  deadline=$(( $(date +%s) + 45 ))
+  until [ "$(wf "/approve?id=$id")" = approved ] || [ "$(date +%s)" -ge "$deadline" ]; do sleep 0.5; done
+done
+for id in "${WIDS[@]}"; do
+  for _ in $(seq 1 60); do
+    st=$(wf "/status?id=$id" | python3 -c 'import sys,json; print(json.load(sys.stdin)["status"])' 2>/dev/null)
+    [ "$st" = complete ] && { wf_done=$((wf_done + 1)); break; }
+    sleep 0.5
+  done
+done
+check "workflow instances survive a runner crash" "6" "$wf_done"
 
 # Static assets are cached on the runner, so a site keeps serving while the
 # data service is down.

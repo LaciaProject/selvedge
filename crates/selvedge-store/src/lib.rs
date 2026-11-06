@@ -12,6 +12,7 @@ pub mod r2;
 pub mod repo;
 pub mod secrets;
 pub mod tails;
+pub mod workflows;
 
 pub use blobs::Blobs;
 pub use db::Db;

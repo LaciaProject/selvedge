@@ -224,6 +224,37 @@ check "a Worker with only assets serves them" "<h1>spa</h1>" "$(curl -s -H "Host
 check "single-page-application serves index.html for unknown paths" "<h1>spa</h1>" \
   "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/deep/link")"
 
+# Workflows: deployed by wrangler, driven through the binding and wrangler.
+WFA="$WORK/workflow-app"
+cp -r "$E2E/fixtures/workflow-app" "$WFA"
+wwr() { (cd "$WFA" && "$E2E/node_modules/.bin/wrangler" "$@"); }
+wwr deploy > "$WORK/wf.log" 2>&1 || { cat "$WORK/wf.log"; exit 1; }
+settle
+wf() { curl -s -H "Host: workflow-app.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT$1"; }
+wf_status() { # instance id, wanted status: polls for up to 20 s
+  local s=""
+  for _ in $(seq 1 40); do
+    s=$(auth "$API/accounts/$ACCOUNT/workflows/e2e-flow/instances/$1" 2>/dev/null | json '["result"]["status"]' 2>/dev/null)
+    [ "$s" = "$2" ] && break
+    sleep 0.5
+  done
+  echo "$s"
+}
+WID=$(wf "/start?n=21")
+check "a workflow instance waits for its event" "waiting" \
+  "$(for _ in $(seq 1 20); do [ "$(auth "$API/accounts/$ACCOUNT/workflows/e2e-flow/instances/$WID" | python3 -c 'import sys,json; s=json.load(sys.stdin)["result"]["steps"]; print("waiting" if any(x["type"]=="waitForEvent" and not x["finished"] for x in s) else "")')" = waiting ] && { echo waiting; break; }; sleep 0.5; done)"
+wf "/approve?id=$WID" > /dev/null
+check "the instance completes after its event" "complete" "$(wf_status "$WID" complete)"
+check "the binding reports the output" '{"doubled": 42, "approved": true}' "$(wf "/status?id=$WID" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)["output"]))')"
+TID=$(wwr workflows trigger e2e-flow '{"n":5}' 2>&1 | grep -o '"[0-9a-f-]\{36\}"' | tr -d '"')
+check "wrangler workflows trigger starts an instance" "36" "${#TID}"
+wwr workflows instances send-event e2e-flow "$TID" --type approve --payload '{"ok":false}' > /dev/null 2>&1
+check "wrangler workflows send-event completes it" "complete" "$(wf_status "$TID" complete)"
+check "describe lists its steps" "double-1 approval-1 pause-1" \
+  "$(auth "$API/accounts/$ACCOUNT/workflows/e2e-flow/instances/$TID" | python3 -c 'import sys,json; print(" ".join(x["name"] for x in json.load(sys.stdin)["result"]["steps"]))')"
+check "wrangler workflows instances list sees both" "2" \
+  "$(wwr workflows instances list e2e-flow --json 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')"
+
 # Experimental workerd flags would be live in processes running with
 # --experimental (cluster mode), so uploads may not use them.
 printf 'export default { fetch() { return new Response("x"); } };' > "$WORK/exp.js"

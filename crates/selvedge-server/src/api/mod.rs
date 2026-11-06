@@ -12,6 +12,7 @@ mod r2;
 mod scripts;
 mod tails;
 mod versions;
+mod workflows;
 
 use std::sync::Arc;
 
@@ -48,6 +49,7 @@ pub fn router(state: State) -> Router {
         .merge(scripts::routes())
         .merge(assets::routes())
         .merge(tails::routes())
+        .merge(workflows::routes())
         .merge(kv::routes())
         .merge(domains::routes())
         .merge(versions::routes())

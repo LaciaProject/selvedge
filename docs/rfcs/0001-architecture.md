@@ -134,7 +134,7 @@ v1 不需要它：路由表由 gateway 直接从 api 拉取，放置用 rendezvo
 | KV | 最终一致，约 60 秒 | 以 Postgres 为准（大值放对象存储），runner 本地缓存加 TTL | P1 |
 | R2 | 强一致 | selvedge-data 转到后端 S3，每个 R2 bucket 对应后端的一个前缀；同时提供 S3 兼容端点 | P1 |
 | Secrets | — | 信封加密。主密钥 `ha` 档放 KMS/Vault（经 External Secrets 注入），`minimal` 档放 K8s Secret | P1 |
-| 日志、Live Tail | 流式 | workerd 输出结构化日志到 stdout，agent 采集后经 OTel 送到 Loki 或 ClickHouse；Live Tail 由 api 直接从 agent 拉流 | P1 |
+| 日志、Live Tail | 流式 | workerd 的输出由 agent 带上账户标签写到自己的 stdout（可选 JSON），由集群的日志采集器送到 Loki 等；Live Tail 由每个账户进程里的 tail worker 推给 agent，只转发有人在 tail 的脚本，API 经 PostgreSQL `LISTEN/NOTIFY` 送到持有 WebSocket 的副本 | P1 |
 | Durable Objects | 每个对象全局唯一、强一致 | workerd cluster 模式（§7） | P2 |
 | Alarms、WebSocket Hibernation | 同 DO | workerd 原生实现；cluster 模式下 alarm 存在对象存储里，节点故障后由其他节点接管 | P2 |
 | D1 | 单写 | 每个数据库是一个 Selvedge 提供的系统 DO 类（Miniflare 也这样实现），自动获得 cluster 模式的高可用 | P2 |
@@ -299,6 +299,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | Cron：`triggers.crons`、`L/W/#` 语法，data 副本用 SKIP LOCKED 认领到期触发（每次触发只执行一次，不需要选主），经系统 worker `selvedge-events` 投递 | 完成 | wrangler 部署 + 真实定时触发的端到端测试 |
 | Queues：官方 Queue 生产者绑定；消息存 Postgres，data 副本按租约认领批次（至少一次投递），经 `selvedge-events` 以 `MessageBatch` 形状的对象投递；重试、死信队列 | 完成（不支持 `v8` 格式：解码需要实验性标志） | wrangler 部署 + 生产、消费、重试的端到端测试 |
 | Static Assets：wrangler 的上传会话协议（只传账户里还没有的文件）、纯静态 Worker、`ASSETS` 绑定；由官方 workers-sdk 的 asset worker 和 router worker（未修改）在 workerd 里提供服务，`_headers`、`_redirects`、`run_worker_first` 在部署时解析；runner 本地磁盘缓存 | 完成 | 官方 workerd 渲染测试；wrangler 部署的端到端测试；两 runner 测试中 data 服务停掉后已缓存的资源照常返回 |
+| `wrangler tail`：每个账户进程里有一个 tail worker，只在有人 tail 时把事件转给 agent；API 按 wrangler 的过滤条件筛选，经 PostgreSQL `LISTEN/NOTIFY` 送到持有 WebSocket 的副本 | 完成 | wrangler tail 的端到端测试（日志、异常、结束会话） |
 | Workflows | 未开始 | |
 | 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 

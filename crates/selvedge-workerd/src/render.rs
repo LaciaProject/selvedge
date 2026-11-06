@@ -38,6 +38,12 @@ const ASSETS_KV_SERVICE: &str = "selvedge-assets-kv";
 const ASSET_WORKER: &str = include_str!("vendor/asset-worker.js");
 const ROUTER_WORKER: &str = include_str!("vendor/router-worker.js");
 
+/// The header marking trace events on the binding socket.
+pub const TAIL_HEADER: &str = "x-selvedge-tail";
+/// The tail worker every script with code reports to (`wrangler tail`).
+pub const TAIL_SERVICE: &str = "selvedge-tail";
+const TAIL_WORKER: &str = include_str!("tail.js");
+
 /// The system worker that delivers Cron Triggers and queue batches.
 pub const EVENTS_SERVICE: &str = "selvedge-events";
 const EVENTS_WORKER: &str = include_str!("events.js");
@@ -358,6 +364,20 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         ));
         sockets.push((EVENTS_SERVICE.to_owned(), socket));
     }
+    if bundle.scripts.iter().any(has_code) {
+        std::fs::write(opts.dir.join("m").join("selvedge-tail.js"), TAIL_WORKER)?;
+        services.push(format!(
+            "(name = {}, worker = (modules = [(name = \"tail.js\", esModule = embed \"m/selvedge-tail.js\")], \
+             compatibilityDate = \"2025-09-01\", bindings = [(name = \"SINK\", service = \"selvedge-tail-sink\")]))",
+            quote(TAIL_SERVICE),
+        ));
+        services.push(format!(
+            "(name = \"selvedge-tail-sink\", external = (address = {}, http = (injectRequestHeaders = \
+             [(name = {}, value = \"1\")])))",
+            quote(&format!("unix:{}", opts.binding_socket.display())),
+            quote(TAIL_HEADER),
+        ));
+    }
     let d1 = uses_d1(bundle);
     if d1 {
         std::fs::write(opts.dir.join("m").join("selvedge-d1.js"), D1_WORKER)?;
@@ -545,6 +565,11 @@ fn render_worker(
         ),
         format!("bindings = [{}]", bindings.join(", ")),
         "globalOutbound = \"internet\"".to_owned(),
+        format!(
+            "tails = [(name = {}, props = (json = {}))]",
+            quote(TAIL_SERVICE),
+            quote(&serde_json::json!({ "script": script.name }).to_string())
+        ),
     ];
     let hosted: Vec<_> = do_classes.iter().filter(|(s, _)| *s == script.name).collect();
     if !hosted.is_empty() {

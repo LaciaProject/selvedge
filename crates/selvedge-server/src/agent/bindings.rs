@@ -21,10 +21,23 @@ use super::AgentConfig;
 use crate::data::ACCOUNT_HEADER;
 use crate::proxy::{self, Body};
 
+/// Scripts with a live tail session: `(account, script)`.
+#[derive(Clone, Default)]
+pub struct Tailed(pub Arc<std::sync::RwLock<std::collections::HashSet<(AccountId, String)>>>);
+
+/// Largest batch of trace events accepted from the tail worker.
+const MAX_TAIL_BYTES: usize = 4 << 20;
+
 /// Largest asset response accepted from the data service.
 const MAX_ASSET_BYTES: usize = (selvedge_core::assets::MAX_ASSET_SIZE as usize) + 1024;
 
-pub fn serve(cfg: Arc<AgentConfig>, account: AccountId, path: &Path) -> Result<()> {
+pub fn serve(
+    cfg: Arc<AgentConfig>,
+    account: AccountId,
+    path: &Path,
+    tailed: Tailed,
+    http: reqwest::Client,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -38,7 +51,13 @@ pub fn serve(cfg: Arc<AgentConfig>, account: AccountId, path: &Path) -> Result<(
         let account_header = account_header.clone();
         let auth = auth.clone();
         let cache_dir = cache_dir.clone();
+        let tailed = tailed.clone();
+        let http = http.clone();
+        let account = account.clone();
         async move {
+            if req.headers().contains_key(selvedge_workerd::render::TAIL_HEADER) {
+                return forward_trace(&cfg, &http, &tailed, &account, req).await;
+            }
             let asset = req.headers().contains_key(selvedge_workerd::render::ASSETS_HEADER)
                 && req.method() == http::Method::GET;
             let cached = if asset { cache_path(&cache_dir, req.uri().path()) } else { None };
@@ -179,4 +198,43 @@ pub fn prune_asset_cache(dir: &Path, max: u64) {
         let _ = std::fs::remove_file(&path);
         total = total.saturating_sub(len);
     }
+}
+
+/// Trace events from the tail worker: forwarded to the API if someone is
+/// tailing the script; otherwise 204, which quiets the tail worker for a while.
+async fn forward_trace(
+    cfg: &AgentConfig,
+    http: &reqwest::Client,
+    tailed: &Tailed,
+    account: &AccountId,
+    req: http::Request<hyper::body::Incoming>,
+) -> http::Response<Body> {
+    let body = match http_body_util::Limited::new(req.into_body(), MAX_TAIL_BYTES).collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return proxy::full(StatusCode::PAYLOAD_TOO_LARGE, "too many events"),
+    };
+    #[derive(serde::Deserialize)]
+    struct Batch {
+        script: String,
+    }
+    let Ok(batch) = serde_json::from_slice::<Batch>(&body) else {
+        return proxy::full(StatusCode::BAD_REQUEST, "invalid events");
+    };
+    let active = tailed.0.read().expect("poisoned").contains(&(account.clone(), batch.script));
+    if !active {
+        return proxy::full(StatusCode::NO_CONTENT, "");
+    }
+    let url = format!("{}/internal/v1/accounts/{account}/tail-events", cfg.api_url);
+    let req = http
+        .post(url)
+        .bearer_auth(&cfg.internal_token)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    // Off the request path: the tail worker does not wait for the API.
+    tokio::spawn(async move {
+        if let Err(e) = req.send().await.and_then(|r| r.error_for_status()) {
+            tracing::debug!(error = %e, "forwarding trace events failed");
+        }
+    });
+    proxy::full(StatusCode::ACCEPTED, "")
 }

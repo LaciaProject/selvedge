@@ -171,6 +171,30 @@ Differences:
 - Uploaded files are not deleted when no version uses them any more.
 - `assets.base_path` is ignored. Uploads use wrangler's bulk mode (several files per request).
 
+## wrangler tail
+
+`wrangler tail` works in both formats (`pretty` and `json`), with its filters: `--status`,
+`--method`, `--header`, `--ip` (including `self`), `--search` and `--sampling-rate`. Events have
+Cloudflare's shape: the request, the response status, the outcome, `console` logs and uncaught
+exceptions with their stacks. They cover fetch requests and Durable Object calls. Cron Triggers and
+queue batches appear as RPC events (`scheduled`, `queue`), because Selvedge delivers them over JS
+RPC.
+
+How it works: every Worker reports to a tail worker in its account's process. That worker sends
+events on only while someone is tailing the script; otherwise it stays quiet. The API applies the
+filters and passes events to the API replica that holds the WebSocket, through PostgreSQL
+`LISTEN`/`NOTIFY`.
+
+Differences:
+
+- Delivery is best effort, as on Cloudflare: a client that falls behind loses events.
+- An event larger than about 7.9 KB, PostgreSQL's limit on a notification, is shortened: log
+  lines, exception messages and header values are cut, and `truncated` is set.
+- `request.cf` holds only `clientIp`. `--version-id` is accepted and does not filter.
+- The WebSocket URL points at the API host the request came to (`Host`, or `X-Forwarded-Host` and
+  `X-Forwarded-Proto` from a proxy), at `/tail/v1/<token>`. A proxy in front of the API must pass
+  WebSocket upgrades on that path.
+
 ## Deployments and the API
 
 `wrangler deploy`, `wrangler versions upload`, `wrangler versions deploy` (one version at 100%),

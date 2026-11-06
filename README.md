@@ -58,7 +58,8 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | D1 (binding, batches, `wrangler d1 create/execute/migrations`) | D1 read replicas, Time Travel, import/export |
 | Cron Triggers (`triggers.crons`, including `L`, `W` and `#`) | |
 | Queues (producers, Worker consumers, retries, dead-letter queues; `wrangler queues`) | `v8` message format, HTTP pull consumers |
-| Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush, `wrangler tail` |
+| Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush |
+| `wrangler tail` (logs, exceptions, filters) | |
 | workers.dev-style hostnames and custom domains | Routes on zones |
 
 Uploads that use an unsupported binding are rejected rather than deployed without it. See

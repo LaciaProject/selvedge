@@ -15,6 +15,7 @@ pub mod kvlogic;
 pub mod proxy;
 pub mod queues;
 pub mod r2;
+pub mod tail;
 
 /// Compares secrets without leaking where they differ through timing.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

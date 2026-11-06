@@ -249,6 +249,7 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         db.ensure_admin_token(t).await?;
     }
     Ok(Arc::new(ApiState {
+        tails: selvedge_server::tail::Hub::start(db.clone()),
         db,
         blobs: Blobs::open(&args.blob_url, &blob_options())?,
         secrets: SecretBox::from_hex(&args.master_key)?,

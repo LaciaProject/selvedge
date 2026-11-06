@@ -10,6 +10,7 @@ mod kv;
 mod queues;
 mod r2;
 mod scripts;
+mod tails;
 mod versions;
 
 use std::sync::Arc;
@@ -33,6 +34,7 @@ pub struct ApiState {
     /// The gateway, for requests the API sends into account processes (D1).
     pub gateway_url: Option<String>,
     pub http: reqwest::Client,
+    pub tails: std::sync::Arc<crate::tail::Hub>,
 }
 
 pub type State = Arc<ApiState>;
@@ -45,6 +47,7 @@ pub fn router(state: State) -> Router {
         .merge(accounts::routes())
         .merge(scripts::routes())
         .merge(assets::routes())
+        .merge(tails::routes())
         .merge(kv::routes())
         .merge(domains::routes())
         .merge(versions::routes())

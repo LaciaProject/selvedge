@@ -13,6 +13,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (5, include_str!("../migrations/0005_cron.sql")),
     (6, include_str!("../migrations/0006_queues.sql")),
     (7, include_str!("../migrations/0007_assets.sql")),
+    (8, include_str!("../migrations/0008_tails.sql")),
 ];
 
 /// An arbitrary constant identifying Selvedge's migration lock.
@@ -21,17 +22,22 @@ const MIGRATION_LOCK: i64 = 0x5e1_7ed9e;
 #[derive(Clone)]
 pub struct Db {
     pool: Pool,
+    /// For dedicated connections (`LISTEN`), which a pool cannot lend.
+    pub(crate) config: tokio_postgres::Config,
 }
 
 impl Db {
     pub async fn connect(url: &str, max_connections: usize) -> Result<Self> {
         let config: tokio_postgres::Config = url.parse().context("parsing database URL")?;
-        let manager =
-            Manager::from_config(config, NoTls, ManagerConfig { recycling_method: RecyclingMethod::Fast });
+        let manager = Manager::from_config(
+            config.clone(),
+            NoTls,
+            ManagerConfig { recycling_method: RecyclingMethod::Fast },
+        );
         let pool = Pool::builder(manager).max_size(max_connections).build()?;
         // Fail fast on a bad URL or an unreachable server.
         drop(pool.get().await.context("connecting to PostgreSQL")?);
-        Ok(Self { pool })
+        Ok(Self { pool, config })
     }
 
     pub async fn client(&self) -> Result<deadpool_postgres::Object> {

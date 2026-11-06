@@ -1906,6 +1906,7 @@ dependencies = [
  "axum",
  "clap",
  "reqwest",
+ "selvedge-core",
  "selvedge-server",
  "selvedge-store",
  "tokio",

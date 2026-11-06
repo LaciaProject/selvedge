@@ -100,6 +100,9 @@ struct DataArgs {
     /// The gateway, for delivering Cron Triggers.
     #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
     gateway_url: Option<String>,
+    /// Serve R2's S3-compatible API here (path-style), e.g. 0.0.0.0:8790.
+    #[arg(long, env = "SELVEDGE_R2_S3_LISTEN")]
+    r2_s3_listen: Option<SocketAddr>,
 }
 
 #[derive(Args, Clone)]
@@ -184,6 +187,9 @@ struct AllArgs {
     data_listen: SocketAddr,
     #[arg(long, env = "SELVEDGE_AGENT_LISTEN", default_value = "127.0.0.1:8789")]
     agent_listen: SocketAddr,
+    /// Serve R2's S3-compatible API here (path-style).
+    #[arg(long, env = "SELVEDGE_R2_S3_LISTEN")]
+    r2_s3_listen: Option<SocketAddr>,
     #[arg(long, env = "SELVEDGE_GATEWAY_LISTEN", default_value = "0.0.0.0:8080")]
     gateway_listen: SocketAddr,
     #[arg(long, env = "SELVEDGE_WORKERD", default_value = "workerd")]
@@ -323,8 +329,12 @@ async fn main() -> Result<()> {
         Command::Admin(AdminCommand::CreateAccount { db, name }) => {
             let db = open_db(&db).await?;
             let account = db.create_account(&name).await?;
-            let token = db.create_token(Some(&account.id), "initial").await?;
-            println!("account_id={}\napi_token={token}", account.id);
+            let (token_id, token) = db.create_token(Some(&account.id), "initial").await?;
+            println!(
+                "account_id={}\napi_token={token}\nr2_access_key_id={token_id}\nr2_secret_access_key={}",
+                account.id,
+                selvedge_core::sha256_hex(token.as_bytes())
+            );
         }
         Command::Api(args) => {
             let state = api_state(&args).await?;
@@ -333,6 +343,9 @@ async fn main() -> Result<()> {
         Command::Data(args) => {
             let db = open_db(&args.db).await?;
             let blobs = Blobs::open(&args.blob_url, &blob_options())?;
+            let r2_s3 = args.r2_s3_listen.map(|addr| {
+                (addr, Arc::new(selvedge_server::r2s3::S3State { db: db.clone(), blobs: blobs.clone() }))
+            });
             let state = selvedge_server::data::DataState::new(
                 db.clone(),
                 blobs.clone(),
@@ -358,6 +371,15 @@ async fn main() -> Result<()> {
                 None => tracing::warn!(
                     "SELVEDGE_GATEWAY_URL is not set: Cron Triggers and queue consumers will not run"
                 ),
+            }
+            if let Some((addr, s3)) = r2_s3 {
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        serve_axum(addr, selvedge_server::r2s3::router(s3), shutdown_signal()).await
+                    {
+                        tracing::error!(error = %format!("{e:#}"), "R2 S3 API listener failed");
+                    }
+                });
             }
             serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
@@ -427,6 +449,8 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     };
     let api_url = format!("http://{}", loopback(args.api.listen));
     let data = selvedge_server::data::DataState::new(state.db.clone(), state.blobs.clone(), token.clone());
+    let s3_state =
+        Arc::new(selvedge_server::r2s3::S3State { db: state.db.clone(), blobs: state.blobs.clone() });
     tokio::spawn(purge_expired(state.db.clone()));
     tokio::spawn(collect_garbage(state.db.clone(), state.blobs.clone()));
     let dispatcher = selvedge_server::dispatch::Dispatcher::new(
@@ -444,6 +468,9 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));
+    if let Some(addr) = args.r2_s3_listen {
+        tasks.spawn(serve_axum(addr, selvedge_server::r2s3::router(s3_state), stop(&tx)));
+    }
     let agent = agent_config(&AgentArgs {
         internal: args.api.internal.clone(),
         listen: args.agent_listen,

@@ -9,6 +9,8 @@ mod internal;
 mod kv;
 mod queues;
 mod r2;
+
+pub use r2::valid_bucket_name;
 mod scripts;
 mod tails;
 mod versions;

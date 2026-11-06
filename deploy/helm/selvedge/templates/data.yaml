@@ -30,7 +30,15 @@ spec:
               value: http://{{ $name }}-gateway:{{ .Values.gateway.service.port }}
             - name: SELVEDGE_BLOB_URL
               value: s3://{{ .Values.objectStore.bucket }}/blobs
-          ports: [{ name: http, containerPort: 8788 }]
+            {{- if .Values.data.r2S3.enabled }}
+            - name: SELVEDGE_R2_S3_LISTEN
+              value: 0.0.0.0:8790
+            {{- end }}
+          ports:
+            - { name: http, containerPort: 8788 }
+            {{- if .Values.data.r2S3.enabled }}
+            - { name: r2-s3, containerPort: 8790 }
+            {{- end }}
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.data.resources | nindent 12 }}
@@ -44,3 +52,19 @@ metadata:
 spec:
   selector: {{- include "selvedge.selector" $c | nindent 4 }}
   ports: [{ name: http, port: 8788, targetPort: http }]
+{{- if .Values.data.r2S3.enabled }}
+---
+# R2's S3-compatible API. Expose it with an Ingress or a LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-r2-s3
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+  {{- with .Values.data.r2S3.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.data.r2S3.service.type }}
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: http, port: {{ .Values.data.r2S3.service.port }}, targetPort: r2-s3 }]
+{{- end }}

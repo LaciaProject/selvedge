@@ -24,6 +24,8 @@ export SELVEDGE_API_LISTEN=127.0.0.1:$API_PORT
 export SELVEDGE_DATA_LISTEN=127.0.0.1:$((PORT_BASE + 88))
 export SELVEDGE_AGENT_LISTEN=127.0.0.1:$((PORT_BASE + 89))
 export SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$GATEWAY_PORT
+S3_PORT=$((PORT_BASE + 90))
+export SELVEDGE_R2_S3_LISTEN=127.0.0.1:$S3_PORT
 
 "$BIN" all > "$WORK/selvedge.log" 2>&1 &
 PID=$!
@@ -105,6 +107,24 @@ check "R2 pagination" '[["a/one.txt","a/two.txt"],true]' "$(r2 '["page1"]')"
 check "R2 conditional puts" '[null,true,null]' "[$(r2 '["onlyIfMatchFails"]'),$(r2 '["onlyIfNoneMatchCreates"]'),$(r2 '["onlyIfNoneMatchBlocks"]')]"
 check "R2 multipart upload" '[5242884,true,"aatail",true]' "[$(r2 '["multipart.size"]'),$(r2 '["multipart.etag"]'),$(r2 '["multipart.tail"]'),$(r2 '["multipart.minPartSize"]')]"
 check "R2 object from wrangler is readable" "from wrangler" "$(wrangler r2 object get e2e-files/seed.txt --pipe --remote 2>/dev/null)"
+
+# R2's S3-compatible API, through the official AWS SDK. Credentials as on
+# Cloudflare: the token's id and the SHA-256 of its value.
+S3_TOKEN=$(admin -X POST "$API/accounts/$ACCOUNT/selvedge/tokens" -d '{"name":"s3"}')
+S3_KEY=$(echo "$S3_TOKEN" | json '["result"]["s3"]["access_key_id"]')
+S3_SECRET=$(echo "$S3_TOKEN" | json '["result"]["s3"]["secret_access_key"]')
+s3_out=$(cd "$E2E" && node s3.mjs "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET" 2>&1) || true
+echo "$s3_out" | sed 's/^/     /'
+check "R2 S3 API: every AWS SDK check passes" "0" "$(echo "$s3_out" | grep -c '^FAIL' || true)"
+check "R2 S3 API: the SDK ran its checks" "13" "$(echo "$s3_out" | grep -c '^ok' || true)"
+(cd "$E2E" && node -e '
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const [endpoint, accessKeyId, secretAccessKey] = process.argv.slice(1);
+new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } })
+  .send(new PutObjectCommand({ Bucket: "e2e-files", Key: "from-s3.txt", Body: "written over S3" }));' \
+  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET")
+check "an object written over S3 is the binding's object" "written over S3" \
+  "$(wrangler r2 object get e2e-files/from-s3.txt --pipe --remote 2>/dev/null)"
 
 # D1: a database through wrangler, migrations, then the binding from a Worker.
 wrangler d1 create e2e-db > /dev/null 2>&1

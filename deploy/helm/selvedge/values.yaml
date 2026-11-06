@@ -71,6 +71,14 @@ api:
 data:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
+  # R2's S3-compatible API (path-style), served by the data pods. Credentials:
+  # an account API token's id and the SHA-256 of its value.
+  r2S3:
+    enabled: true
+    service:
+      type: ClusterIP
+      port: 80
+      annotations: {}
 
 gateway:
   resources:

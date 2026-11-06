@@ -107,6 +107,12 @@ async fn create_token(
         return Err(ApiError::forbidden());
     }
     let id = account_access(&state, &caller, &account).await?;
-    let token = state.db.create_token(Some(&id), &body.name).await?;
-    Ok(ok(json!({ "name": body.name, "value": token })))
+    let (token_id, token) = state.db.create_token(Some(&id), &body.name).await?;
+    // R2's S3 API: access key id = the token's id, secret = SHA-256 of its value.
+    Ok(ok(json!({
+        "id": token_id,
+        "name": body.name,
+        "value": token,
+        "s3": { "access_key_id": token_id, "secret_access_key": selvedge_core::sha256_hex(token.as_bytes()) },
+    })))
 }

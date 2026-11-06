@@ -70,7 +70,8 @@ jobs:
         run: |
           # Account users must be able to run workerd: outside the home directory.
           sudo install -m 755 "$SELVEDGE_WORKERD" /usr/local/bin/workerd
-          sudo --preserve-env=SELVEDGE_DATABASE_URL env "PATH=$PATH" SELVEDGE_WORKERD=/usr/local/bin/workerd \
+          # The run directory goes under /tmp: the runner user's XDG_RUNTIME_DIR is 0700.
+          sudo --preserve-env=SELVEDGE_DATABASE_URL env "PATH=$PATH" XDG_RUNTIME_DIR= SELVEDGE_WORKERD=/usr/local/bin/workerd \
             SELVEDGE_ACCOUNT_UIDS=10000-59999 PORT_BASE=28400 test/e2e/single-node.sh
       - name: Start SeaweedFS (S3 with conditional writes)
         run: |

@@ -59,6 +59,7 @@ multer = "3"
 croner = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 md-5 = "0.10"
+hmac = "0.12"
 sha1 = "0.10"
 
 [profile.release]

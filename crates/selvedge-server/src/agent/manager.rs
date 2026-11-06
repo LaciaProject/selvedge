@@ -87,6 +87,8 @@ pub struct Manager {
     /// Scripts someone is tailing, from the change feed.
     tails: super::bindings::Tailed,
     uids: Option<super::uids::Uids>,
+    /// The agent's S3 proxy for Durable Object storage.
+    s3_proxy: Option<std::net::SocketAddr>,
 }
 
 pub enum Lookup {
@@ -96,7 +98,11 @@ pub enum Lookup {
 }
 
 impl Manager {
-    pub fn new(cfg: Arc<AgentConfig>, max_date: String) -> Result<Arc<Self>> {
+    pub fn new(
+        cfg: Arc<AgentConfig>,
+        max_date: String,
+        s3_proxy: Option<std::net::SocketAddr>,
+    ) -> Result<Arc<Self>> {
         let uids = cfg
             .account_uids
             .clone()
@@ -104,6 +110,7 @@ impl Manager {
             .transpose()?;
         Ok(Arc::new(Self {
             uids,
+            s3_proxy,
             cfg,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
@@ -331,7 +338,7 @@ impl Manager {
         let process = WorkerdProcess::start_as(
             &self.cfg.workerd,
             &rendered,
-            &workerd_env(),
+            &self.workerd_env(account),
             &label,
             READY_TIMEOUT,
             uid,
@@ -372,7 +379,14 @@ impl Manager {
         h.update(account.as_str().as_bytes());
         Some(ClusterOptions {
             bucket: format!("{}/{}", c.bucket.trim_end_matches('/'), account),
-            bucket_options: c.bucket_options.clone(),
+            // workerd reaches the store only through the agent's proxy.
+            bucket_options: c
+                .bucket_options
+                .iter()
+                .filter(|o| !super::UPSTREAM_OPTIONS.contains(&o.split('=').next().unwrap_or_default()))
+                .cloned()
+                .chain(self.s3_proxy.map(|a| format!("aws_endpoint=http://{a}")))
+                .collect(),
             address: format!("{}:0", c.bind_host),
             advertise: None,
             key_hex: hex::encode(h.finalize()),
@@ -477,20 +491,20 @@ impl Manager {
 
 /// The only variables workerd gets: what it needs to reach the cluster bucket,
 /// and a sane PATH/locale. Never the internal token or database URL.
-fn workerd_env() -> Vec<(String, String)> {
-    const PASS: &[&str] = &[
-        "AWS_ENDPOINT_URL",
-        "AWS_REGION",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_CREDENTIALS_FILE",
-        "TZ",
-    ];
-    let mut env: Vec<(String, String)> =
-        PASS.iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
-    env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
-    env
+impl Manager {
+    /// workerd's environment: nothing of the agent's, and for Durable Object
+    /// storage only credentials that the agent's S3 proxy accepts for this
+    /// account.
+    fn workerd_env(&self, account: &AccountId) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> =
+            ["TZ"].iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
+        env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
+        if let (Some(c), Some(_)) = (&self.cfg.cluster, self.s3_proxy) {
+            env.push(("AWS_ACCESS_KEY_ID".into(), account.to_string()));
+            env.push(("AWS_SECRET_ACCESS_KEY".into(), super::s3proxy::account_secret(&c.secret, account)));
+        }
+        env
+    }
 }
 
 async fn stop_current(state: &AccountState) {

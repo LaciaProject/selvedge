@@ -18,7 +18,8 @@ export SELVEDGE_WORKERS_DEV_ZONE=workers.test
 export SELVEDGE_API_LISTEN=127.0.0.1:$((P + 87)) SELVEDGE_API_URL=http://127.0.0.1:$((P + 87))
 export SELVEDGE_DATA_LISTEN=127.0.0.1:$((P + 88)) SELVEDGE_DATA_ADDR=127.0.0.1:$((P + 88))
 export SELVEDGE_GATEWAY_URL=http://127.0.0.1:$((P + 80))
-export SELVEDGE_DO_BUCKET="s3://${DO_S3_BUCKET:-selvedge-do}/cluster-$$"
+BUCKET=${DO_S3_BUCKET:-selvedge-do}
+export SELVEDGE_DO_BUCKET="s3://$BUCKET/cluster-$$"
 export SELVEDGE_DO_BUCKET_OPTIONS="aws_endpoint=${DO_S3_ENDPOINT:-http://127.0.0.1:29000},aws_region=us-east-1,aws_access_key_id=${DO_S3_KEY:-any},aws_secret_access_key=${DO_S3_SECRET:-any}"
 export SELVEDGE_CLUSTER_SECRET=$(openssl rand -hex 32)
 
@@ -82,6 +83,22 @@ seq_out=""
 for i in $(seq 1 10); do seq_out="$seq_out $(get /)"; done
 check "one owner across runners" " 1 2 3 4 5 6 7 8 9 10" "$seq_out"
 check "JS RPC with SQLite storage" "1" "$(get /rpc)"
+
+# Durable Object storage goes through the agent's S3 proxy: workerd holds a
+# key for its own account only, which reaches only that account's prefix.
+PROXY=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/a2.log" | grep -o 'storage proxy listening addr=[0-9.:]*' | head -1 | cut -d= -f2)
+WPID=$(pgrep -f "^.*workerd serve.*$WORK/a2/" | head -1)
+check "workerd holds only its account's storage key" "$ACCOUNT no-real-secret" \
+  "$(tr '\0' '\n' < /proc/"$WPID"/environ | sed -n 's/^AWS_ACCESS_KEY_ID=//p') $(tr '\0' '\n' < /proc/"$WPID"/environ | grep -q "^AWS_SECRET_ACCESS_KEY=${DO_S3_SECRET:-any}$" && echo real-secret || echo no-real-secret)"
+OWN_KEY=$(tr '\0' '\n' < /proc/"$WPID"/environ | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
+OTHER=$(openssl rand -hex 16)
+PFX="cluster-$$"
+s3() { python3 "$ROOT/test/e2e/s3req.py" "http://$PROXY" "$ACCOUNT" "$1" "$2" "$3" "${4:-}"; }
+check "the proxy lists the account's own prefix" "200" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$ACCOUNT/")"
+check "the proxy refuses another account's prefix" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$OTHER/")"
+check "the proxy refuses another account's objects" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/$PFX/$OTHER/v1/x")"
+check "the proxy refuses a bucket-wide listing" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2")"
+check "the proxy refuses a bad signature" "403" "$(s3 "not-the-key" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$ACCOUNT/")"
 
 # A D1 database lives in a Durable Object too.
 DB=$(curl -sf -X POST "$API/accounts/$ACCOUNT/d1/database" -H "Authorization: Bearer $TOKEN" -d '{"name":"crash"}' | json '["result"]["uuid"]')

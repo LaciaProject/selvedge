@@ -7,6 +7,7 @@
 
 mod bindings;
 mod manager;
+pub mod s3proxy;
 pub mod uids;
 
 use std::net::SocketAddr;
@@ -37,6 +38,45 @@ pub struct AgentCluster {
     pub bind_host: String,
     /// Shared by every agent; per-account cluster keys derive from it.
     pub secret: String,
+}
+
+/// Bucket options that carry the object store's endpoint or credentials.
+/// workerd never gets them: it talks to the agent's S3 proxy instead.
+pub const UPSTREAM_OPTIONS: &[&str] =
+    &["aws_endpoint", "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "aws_token"];
+
+impl AgentCluster {
+    fn option(&self, key: &str) -> Option<String> {
+        self.bucket_options
+            .iter()
+            .find_map(|o| o.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned()))
+    }
+
+    /// The real object store, from the bucket options or the agent's `AWS_*`
+    /// environment.
+    pub fn upstream(&self) -> Result<s3proxy::Upstream> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let region =
+            self.option("aws_region").or_else(|| env("AWS_REGION")).unwrap_or_else(|| "us-east-1".into());
+        let endpoint = self
+            .option("aws_endpoint")
+            .or_else(|| env("AWS_ENDPOINT_URL"))
+            .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
+        Ok(s3proxy::Upstream {
+            endpoint,
+            access_key_id: self.option("aws_access_key_id").or_else(|| env("AWS_ACCESS_KEY_ID")).ok_or_else(
+                || anyhow::anyhow!("no object store access key for Durable Objects (AWS_ACCESS_KEY_ID)"),
+            )?,
+            secret_access_key: self
+                .option("aws_secret_access_key")
+                .or_else(|| env("AWS_SECRET_ACCESS_KEY"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no object store secret key for Durable Objects (AWS_SECRET_ACCESS_KEY)")
+                })?,
+            session_token: self.option("aws_session_token").or_else(|| env("AWS_SESSION_TOKEN")),
+            region,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -83,7 +123,18 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     let max_date = selvedge_workerd::workerd_max_date(&cfg.workerd).await?;
     tracing::info!(workerd = %cfg.workerd.display(), %max_date, "agent starting");
     let cfg = Arc::new(cfg);
-    let manager = Manager::new(cfg.clone(), max_date)?;
+    // Durable Object storage goes through the agent's S3 proxy, so workerd
+    // processes hold only per-account credentials.
+    let s3_proxy = match &cfg.cluster {
+        Some(c) => {
+            let proxy = s3proxy::S3Proxy::new(c.upstream()?, &c.bucket, c.secret.clone())?;
+            let addr = proxy.serve(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+            tracing::info!(%addr, "Durable Object storage proxy listening");
+            Some(addr)
+        }
+        None => None,
+    };
+    let manager = Manager::new(cfg.clone(), max_date, s3_proxy)?;
 
     let evictor = {
         let manager = manager.clone();

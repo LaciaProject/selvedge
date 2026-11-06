@@ -48,7 +48,12 @@ compromised process can neither read another account's files nor act as another 
 agent then runs as root in the container with only CAP_SETUID, CAP_SETGID, CAP_CHOWN,
 CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL, and refuses to run as root without `--account-uids`.
 `runner.hostUsers: false` adds a user namespace, so root in the container is unprivileged on the
-node. Runner pods use the `RuntimeDefault` seccomp profile. `request.cf` is set by the gateway,
+node. Runner pods use the `RuntimeDefault` seccomp profile.
+
+workerd processes never hold the object store's credentials. Durable Object storage goes through
+an S3 proxy in the agent. Each account's process gets a key derived for its account alone, and the
+proxy checks the SigV4 signature, allows only that account's prefix and the operations cluster mode
+uses, then signs the request again with the real credentials. `request.cf` is set by the gateway,
 never from the runner's local sockets.
 
 Known gaps, tracked for the next releases:
@@ -56,6 +61,4 @@ Known gaps, tracked for the next releases:
 - Account processes in a runner pod share one cgroup: one account can use the pod's whole CPU and
   memory limit. Per-account cgroups need a delegated cgroup tree, which Kubernetes does not give
   containers by default (RFC 0001, spike S6).
-- Durable Object storage uses one set of object store credentials for every account; per-account,
-  prefix-scoped credentials are planned.
 - Platform components authenticate each other with a shared token; mTLS is planned.

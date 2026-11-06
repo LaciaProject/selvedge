@@ -303,7 +303,8 @@ Selvedge 只需要做配置生成、凭据和测试。
 | Workflows | 未开始 | |
 | 每账户 UID：agent 以只带六个 capability 的 root 运行，每个账户的 workerd 用独立 UID、无 capability，目录 0700、绑定 socket 0600；Helm 默认开启，可选 `hostUsers: false`；Pod 使用 `RuntimeDefault` seccomp | 完成 | 以 root 在容器里跑的单节点端到端测试（进程 UID、socket 和目录权限）；kind 测试默认开启 |
 | `request.cf` 由 gateway 设置，不再暴露 runner 本地 socket 的 PID/UID | 完成 | 端到端测试（含客户端伪造） |
-| 每账户 cgroup、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
+| 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 只拿到按账户派生的密钥；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |
+| 每账户 cgroup、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 
 Spike 结论：
 

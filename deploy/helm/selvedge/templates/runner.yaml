@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.runner.idleTimeoutSeconds | quote }}
             - name: SELVEDGE_DRAIN_DELAY
               value: {{ .Values.runner.drainDelaySeconds | quote }}
+            - name: SELVEDGE_ASSET_CACHE_MB
+              value: {{ .Values.runner.assetCacheMB | quote }}
             # Durable Objects: workerd cluster mode over the object store.
             - name: SELVEDGE_DO_BUCKET
               value: s3://{{ .Values.objectStore.bucket }}/do

@@ -118,4 +118,19 @@ d1_value() {
   done
 }
 check "D1 data survives a runner crash" "kept" "$(d1_value)"
+
+# Static assets are cached on the runner, so a site keeps serving while the
+# data service is down.
+SITE="$WORK/site"
+cp -r "$ROOT/test/e2e/fixtures/assets-app" "$SITE"
+(cd "$SITE" && CLOUDFLARE_API_BASE_URL=$API CLOUDFLARE_API_TOKEN=$TOKEN CLOUDFLARE_ACCOUNT_ID=$ACCOUNT \
+  WRANGLER_SEND_METRICS=false CI=true "$ROOT/test/e2e/node_modules/.bin/wrangler" deploy -c site.jsonc) \
+  > "$WORK/site-deploy.log" 2>&1 || { cat "$WORK/site-deploy.log"; exit 1; }
+SUB=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/workers/subdomain" | json '["result"]["subdomain"]')
+site() { curl -s -H "Host: static-site.$SUB.workers.test" "http://127.0.0.1:$((P + 80))$1"; }
+site_out=""
+for _ in $(seq 1 20); do site_out=$(site /); [ "$site_out" = "<h1>spa</h1>" ] && break; sleep 0.5; done
+check "a static site is served" "<h1>spa</h1>" "$site_out"
+kill "$PID_data"; wait "$PID_data" 2>/dev/null || true
+check "cached assets are served while the data service is down" "<h1>spa</h1>" "$(site /deep/link)"
 echo "all cluster checks passed"

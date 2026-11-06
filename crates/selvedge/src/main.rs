@@ -142,6 +142,9 @@ struct AgentArgs {
     /// Seconds to keep serving, unhealthy, after SIGTERM before draining.
     #[arg(long, env = "SELVEDGE_DRAIN_DELAY", default_value_t = 5)]
     drain_delay: u64,
+    /// Local disk for cached static assets, in MiB.
+    #[arg(long, env = "SELVEDGE_ASSET_CACHE_MB", default_value_t = 1024)]
+    asset_cache_mb: u64,
 }
 
 #[derive(Args, Clone)]
@@ -294,6 +297,7 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
         cluster,
         allow_local_durable_objects: a.allow_local_durable_objects,
         drain_delay: Duration::from_secs(a.drain_delay),
+        asset_cache_bytes: a.asset_cache_mb << 20,
     })
 }
 
@@ -445,6 +449,7 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         cluster_secret: args.cluster_secret,
         allow_local_durable_objects: true,
         drain_delay: 0,
+        asset_cache_mb: 1024,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(

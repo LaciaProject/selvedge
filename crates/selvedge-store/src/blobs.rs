@@ -84,6 +84,24 @@ impl Blobs {
         Ok(self.store.get_opts(&self.raw(path), opts).await?.into_stream())
     }
 
+    /// Stores `bytes` at `path` (relative to the prefix).
+    pub async fn put_at(&self, path: &str, bytes: Bytes) -> Result<()> {
+        self.store.put(&self.raw(path), PutPayload::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// The whole blob at `path` as a stream; `None` if it does not exist.
+    pub async fn stream_at(
+        &self,
+        path: &str,
+    ) -> Result<Option<futures::stream::BoxStream<'static, object_store::Result<Bytes>>>> {
+        match self.store.get(&self.raw(path)).await {
+            Ok(r) => Ok(Some(r.into_stream())),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Deletes the blob at `path`; a missing blob is not an error.
     pub async fn delete(&self, path: &str) -> Result<()> {
         match self.store.delete(&self.raw(path)).await {

@@ -367,18 +367,16 @@ impl Manager {
     async fn fetch_blobs(&self, bundle: &AccountBundle) -> Result<()> {
         let dir = self.cfg.state_dir.join("blobs");
         std::fs::create_dir_all(&dir)?;
-        for m in bundle.scripts.iter().flat_map(|s| &s.modules) {
-            let path = dir.join(&m.sha256);
+        let modules = bundle.scripts.iter().flat_map(|s| &s.modules).map(|m| &m.sha256);
+        let manifests = bundle.scripts.iter().filter_map(|s| s.assets.as_ref()).map(|a| &a.manifest);
+        for sha in modules.chain(manifests) {
+            let path = dir.join(sha);
             if path.exists() {
                 continue;
             }
-            let url = format!("{}/internal/v1/blobs/{}", self.cfg.api_url, m.sha256);
+            let url = format!("{}/internal/v1/blobs/{sha}", self.cfg.api_url);
             let bytes = self.get(&self.http, &url).await?.error_for_status()?.bytes().await?;
-            anyhow::ensure!(
-                selvedge_core::sha256_hex(&bytes) == m.sha256,
-                "blob {} failed its hash check",
-                m.sha256
-            );
+            anyhow::ensure!(selvedge_core::sha256_hex(&bytes) == *sha, "blob {sha} failed its hash check");
             write_atomic(&path, &bytes)?;
         }
         Ok(())

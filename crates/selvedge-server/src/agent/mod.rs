@@ -54,6 +54,8 @@ pub struct AgentConfig {
     /// After a shutdown signal, how long to keep serving while reporting
     /// unhealthy, so gateways stop sending new requests before the drain.
     pub drain_delay: Duration,
+    /// Bound on the local static asset cache (`<state_dir>/assets`).
+    pub asset_cache_bytes: u64,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -74,6 +76,17 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         })
     };
 
+    let pruner = {
+        let dir = cfg.state_dir.join("assets");
+        let max = cfg.asset_cache_bytes;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let dir = dir.clone();
+                let _ = tokio::task::spawn_blocking(move || bindings::prune_asset_cache(&dir, max)).await;
+            }
+        })
+    };
     let watcher = tokio::spawn(manager.clone().watch());
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     tracing::info!(addr = %cfg.listen, "agent listening");
@@ -116,6 +129,7 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     }
     tracing::info!("agent draining");
     evictor.abort();
+    pruner.abort();
     watcher.abort();
     manager.stop_all().await;
     Ok(())

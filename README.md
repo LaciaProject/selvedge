@@ -52,7 +52,8 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | ES module Workers, multiple modules, `nodejs_compat` and other compatibility flags | Service-worker syntax |
 | `wrangler deploy`, `versions upload/deploy`, `rollback`, `delete`, `secret put/delete` | Gradual (percentage) deployments |
 | KV (binding and REST API, `wrangler kv`) | Workflows |
-| Durable Objects: fetch, WebSockets, JS RPC, SQLite and KV storage, alarms | Static assets, Workers AI, Hyperdrive, Analytics Engine |
+| Durable Objects: fetch, WebSockets, JS RPC, SQLite and KV storage, alarms | Workers AI, Hyperdrive, Analytics Engine |
+| Static assets (`assets` in wrangler config, `_headers`, `_redirects`, `run_worker_first`, the `ASSETS` binding) | |
 | R2 (binding, multipart, conditional requests; `wrangler r2`) | R2's S3-compatible endpoint, presigned URLs |
 | D1 (binding, batches, `wrangler d1 create/execute/migrations`) | D1 read replicas, Time Travel, import/export |
 | Cron Triggers (`triggers.crons`, including `L`, `W` and `#`) | |

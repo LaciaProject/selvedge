@@ -1,0 +1,6 @@
+{
+  "name": "assets-app",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "public", "binding": "ASSETS", "run_worker_first": ["/api/*"] }
+}

@@ -10,7 +10,12 @@
 //!   the tenant cannot change;
 //! - `internet`, the only outbound network, limited to public addresses;
 //! - `selvedge-missing`, which answers for service bindings whose target script is
-//!   not deployed, so one missing script cannot stop the whole account.
+//!   not deployed, so one missing script cannot stop the whole account;
+//! - for a script with static assets, Cloudflare's asset worker (`assets-<script>`)
+//!   and router worker (`router-<script>`). The script's socket points at the
+//!   router, which serves an asset or calls the script (`w-<script>`, absent for
+//!   a Worker that only has assets). Asset bytes come from `selvedge-assets-kv`,
+//!   a KV-protocol service on the agent's binding socket.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -26,6 +31,12 @@ pub const R2_BUCKET_HEADER: &str = "x-selvedge-r2-bucket";
 
 /// The header carrying the queue name on producer requests.
 pub const QUEUE_HEADER: &str = "x-selvedge-queue";
+
+/// The header marking asset reads on the binding socket.
+pub const ASSETS_HEADER: &str = "x-selvedge-assets";
+const ASSETS_KV_SERVICE: &str = "selvedge-assets-kv";
+const ASSET_WORKER: &str = include_str!("vendor/asset-worker.js");
+const ROUTER_WORKER: &str = include_str!("vendor/router-worker.js");
 
 /// The system worker that delivers Cron Triggers and queue batches.
 pub const EVENTS_SERVICE: &str = "selvedge-events";
@@ -132,6 +143,19 @@ fn worker_service(script: &str) -> String {
     format!("w-{script}")
 }
 
+fn asset_service(script: &str) -> String {
+    format!("assets-{script}")
+}
+
+fn router_service(script: &str) -> String {
+    format!("router-{script}")
+}
+
+/// Whether a script has code of its own (a Worker with only assets does not).
+fn has_code(script: &BundleScript) -> bool {
+    !script.modules.is_empty()
+}
+
 fn kv_service(namespace: &str) -> String {
     format!("kv-{namespace}")
 }
@@ -150,7 +174,16 @@ pub fn durable_object_key(account: &str, script: &str, class: &str) -> String {
 pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn ModuleSource) -> Result<Rendered> {
     std::fs::create_dir_all(opts.dir.join("m"))
         .with_context(|| format!("creating {}", opts.dir.display()))?;
-    let deployed: BTreeSet<&str> = bundle.scripts.iter().map(|s| s.name.as_str()).collect();
+    // Service bindings reach a script's code directly, or its router when it
+    // only has assets.
+    let targets: std::collections::BTreeMap<&str, String> = bundle
+        .scripts
+        .iter()
+        .map(|s| {
+            let t = if has_code(s) { worker_service(&s.name) } else { router_service(&s.name) };
+            (s.name.as_str(), t)
+        })
+        .collect();
 
     // Durable Object classes, keyed by (script, class), from every binding that
     // names one. A class is hosted by the script that defines it.
@@ -159,7 +192,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         for b in &script.bindings {
             if let Binding::DurableObjectNamespace { class_name, script_name, .. } = b {
                 let host = script_name.clone().unwrap_or_else(|| script.name.clone());
-                if deployed.contains(host.as_str()) {
+                if targets.get(host.as_str()).is_some_and(|t| t.starts_with("w-")) {
                     do_classes.insert((host, class_name.clone()));
                 }
             }
@@ -174,8 +207,60 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
     let mut queues = BTreeSet::new();
     let mut need_missing = false;
 
+    let mut need_assets_kv = false;
     for (index, script) in bundle.scripts.iter().enumerate() {
-        let (worker, kvs, missing) = render_worker(bundle, script, opts, modules, &deployed, &do_classes)?;
+        if let Some(assets) = &script.assets {
+            need_assets_kv = true;
+            let manifest = format!("m/{}", assets.manifest);
+            let file = opts.dir.join(&manifest);
+            if !file.exists() {
+                std::fs::write(&file, modules.module_bytes(&assets.manifest)?)?;
+            }
+            let date = capped_date(&script.compatibility_date, &opts.max_compatibility_date);
+            services.push(format!(
+                "(name = {}, worker = (modules = [(name = \"asset-worker.js\", esModule = embed \"m/selvedge-asset-worker.js\")], \
+                 compatibilityDate = \"2024-07-31\", compatibilityFlags = [\"nodejs_compat\", \"enable_ctx_exports\"], \
+                 bindings = [(name = \"ASSETS_KV_NAMESPACE\", kvNamespace = {}), (name = \"ASSETS_MANIFEST\", data = embed {}), \
+                 (name = \"CONFIG\", json = {})]))",
+                quote(&asset_service(&script.name)),
+                quote(ASSETS_KV_SERVICE),
+                quote(&manifest),
+                quote(&assets.asset_worker_config(&date, &script.compatibility_flags)),
+            ));
+            let user = if has_code(script) {
+                worker_service(&script.name)
+            } else {
+                need_missing = true;
+                MISSING_SERVICE.to_owned()
+            };
+            services.push(format!(
+                "(name = {}, worker = (modules = [(name = \"router-worker.js\", esModule = embed \"m/selvedge-router-worker.js\")], \
+                 compatibilityDate = \"2024-07-31\", \
+                 compatibilityFlags = [\"nodejs_compat\", \"no_nodejs_compat_v2\", \"enable_ctx_exports\"], \
+                 bindings = [(name = \"ASSET_WORKER\", service = {}), (name = \"USER_WORKER\", service = {}), \
+                 (name = \"CONFIG\", json = {})]))",
+                quote(&router_service(&script.name)),
+                quote(&asset_service(&script.name)),
+                quote(&user),
+                quote(&assets.router_config(has_code(script))),
+            ));
+        } else if !has_code(script) {
+            bail!("script `{}` has neither modules nor assets", script.name);
+        }
+        let entry =
+            if script.assets.is_some() { router_service(&script.name) } else { worker_service(&script.name) };
+        if !has_code(script) {
+            let socket = opts.socket_dir.join(format!("{index}.sock"));
+            sockets_cfg.push(format!(
+                "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\"), service = {})",
+                quote(&script.name),
+                quote(&format!("unix:{}", socket.display())),
+                quote(&entry),
+            ));
+            sockets.push((script.name.clone(), socket));
+            continue;
+        }
+        let (worker, kvs, missing) = render_worker(bundle, script, opts, modules, &targets, &do_classes)?;
         need_missing |= missing;
         kv_namespaces.extend(kvs);
         r2_buckets.extend(script.bindings.iter().filter_map(|b| match b {
@@ -195,9 +280,19 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\"), service = {})",
             quote(&script.name),
             quote(&format!("unix:{}", socket.display())),
-            quote(&worker_service(&script.name)),
+            quote(&entry),
         ));
         sockets.push((script.name.clone(), socket));
+    }
+    if need_assets_kv {
+        std::fs::write(opts.dir.join("m").join("selvedge-asset-worker.js"), ASSET_WORKER)?;
+        std::fs::write(opts.dir.join("m").join("selvedge-router-worker.js"), ROUTER_WORKER)?;
+        services.push(format!(
+            "(name = {}, external = (address = {}, http = (injectRequestHeaders = [(name = {}, value = \"1\")])))",
+            quote(ASSETS_KV_SERVICE),
+            quote(&format!("unix:{}", opts.binding_socket.display())),
+            quote(ASSETS_HEADER),
+        ));
     }
 
     for ns in &kv_namespaces {
@@ -239,6 +334,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         let bindings: Vec<String> = bundle
             .scripts
             .iter()
+            .filter(|s| has_code(s))
             .map(|s| {
                 format!(
                     "(name = {}, service = {})",
@@ -338,7 +434,7 @@ fn render_worker(
     script: &BundleScript,
     opts: &RenderOptions,
     modules: &dyn ModuleSource,
-    deployed: &BTreeSet<&str>,
+    targets: &std::collections::BTreeMap<&str, String>,
     do_classes: &BTreeSet<(String, String)>,
 ) -> Result<(String, Vec<String>, bool)> {
     let main =
@@ -387,11 +483,13 @@ fn render_worker(
                 format!("kvNamespace = {}", quote(&kv_service(namespace_id.as_str())))
             }
             Binding::Service { service, entrypoint, .. } => {
-                let target = if deployed.contains(service.as_str()) {
-                    worker_service(service)
-                } else {
-                    missing = true;
-                    MISSING_SERVICE.to_owned()
+                let target = match targets.get(service.as_str()) {
+                    // Named entrypoints exist only in a script's code.
+                    Some(t) if entrypoint.is_none() || t.starts_with("w-") => t.clone(),
+                    _ => {
+                        missing = true;
+                        MISSING_SERVICE.to_owned()
+                    }
                 };
                 match entrypoint {
                     Some(ep) if target != MISSING_SERVICE => {
@@ -410,9 +508,17 @@ fn render_worker(
             Binding::R2Bucket { bucket_name, .. } => {
                 format!("r2Bucket = {}", quote(&r2_service(bucket_name)))
             }
+            Binding::Assets { .. } => {
+                if script.assets.is_some() {
+                    format!("service = {}", quote(&asset_service(&script.name)))
+                } else {
+                    missing = true;
+                    format!("service = {}", quote(MISSING_SERVICE))
+                }
+            }
             Binding::DurableObjectNamespace { class_name, script_name, .. } => {
                 let host = script_name.clone().unwrap_or_else(|| script.name.clone());
-                if !deployed.contains(host.as_str()) {
+                if !targets.get(host.as_str()).is_some_and(|t| t.starts_with("w-")) {
                     bail!(
                         "script `{}` binds Durable Object class `{class_name}` of script `{host}`, which is not deployed",
                         script.name
@@ -428,11 +534,7 @@ fn render_worker(
         bindings.push(format!("(name = {}, {value})", quote(b.name())));
     }
 
-    let date = if script.compatibility_date.as_str() > opts.max_compatibility_date.as_str() {
-        opts.max_compatibility_date.clone()
-    } else {
-        script.compatibility_date.clone()
-    };
+    let date = capped_date(&script.compatibility_date, &opts.max_compatibility_date);
 
     let mut fields = vec![
         format!("modules = [{}]", module_cfg.join(", ")),
@@ -460,6 +562,11 @@ fn render_worker(
         fields.push("durableObjectStorage = (localDisk = \"do-storage\")".to_owned());
     }
     Ok((format!("({})", fields.join(", ")), kvs, missing))
+}
+
+/// A compatibility date lowered to the newest the workerd binary supports.
+fn capped_date(date: &str, max: &str) -> String {
+    if date > max { max.to_owned() } else { date.to_owned() }
 }
 
 /// Reads the compatibility date a workerd binary supports from `workerd --version`
@@ -505,6 +612,7 @@ mod tests {
                     Binding::KvNamespace { name: "KV".into(), namespace_id: ns.clone() },
                     Binding::Service { name: "OTHER".into(), service: "nope".into(), entrypoint: None },
                 ],
+                assets: None,
             }],
             d1_databases: vec![],
         };

@@ -91,6 +91,8 @@ runner:
   idleTimeoutSeconds: 600
   # Seconds to keep serving, unhealthy, before draining on shutdown.
   drainDelaySeconds: 5
+  # Local disk (the pod's state emptyDir) for cached static assets.
+  assetCacheMB: 1024
   terminationGracePeriodSeconds: 60
   # e.g. gvisor, for an extra sandbox around workerd.
   runtimeClassName: ""

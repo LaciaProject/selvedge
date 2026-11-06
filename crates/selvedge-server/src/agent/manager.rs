@@ -20,9 +20,11 @@ use tokio::sync::Mutex;
 
 use super::AgentConfig;
 
-/// How long a known generation is trusted before asking the API again. This
-/// bounds how long a deploy takes to reach a running process.
-const GENERATION_TTL: Duration = Duration::from_secs(2);
+/// How long a known generation is trusted before a request triggers a check.
+/// Deploys normally arrive sooner, through [`Manager::watch`].
+const GENERATION_TTL: Duration = Duration::from_secs(30);
+/// How often the agent asks which accounts changed.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_GRACE: Duration = Duration::from_secs(30);
 
@@ -60,13 +62,27 @@ struct Slot {
     binding_socket: Option<PathBuf>,
     /// Bumped on each start so render directories never collide.
     starts: u64,
+    /// A background generation check is running.
+    refreshing: bool,
+}
+
+/// Per-account state. `slot` is only ever held briefly; `start` serializes
+/// generation checks and process starts, which can take a while.
+#[derive(Default)]
+struct AccountState {
+    slot: Mutex<Slot>,
+    start: Mutex<()>,
 }
 
 pub struct Manager {
     cfg: Arc<AgentConfig>,
+    /// For bundles and blobs.
     http: reqwest::Client,
+    /// For generation checks: short timeouts, since a slow API must not hold up
+    /// a refresh for long.
+    control: reqwest::Client,
     max_date: String,
-    slots: StdMutex<HashMap<AccountId, Arc<Mutex<Slot>>>>,
+    accounts: StdMutex<HashMap<AccountId, Arc<AccountState>>>,
     last_used: StdMutex<HashMap<AccountId, Instant>>,
 }
 
@@ -80,74 +96,159 @@ impl Manager {
     pub fn new(cfg: Arc<AgentConfig>, max_date: String) -> Arc<Self> {
         Arc::new(Self {
             cfg,
-            http: reqwest::Client::builder().timeout(Duration::from_secs(30)).build().expect("HTTP client"),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("HTTP client"),
+            control: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(3))
+                .build()
+                .expect("HTTP client"),
             max_date,
-            slots: StdMutex::new(HashMap::new()),
+            accounts: StdMutex::new(HashMap::new()),
             last_used: StdMutex::new(HashMap::new()),
         })
     }
 
-    fn slot(&self, account: &AccountId) -> Arc<Mutex<Slot>> {
-        self.slots.lock().expect("poisoned").entry(account.clone()).or_default().clone()
+    fn account(&self, account: &AccountId) -> Arc<AccountState> {
+        self.accounts.lock().expect("poisoned").entry(account.clone()).or_default().clone()
     }
 
-    /// The account's process, started or replaced if needed.
+    /// The account's process. A running process is returned at once; checking
+    /// for a new generation happens in the background, so the request path
+    /// never waits on the control plane.
     pub async fn ensure(self: &Arc<Self>, account: &AccountId) -> Result<Lookup> {
         self.last_used.lock().expect("poisoned").insert(account.clone(), Instant::now());
-        let slot = self.slot(account);
-        let mut slot = slot.lock().await;
-
-        if let Some(live) = &slot.live {
-            let fresh = slot.checked_at.is_some_and(|t| t.elapsed() < GENERATION_TTL);
-            if fresh && live.alive().await {
-                return Ok(Lookup::Ready(live.clone()));
+        let state = self.account(account);
+        {
+            let mut slot = state.slot.lock().await;
+            if let Some(live) = slot.live.clone() {
+                if live.alive().await {
+                    let stale = slot.checked_at.is_none_or(|t| t.elapsed() >= GENERATION_TTL);
+                    if stale && !slot.refreshing {
+                        slot.refreshing = true;
+                        let (me, account) = (self.clone(), account.clone());
+                        tokio::spawn(async move {
+                            if let Err(e) = me.rebuild(&account).await {
+                                tracing::warn!(%account, error = %format!("{e:#}"), "refreshing the account failed");
+                            }
+                            me.account(&account).slot.lock().await.refreshing = false;
+                        });
+                    }
+                    return Ok(Lookup::Ready(live));
+                }
             }
         }
+        // No running process: this request has to wait for one.
+        self.rebuild(account).await
+    }
 
-        let generation = match self.generation(account).await {
-            Ok(Some(g)) => g,
-            Ok(None) => {
-                if let Some(old) = slot.live.take() {
-                    tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
-                }
-                return Ok(Lookup::NotFound);
-            }
-            Err(e) => {
-                // The control plane is down: keep serving what we have.
-                if let Some(live) = &slot.live {
-                    if live.alive().await {
-                        tracing::warn!(%account, error = %format!("{e:#}"), "API unreachable; serving cached generation");
-                        return Ok(Lookup::Ready(live.clone()));
+    /// Follows account changes and refreshes the accounts running here, so a
+    /// deploy reaches running processes within about a second plus start time.
+    pub async fn watch(self: Arc<Self>) {
+        let mut cursor: Option<i64> = None;
+        loop {
+            tokio::time::sleep(WATCH_INTERVAL).await;
+            let url = match cursor {
+                Some(c) => format!("{}/internal/v1/generations?after={c}", self.cfg.api_url),
+                None => format!("{}/internal/v1/generations", self.cfg.api_url),
+            };
+            let resp = self.control.get(url).bearer_auth(&self.cfg.internal_token).send().await;
+            let body: serde_json::Value = match resp.and_then(|r| r.error_for_status()) {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "reading account changes failed");
+                        continue;
                     }
+                },
+                Err(e) => {
+                    tracing::debug!(error = %e, "polling account changes failed");
+                    continue;
                 }
-                return Err(e);
+            };
+            for change in body["changes"].as_array().into_iter().flatten() {
+                let (Some(account), Some(generation)) =
+                    (change[0].as_str().and_then(|a| a.parse::<AccountId>().ok()), change[1].as_i64())
+                else {
+                    continue;
+                };
+                let running = self.accounts.lock().expect("poisoned").get(&account).cloned();
+                let Some(state) = running else { continue };
+                let stale = state.slot.lock().await.live.as_ref().is_some_and(|l| l.generation != generation);
+                if stale {
+                    let (me, account) = (self.clone(), account.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = me.rebuild(&account).await {
+                            tracing::warn!(%account, error = %format!("{e:#}"), "applying a deploy failed");
+                        }
+                    });
+                }
             }
-        };
+            if let Some(c) = body["cursor"].as_i64() {
+                cursor = Some(c);
+            }
+        }
+    }
 
-        if let Some(live) = slot.live.clone() {
-            if live.generation == generation && live.alive().await {
-                slot.checked_at = Some(Instant::now());
-                return Ok(Lookup::Ready(live));
+    /// Checks the account's generation and starts a new process if it changed.
+    /// While the control plane is unreachable, a running process keeps serving.
+    async fn rebuild(self: &Arc<Self>, account: &AccountId) -> Result<Lookup> {
+        let state = self.account(account);
+        let _start = state.start.lock().await;
+        let current = state.slot.lock().await.live.clone();
+        let current = match current {
+            Some(live) if live.alive().await => Some(live),
+            _ => None,
+        };
+        match self.rebuild_locked(account, &state, current.clone()).await {
+            Ok(lookup) => Ok(lookup),
+            Err(e) => match current {
+                Some(live) => {
+                    tracing::warn!(%account, error = %format!("{e:#}"), "keeping the running generation");
+                    state.slot.lock().await.checked_at = Some(Instant::now());
+                    Ok(Lookup::Ready(live))
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    async fn rebuild_locked(
+        self: &Arc<Self>,
+        account: &AccountId,
+        state: &AccountState,
+        current: Option<Arc<Live>>,
+    ) -> Result<Lookup> {
+        let Some(generation) = self.generation(account).await? else {
+            stop_current(state).await;
+            return Ok(Lookup::NotFound);
+        };
+        if let Some(live) = &current {
+            if live.generation == generation {
+                state.slot.lock().await.checked_at = Some(Instant::now());
+                return Ok(Lookup::Ready(live.clone()));
             }
         }
 
         let bundle = self.bundle(account).await?;
         if bundle.scripts.is_empty() {
-            if let Some(old) = slot.live.take() {
-                tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
-            }
-            slot.checked_at = Some(Instant::now());
+            stop_current(state).await;
+            state.slot.lock().await.checked_at = Some(Instant::now());
             return Ok(Lookup::NotFound);
         }
 
-        let binding_socket = match &slot.binding_socket {
-            Some(p) => p.clone(),
-            None => {
+        let (binding_socket, starts) = {
+            let mut slot = state.slot.lock().await;
+            if slot.binding_socket.is_none() {
                 let p = self.account_run_dir(account).join("b.sock");
                 super::bindings::serve(self.cfg.clone(), account.clone(), &p)?;
-                slot.binding_socket = Some(p.clone());
-                p
+                slot.binding_socket = Some(p);
             }
+            slot.starts += 1;
+            (slot.binding_socket.clone().expect("set above"), slot.starts)
         };
 
         let has_do = bundle
@@ -164,13 +265,13 @@ impl Manager {
         let local_do = has_do && cluster.is_none();
         if local_do {
             // Two processes cannot share local Durable Object files.
-            if let Some(old) = slot.live.take() {
+            let old = state.slot.lock().await.live.take();
+            if let Some(old) = old {
                 old.stop(DRAIN_GRACE).await;
             }
         }
 
-        slot.starts += 1;
-        let tag = format!("g{}-{}", bundle.generation, slot.starts);
+        let tag = format!("g{}-{starts}", bundle.generation);
         let account_dir = self.cfg.state_dir.join("a").join(account.as_str());
         let do_dir =
             if local_do { account_dir.join("do-local") } else { account_dir.join(format!("do-{tag}")) };
@@ -201,10 +302,14 @@ impl Manager {
             socket_dir: opts.socket_dir.clone(),
             do_dir: (!local_do).then_some(do_dir),
         });
-        if let Some(old) = slot.live.replace(live.clone()) {
+        let old = {
+            let mut slot = state.slot.lock().await;
+            slot.checked_at = Some(Instant::now());
+            slot.live.replace(live.clone())
+        };
+        if let Some(old) = old {
             tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
         }
-        slot.checked_at = Some(Instant::now());
         Ok(Lookup::Ready(live))
     }
 
@@ -232,7 +337,7 @@ impl Manager {
 
     async fn generation(&self, account: &AccountId) -> Result<Option<i64>> {
         let resp = self
-            .http
+            .control
             .get(format!("{}/internal/v1/accounts/{account}/generation", self.cfg.api_url))
             .bearer_auth(&self.cfg.internal_token)
             .send()
@@ -294,8 +399,9 @@ impl Manager {
             .map(|(a, _)| a.clone())
             .collect();
         for account in idle {
-            let slot = self.slot(&account);
-            let mut slot = slot.lock().await;
+            let state = self.account(&account);
+            let _start = state.start.lock().await;
+            let mut slot = state.slot.lock().await;
             // Re-check under the lock: a request may have just used it.
             let still_idle = self
                 .last_used
@@ -315,10 +421,10 @@ impl Manager {
 
     /// Stops every process (agent shutdown).
     pub async fn stop_all(&self) {
-        let slots: Vec<_> = self.slots.lock().expect("poisoned").values().cloned().collect();
+        let states: Vec<_> = self.accounts.lock().expect("poisoned").values().cloned().collect();
         let mut stops = Vec::new();
-        for slot in slots {
-            if let Some(live) = slot.lock().await.live.take() {
+        for state in states {
+            if let Some(live) = state.slot.lock().await.live.take() {
                 stops.push(tokio::spawn(async move { live.stop(DRAIN_GRACE).await }));
             }
         }
@@ -344,6 +450,13 @@ fn workerd_env() -> Vec<(String, String)> {
         PASS.iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
     env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
     env
+}
+
+async fn stop_current(state: &AccountState) {
+    let old = state.slot.lock().await.live.take();
+    if let Some(old) = old {
+        tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

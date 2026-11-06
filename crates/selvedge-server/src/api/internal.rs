@@ -17,6 +17,7 @@ pub fn routes() -> Router<State> {
     Router::new()
         .route("/internal/v1/routes", get(routes_table))
         .route("/internal/v1/accounts/{account}/generation", get(generation))
+        .route("/internal/v1/generations", get(generations))
         .route("/internal/v1/accounts/{account}/bundle", get(bundle))
         .route("/internal/v1/blobs/{sha}", get(blob))
         .route("/healthz", get(|| async { "ok" }))
@@ -51,6 +52,28 @@ async fn generation(
     let generation =
         state.db.generation(&id).await?.ok_or_else(|| ApiError::not_found("Account not found"))?;
     Ok(Json(json!({ "generation": generation })).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct After {
+    after: Option<i64>,
+}
+
+/// Accounts that changed after a cursor: `{"changes": [[account, generation]], "cursor": n}`.
+/// Without `after`, only the current cursor.
+async fn generations(
+    AxState(state): AxState<State>,
+    _: Internal,
+    axum::extract::Query(q): axum::extract::Query<After>,
+) -> ApiResult<Response> {
+    let Some(after) = q.after else {
+        return Ok(
+            Json(json!({ "changes": [], "cursor": state.db.generation_head().await? })).into_response()
+        );
+    };
+    let changes = state.db.generations_after(after, 1000).await?;
+    let cursor = changes.last().map_or(after, |(_, g)| *g);
+    Ok(Json(json!({ "changes": changes, "cursor": cursor })).into_response())
 }
 
 async fn bundle(

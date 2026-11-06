@@ -91,6 +91,9 @@ struct DataArgs {
     internal: InternalArgs,
     #[arg(long, env = "SELVEDGE_DATA_LISTEN", default_value = "0.0.0.0:8788")]
     listen: SocketAddr,
+    /// Where R2 object bytes live (the same store as the API's blobs).
+    #[arg(long, env = "SELVEDGE_BLOB_URL")]
+    blob_url: String,
 }
 
 #[derive(Args, Clone)]
@@ -304,9 +307,14 @@ async fn main() -> Result<()> {
         }
         Command::Data(args) => {
             let db = open_db(&args.db).await?;
-            let state =
-                selvedge_server::data::DataState::new(db.clone(), args.internal.internal_token.clone());
-            tokio::spawn(purge_expired(db));
+            let blobs = Blobs::open(&args.blob_url, &blob_options())?;
+            let state = selvedge_server::data::DataState::new(
+                db.clone(),
+                blobs.clone(),
+                args.internal.internal_token.clone(),
+            );
+            tokio::spawn(purge_expired(db.clone()));
+            tokio::spawn(collect_garbage(db, blobs));
             serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
         Command::Agent(args) => {
@@ -346,6 +354,19 @@ async fn purge_expired(db: Db) {
     }
 }
 
+/// Deletes object store blobs that nothing references any more, ten minutes
+/// after they were released, so reads already streaming them can finish.
+async fn collect_garbage(db: Db, blobs: Blobs) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        match selvedge_server::r2::collect_garbage(&db, &blobs, 600).await {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(n, "deleted unreferenced blobs"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "deleting unreferenced blobs failed"),
+        }
+    }
+}
+
 /// Every role in one process, for a single node.
 async fn run_all(args: AllArgs) -> Result<()> {
     let state = api_state(&args.api).await?;
@@ -358,8 +379,9 @@ async fn run_all(args: AllArgs) -> Result<()> {
         }
     };
     let api_url = format!("http://{}", loopback(args.api.listen));
-    let data = selvedge_server::data::DataState::new(state.db.clone(), token.clone());
+    let data = selvedge_server::data::DataState::new(state.db.clone(), state.blobs.clone(), token.clone());
     tokio::spawn(purge_expired(state.db.clone()));
+    tokio::spawn(collect_garbage(state.db.clone(), state.blobs.clone()));
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));

@@ -5,6 +5,7 @@ mod accounts;
 mod domains;
 mod internal;
 mod kv;
+mod r2;
 mod scripts;
 mod versions;
 
@@ -40,6 +41,7 @@ pub fn router(state: State) -> Router {
         .merge(kv::routes())
         .merge(domains::routes())
         .merge(versions::routes())
+        .merge(r2::routes())
         .merge(internal::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(no_method)
@@ -109,3 +111,19 @@ impl FromRequestParts<State> for Internal {
 }
 
 pub type AccountPath = Path<String>;
+
+/// A JSON body, whatever its `Content-Type`: clients (wrangler among them)
+/// do not always send one.
+pub struct JsonBody<T>(pub T);
+
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> axum::extract::FromRequest<S> for JsonBody<T> {
+    type Rejection = ApiError;
+    async fn from_request(req: axum::extract::Request, state: &S) -> ApiResult<Self> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("reading the request body: {e}")))?;
+        serde_json::from_slice(&bytes)
+            .map(JsonBody)
+            .map_err(|e| ApiError::bad_request(format!("invalid JSON body: {e}")))
+    }
+}

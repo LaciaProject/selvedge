@@ -290,11 +290,12 @@ Selvedge 只需要做配置生成、凭据和测试。
 | --- | --- | --- |
 | api：`/client/v4` 子集（脚本、版本、部署、回滚、secret、KV、自定义域名、workers.dev 子域） | 完成 | `wrangler deploy / versions / rollback / delete / secret / kv` 端到端测试 |
 | data：KV 绑定协议服务端 | 完成 | 官方 workerd 绑定调用的端到端测试 |
-| agent：每账户一个官方 workerd 进程、按需启动、空闲回收、部署时滚动替换、SIGTERM 先摘流量再 drain | 完成 | 端到端测试；滚动重启压测零失败 |
+| agent：每账户一个官方 workerd 进程、按需启动、空闲回收、部署时滚动替换、SIGTERM 先摘流量再 drain；请求路径不等控制面，新版本通过变更推送（每秒轮询）在后台切换；访问 data 时建连失败自动重试 | 完成 | 端到端测试；滚动重启压测零失败 |
 | gateway：按 hostname 路由、rendezvous 哈希、建连失败自动换 runner | 完成 | 端到端测试 |
 | Durable Objects（cluster 模式）：fetch、RPC、SQLite、alarm、WebSocket hibernation | 完成 | 两 runner 测试：单一所有者、runner 崩溃后 20 秒内全部恢复、无丢写 |
 | Helm chart（minimal / ha）、镜像（官方 workerd + sha512 校验）、NetworkPolicy | 完成 | `helm lint`；kind 三可用区测试在 GitHub Actions 上跑 |
-| R2、D1、Queues、Cron、Workflows、Static Assets | 未开始 | |
+| R2：绑定协议（含 multipart、条件请求、范围读取）、REST API、旧内容延迟回收 | 完成 | 端到端测试（绑定 + `wrangler r2`） |
+| D1、Queues、Cron、Workflows、Static Assets | 未开始 | |
 | 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 
 Spike 结论：

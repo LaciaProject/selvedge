@@ -129,6 +129,23 @@ pub async fn send(mut sender: Sender, mut req: Request<Incoming>) -> Result<Resp
     Ok(Response::from_parts(parts, body.boxed()))
 }
 
+/// Connects to a `host:port` Service, retrying failed connects. Each new
+/// connection may reach a different backend, so this rides out a dead pod
+/// that has not yet left the Service's endpoints.
+pub async fn connect_retrying(addr: &str, attempts: usize) -> Result<Sender, String> {
+    let mut last = String::new();
+    for attempt in 0..attempts.max(1) {
+        match connect(Target::Tcp(addr)).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                tracing::debug!(%addr, attempt, error = %e, "connect failed; retrying");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
 pub async fn forward(target: Target<'_>, req: Request<Incoming>) -> Result<Response<Body>, String> {
     send(connect(target).await?, req).await
 }

@@ -1,6 +1,5 @@
 //! Workers Custom Domains (`/workers/domains`): a hostname served by a script.
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State as AxState};
 use axum::response::Response;
@@ -44,7 +43,7 @@ async fn attach(
     AxState(state): AxState<State>,
     caller: Caller,
     Path(account): Path<String>,
-    Json(body): Json<AttachBody>,
+    super::JsonBody(body): super::JsonBody<AttachBody>,
 ) -> ApiResult<Response> {
     let id = account_access(&state, &caller, &account).await?;
     let hostname = body.hostname.to_ascii_lowercase();

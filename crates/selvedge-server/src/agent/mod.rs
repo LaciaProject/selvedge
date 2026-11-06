@@ -74,6 +74,7 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         })
     };
 
+    let watcher = tokio::spawn(manager.clone().watch());
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     tracing::info!(addr = %cfg.listen, "agent listening");
     let draining = Arc::new(AtomicBool::new(false));
@@ -115,6 +116,7 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     }
     tracing::info!("agent draining");
     evictor.abort();
+    watcher.abort();
     manager.stop_all().await;
     Ok(())
 }

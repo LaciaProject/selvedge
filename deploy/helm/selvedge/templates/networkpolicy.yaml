@@ -81,6 +81,7 @@ spec:
   ingress:
     - from:
         {{- include "selvedge.peer" (dict "root" . "component" "api") | nindent 8 }}
+        {{- include "selvedge.peer" (dict "root" . "component" "data") | nindent 8 }}
         {{- include "selvedge.peer" (dict "root" . "component" "runner") | nindent 8 }}
         {{- include "selvedge.peer" (dict "root" . "component" "setup") | nindent 8 }}
       ports: [{ port: 8333 }]

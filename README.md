@@ -37,7 +37,7 @@ client ─▶ LB ─▶ gateway (×3) ── host → account/script, rendezvous
                     │
                     ▼
                runner (×N): agent + one workerd process per account
-                    │   ├─ KV calls ─────────▶ data (×3) ─▶ PostgreSQL
+                    │   ├─ KV, R2 calls ─────▶ data (×3) ─▶ PostgreSQL + object store
                     │   └─ Durable Objects ──▶ S3-compatible bucket (workerd cluster mode)
                     ▼
                api (×2): /client/v4, used by wrangler
@@ -51,8 +51,9 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | --- | --- |
 | ES module Workers, multiple modules, `nodejs_compat` and other compatibility flags | Service-worker syntax |
 | `wrangler deploy`, `versions upload/deploy`, `rollback`, `delete`, `secret put/delete` | Gradual (percentage) deployments |
-| KV (binding and REST API, `wrangler kv`) | R2, D1, Queues, Cron Triggers, Workflows |
+| KV (binding and REST API, `wrangler kv`) | D1, Queues, Cron Triggers, Workflows |
 | Durable Objects: fetch, WebSockets, JS RPC, SQLite and KV storage, alarms | Static assets, Workers AI, Hyperdrive, Analytics Engine |
+| R2 (binding, multipart, conditional requests; `wrangler r2`) | R2's S3-compatible endpoint, presigned URLs |
 | Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush, `wrangler tail` |
 | workers.dev-style hostnames and custom domains | Routes on zones |
 

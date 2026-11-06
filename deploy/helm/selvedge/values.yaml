@@ -41,6 +41,8 @@ postgres:
   storageClass: ""
   url: ""            # postgres://user:pass@host:5432/db
   existingSecret: "" # a Secret with key `url`
+  nodeSelector: {}
+  tolerations: []
 
 objectStore:
   # Bundled single-node SeaweedFS. For `ha`, use a replicated S3-compatible
@@ -56,6 +58,8 @@ objectStore:
   accessKeyId: ""
   secretAccessKey: ""
   existingSecret: "" # a Secret with keys access-key-id and secret-access-key
+  nodeSelector: {}
+  tolerations: []
 
 api:
   resources:

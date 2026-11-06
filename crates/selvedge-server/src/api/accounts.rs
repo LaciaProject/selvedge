@@ -1,6 +1,5 @@
 //! Accounts, tokens and the user endpoints clients call on login.
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State as AxState};
 use axum::response::Response;
@@ -79,7 +78,7 @@ struct CreateAccount {
 async fn create(
     AxState(state): AxState<State>,
     caller: Caller,
-    Json(body): Json<CreateAccount>,
+    super::JsonBody(body): super::JsonBody<CreateAccount>,
 ) -> ApiResult<Response> {
     if caller.0 != Principal::Admin {
         return Err(ApiError::forbidden());
@@ -102,7 +101,7 @@ async fn create_token(
     AxState(state): AxState<State>,
     caller: Caller,
     Path(account): Path<String>,
-    Json(body): Json<CreateToken>,
+    super::JsonBody(body): super::JsonBody<CreateToken>,
 ) -> ApiResult<Response> {
     if caller.0 != Principal::Admin {
         return Err(ApiError::forbidden());

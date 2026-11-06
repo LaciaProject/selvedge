@@ -79,7 +79,7 @@ async fn create_namespace(
     AxState(state): AxState<State>,
     caller: Caller,
     Path(account): Path<String>,
-    Json(body): Json<TitleBody>,
+    super::JsonBody(body): super::JsonBody<TitleBody>,
 ) -> ApiResult<Response> {
     let id = account_access(&state, &caller, &account).await?;
     if body.title.is_empty() || body.title.len() > 512 {
@@ -113,7 +113,7 @@ async fn rename_namespace(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, ns)): Path<(String, String)>,
-    Json(body): Json<TitleBody>,
+    super::JsonBody(body): super::JsonBody<TitleBody>,
 ) -> ApiResult<Response> {
     let (account, ns) = namespace_access(&state, &caller, &account, &ns).await?;
     state.db.rename_kv_namespace(&account, &ns, &body.title).await?;
@@ -271,7 +271,7 @@ async fn bulk_put(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, ns)): Path<(String, String)>,
-    Json(items): Json<Vec<BulkItem>>,
+    super::JsonBody(items): super::JsonBody<Vec<BulkItem>>,
 ) -> ApiResult<Response> {
     let (_, ns) = namespace_access(&state, &caller, &account, &ns).await?;
     if items.len() > 10_000 {
@@ -306,7 +306,7 @@ async fn bulk_delete(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, ns)): Path<(String, String)>,
-    Json(keys): Json<Vec<String>>,
+    super::JsonBody(keys): super::JsonBody<Vec<String>>,
 ) -> ApiResult<Response> {
     let (_, ns) = namespace_access(&state, &caller, &account, &ns).await?;
     if keys.len() > 10_000 {
@@ -320,7 +320,7 @@ async fn bulk_delete_legacy(
     state: AxState<State>,
     caller: Caller,
     path: Path<(String, String)>,
-    keys: Json<Vec<String>>,
+    keys: super::JsonBody<Vec<String>>,
 ) -> ApiResult<Response> {
     bulk_delete(state, caller, path, keys).await
 }

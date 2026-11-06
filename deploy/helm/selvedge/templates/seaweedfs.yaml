@@ -20,6 +20,12 @@ spec:
       labels: {{- include "selvedge.selector" $c | nindent 8 }}
     spec:
       securityContext: { seccompProfile: { type: RuntimeDefault } }
+      {{- with .Values.objectStore.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.objectStore.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: seaweedfs
           image: {{ .Values.objectStore.image }}

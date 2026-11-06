@@ -27,7 +27,8 @@ compatibility date later than that release supports is lowered to the newest one
 | Service bindings, including named entrypoints | Supported | Within one account. A binding to a script that is not deployed answers 503 |
 | KV | Supported | See below |
 | Durable Objects | Supported | See below |
-| R2, D1, Queues, Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
+| R2 | Supported | See below |
+| D1, Queues, Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
 
 ## KV
 
@@ -41,6 +42,25 @@ Differences:
 - Reads are strongly consistent: a write is visible to every reader at once. Cloudflare allows up to
   60 seconds of staleness, so code written for Cloudflare works unchanged.
 - `cacheTtl` is accepted and ignored.
+
+## R2
+
+The binding supports `head`, `get` (with ranges, suffix ranges and `Range` headers), `put` (with HTTP
+and custom metadata, MD5 and SHA checksums), `delete` (one or many keys), `list` (prefix, delimiter,
+cursor, `startAfter`, `include`), conditional requests (`onlyIf` with ETags and upload times) and
+multipart uploads. ETags are the MD5 of the object, or `<md5 of part MD5s>-<parts>` for multipart
+uploads, as in R2. Object metadata is strongly consistent: it lives in PostgreSQL and every
+conditional write is one transaction.
+
+`wrangler r2 bucket create/list/delete` and `wrangler r2 object put/get/delete` work.
+
+Differences:
+
+- R2's S3-compatible endpoint, presigned URLs, public buckets and custom domains on buckets are not
+  available yet.
+- SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
+- Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
+  the same size is not enforced.
 
 ## Durable Objects
 
@@ -73,7 +93,8 @@ Differences:
 `wrangler rollback`, `wrangler delete`, `wrangler secret put/list/delete` and `wrangler kv` work
 against `/client/v4`. Set `CLOUDFLARE_API_BASE_URL` to Selvedge's API.
 
-- A deploy reaches the runners within about 2 seconds.
+- A deploy reaches the runners within about 2 seconds: agents follow a change feed every second and
+  start the new version before retiring the old one.
 - Gradual deployments (two versions with percentages) are rejected.
 - Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported.
 - Hostnames: `<script>.<account subdomain>.<zone>` for scripts with workers.dev enabled, and custom

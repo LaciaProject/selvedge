@@ -5,6 +5,7 @@
 
 pub mod blobs;
 pub mod db;
+pub mod r2;
 pub mod repo;
 pub mod secrets;
 

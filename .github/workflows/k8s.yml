@@ -44,10 +44,7 @@ jobs:
         run: |
           kind load docker-image selvedge:ci --name selvedge
           helm install slv deploy/helm/selvedge --namespace selvedge --create-namespace \
-            --set profile=ha --set image.repository=selvedge --set image.tag=ci \
-            --set image.pullPolicy=Never --set gateway.service.type=ClusterIP \
-            --set runner.resources.requests.cpu=100m --set runner.resources.requests.memory=128Mi \
-            --wait --timeout 10m
+            -f test/k8s/values.yaml --wait --timeout 10m
           kubectl -n selvedge get pods -o wide
       - name: High-availability tests
         run: test/k8s/e2e.sh

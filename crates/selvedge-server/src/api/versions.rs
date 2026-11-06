@@ -3,7 +3,6 @@
 //! a deployment is the current version at 100%. Gradual deployments are
 //! rejected rather than silently sent to one version.
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{Multipart, Path, State as AxState};
 use axum::response::Response;
@@ -135,7 +134,7 @@ async fn deploy(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, script)): Path<(String, String)>,
-    Json(body): Json<DeployBody>,
+    super::JsonBody(body): super::JsonBody<DeployBody>,
 ) -> ApiResult<Response> {
     let id = script_access(&state, &caller, &account, &script).await?;
     let live: Vec<_> = body.versions.iter().filter(|v| v.percentage > 0.0).collect();

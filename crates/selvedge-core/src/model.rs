@@ -82,12 +82,17 @@ pub enum Binding {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         script_name: Option<String>,
     },
+    R2Bucket {
+        name: String,
+        bucket_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jurisdiction: Option<String>,
+    },
 }
 
 /// Binding types Selvedge knows about but does not implement yet. An upload that
 /// uses one is rejected instead of silently missing the binding.
 const NOT_YET: &[&str] = &[
-    "r2_bucket",
     "d1",
     "queue",
     "analytics_engine",
@@ -114,7 +119,8 @@ impl Binding {
             | Self::Json { name, .. }
             | Self::KvNamespace { name, .. }
             | Self::Service { name, .. }
-            | Self::DurableObjectNamespace { name, .. } => name,
+            | Self::DurableObjectNamespace { name, .. }
+            | Self::R2Bucket { name, .. } => name,
         }
     }
 
@@ -180,6 +186,8 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(kv, Binding::KvNamespace { .. }));
+        let r2 = Binding::parse(&json!({"type": "r2_bucket", "name": "B", "bucket_name": "files"})).unwrap();
+        assert!(matches!(r2, Binding::R2Bucket { .. }));
         let err = Binding::parse(&json!({"type": "d1", "name": "DB", "id": "x"})).unwrap_err();
         assert!(err.contains("not supported"));
         let err =

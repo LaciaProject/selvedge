@@ -535,6 +535,26 @@ impl Db {
         Ok(row.map(|r| r.get(0)))
     }
 
+    /// Accounts whose generation is above `after`, oldest change first.
+    pub async fn generations_after(&self, after: i64, limit: i64) -> Result<Vec<(AccountId, i64)>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id, generation FROM accounts WHERE generation > $1 ORDER BY generation LIMIT $2",
+                &[&after, &limit],
+            )
+            .await?;
+        rows.iter().map(|r| Ok((r.get::<_, String>(0).parse()?, r.get(1)))).collect()
+    }
+
+    /// The newest generation of any account.
+    pub async fn generation_head(&self) -> Result<i64> {
+        let row =
+            self.client().await?.query_one("SELECT coalesce(max(generation), 0) FROM accounts", &[]).await?;
+        Ok(row.get(0))
+    }
+
     /// Every script's current version with secrets decrypted.
     pub async fn bundle(&self, secrets: &SecretBox, account: &AccountId) -> Result<Option<AccountBundle>> {
         let mut client = self.client().await?;
@@ -864,11 +884,16 @@ fn binding_type(b: &Binding) -> &'static str {
         Binding::KvNamespace { .. } => "kv_namespace",
         Binding::Service { .. } => "service",
         Binding::DurableObjectNamespace { .. } => "durable_object_namespace",
+        Binding::R2Bucket { .. } => "r2_bucket",
     }
 }
 
 async fn bump_generation(tx: &tokio_postgres::Transaction<'_>, account: &AccountId) -> Result<()> {
-    tx.execute("UPDATE accounts SET generation = generation + 1 WHERE id = $1", &[&account.as_str()]).await?;
+    tx.execute(
+        "UPDATE accounts SET generation = nextval('account_generations') WHERE id = $1",
+        &[&account.as_str()],
+    )
+    .await?;
     Ok(())
 }
 

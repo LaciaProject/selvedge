@@ -27,7 +27,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::percent_decode_str;
 use selvedge_core::{AccountId, NamespaceId};
-use selvedge_store::{Db, KvEntry};
+use selvedge_store::{Blobs, Db, KvEntry};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -37,14 +37,23 @@ pub const ACCOUNT_HEADER: &str = "x-selvedge-account";
 
 pub struct DataState {
     pub db: Db,
+    pub blobs: Blobs,
     pub internal_token: String,
     /// (account, namespace) pairs verified recently.
     owned: Mutex<HashMap<(AccountId, NamespaceId), Instant>>,
+    /// (account, bucket name) to bucket id, resolved recently.
+    buckets: Mutex<HashMap<(AccountId, String), (String, Instant)>>,
 }
 
 impl DataState {
-    pub fn new(db: Db, internal_token: String) -> Arc<Self> {
-        Arc::new(Self { db, internal_token, owned: Mutex::new(HashMap::new()) })
+    pub fn new(db: Db, blobs: Blobs, internal_token: String) -> Arc<Self> {
+        Arc::new(Self {
+            db,
+            blobs,
+            internal_token,
+            owned: Mutex::new(HashMap::new()),
+            buckets: Mutex::new(HashMap::new()),
+        })
     }
 }
 
@@ -53,9 +62,77 @@ const OWNERSHIP_TTL: Duration = Duration::from_secs(60);
 pub fn router(state: Arc<DataState>) -> Router {
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
-        .fallback(handle)
-        .layer(axum::extract::DefaultBodyLimit::max(kvlogic::MAX_VALUE_BYTES + 4096))
+        .fallback(dispatch)
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(state)
+}
+
+fn token_ok(state: &DataState, headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| crate::constant_time_eq(t.as_bytes(), state.internal_token.as_bytes()))
+}
+
+/// Routes a binding call: R2 calls stream; KV calls are small and buffered.
+async fn dispatch(AxState(state): AxState<Arc<DataState>>, req: axum::extract::Request) -> Response {
+    if !token_ok(&state, req.headers()) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    if req.headers().contains_key(crate::r2::BUCKET_HEADER) {
+        return r2_dispatch(&state, req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, kvlogic::MAX_VALUE_BYTES + 4096).await else {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Value too large");
+    };
+    let q = Query::<HashMap<String, String>>::try_from_uri(&parts.uri).map(|q| q.0).unwrap_or_default();
+    handle(&state, parts.method, parts.uri, q, parts.headers, body).await
+}
+
+const BUCKET_TTL: Duration = Duration::from_secs(60);
+
+async fn r2_dispatch(state: &DataState, req: axum::extract::Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let header = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let (Some(account), Some(name)) =
+        (header(ACCOUNT_HEADER).and_then(|v| v.parse::<AccountId>().ok()), header(crate::r2::BUCKET_HEADER))
+    else {
+        return error(StatusCode::BAD_REQUEST, "missing account or bucket");
+    };
+    let key = (account.clone(), name.clone());
+    let cached = state
+        .buckets
+        .lock()
+        .expect("poisoned")
+        .get(&key)
+        .filter(|(_, t)| t.elapsed() < BUCKET_TTL)
+        .map(|(id, _)| id.clone());
+    let id = match cached {
+        Some(id) => id,
+        None => match state.db.r2_bucket(&account, &name).await {
+            Ok(Some((id, _))) => {
+                state.buckets.lock().expect("poisoned").insert(key, (id.clone(), Instant::now()));
+                id
+            }
+            Ok(None) => {
+                return crate::r2::R2Error::new(
+                    StatusCode::NOT_FOUND,
+                    10006,
+                    "The specified bucket does not exist.",
+                )
+                .into_response();
+            }
+            Err(e) => return crate::r2::R2Error::from(e).into_response(),
+        },
+    };
+    let bucket = crate::r2::Bucket { db: &state.db, blobs: &state.blobs, id };
+    match parts.method {
+        Method::GET => crate::r2::binding_get(&bucket, &parts.headers).await,
+        Method::PUT => crate::r2::binding_put(&bucket, &parts.headers, body).await,
+        _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -101,23 +178,23 @@ fn internal(e: anyhow::Error) -> Response {
 }
 
 async fn handle(
-    AxState(state): AxState<Arc<DataState>>,
+    state: &DataState,
     method: Method,
     uri: Uri,
-    Query(q): Query<HashMap<String, String>>,
+    q: HashMap<String, String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let ns = match authorize(&state, &headers).await {
+    let ns = match authorize(state, &headers).await {
         Ok(ns) => ns,
         Err(r) => return r,
     };
     let path = uri.path();
     if method == Method::POST && path == "/bulk/get" {
-        return bulk_get(&state, &ns, &body).await.unwrap_or_else(|r| r);
+        return bulk_get(state, &ns, &body).await.unwrap_or_else(|r| r);
     }
     if method == Method::GET && path == "/" {
-        return list(&state, &ns, &q).await.unwrap_or_else(|r| r);
+        return list(state, &ns, &q).await.unwrap_or_else(|r| r);
     }
     let raw = path.trim_start_matches('/');
     let key = match percent_decode_str(raw).decode_utf8() {
@@ -128,8 +205,8 @@ async fn handle(
         return error(StatusCode::BAD_REQUEST, e);
     }
     let result = match method {
-        Method::GET => get(&state, &ns, &key).await,
-        Method::PUT => put(&state, &ns, &key, &q, &headers, body).await,
+        Method::GET => get(state, &ns, &key).await,
+        Method::PUT => put(state, &ns, &key, &q, &headers, body).await,
         Method::DELETE => {
             state.db.kv_delete(&ns, &[key]).await.map(|_| StatusCode::OK.into_response()).map_err(internal)
         }

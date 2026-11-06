@@ -1,6 +1,5 @@
 //! Worker scripts: upload, list, delete, secrets and workers.dev settings.
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{Multipart, Path, State as AxState};
 use axum::response::Response;
@@ -268,6 +267,11 @@ pub(super) async fn create_version(
             Binding::Service { service, .. } => {
                 validate_script_name(service).map_err(|e| ApiError::bad_request(e.to_string()))?;
             }
+            Binding::R2Bucket { bucket_name, .. } => {
+                if state.db.r2_bucket(&id, bucket_name).await?.is_none() {
+                    return Err(ApiError::bad_request(format!("R2 bucket `{bucket_name}` not found")));
+                }
+            }
             _ => {}
         }
         bindings.push(b);
@@ -392,7 +396,7 @@ async fn put_secret(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, script)): Path<(String, String)>,
-    Json(body): Json<SecretBody>,
+    super::JsonBody(body): super::JsonBody<SecretBody>,
 ) -> ApiResult<Response> {
     let id = script_access(&state, &caller, &account, &script).await?;
     if body.ty.as_deref().is_some_and(|t| t != "secret_text") {
@@ -468,7 +472,7 @@ async fn put_subdomain(
     AxState(state): AxState<State>,
     caller: Caller,
     Path(account): Path<String>,
-    Json(body): Json<SubdomainBody>,
+    super::JsonBody(body): super::JsonBody<SubdomainBody>,
 ) -> ApiResult<Response> {
     let id = account_access(&state, &caller, &account).await?;
     let s = body.subdomain.to_ascii_lowercase();
@@ -509,7 +513,7 @@ async fn set_script_subdomain(
     AxState(state): AxState<State>,
     caller: Caller,
     Path((account, script)): Path<(String, String)>,
-    Json(body): Json<ScriptSubdomainBody>,
+    super::JsonBody(body): super::JsonBody<ScriptSubdomainBody>,
 ) -> ApiResult<Response> {
     let id = script_access(&state, &caller, &account, &script).await?;
     if !state.db.set_workers_dev(&id, &script, body.enabled).await? {
@@ -527,7 +531,7 @@ async fn schedules(caller: Caller, Path((_account, _script)): Path<(String, Stri
 async fn put_schedules(
     caller: Caller,
     Path((_account, _script)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    super::JsonBody(body): super::JsonBody<Value>,
 ) -> ApiResult<Response> {
     let _ = caller;
     if body.as_array().is_some_and(|a| !a.is_empty()) {

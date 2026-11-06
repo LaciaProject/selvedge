@@ -12,7 +12,7 @@ use selvedge_core::AccountId;
 
 use super::AgentConfig;
 use crate::data::ACCOUNT_HEADER;
-use crate::proxy::{self, Target};
+use crate::proxy;
 
 pub fn serve(cfg: Arc<AgentConfig>, account: AccountId, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -28,10 +28,17 @@ pub fn serve(cfg: Arc<AgentConfig>, account: AccountId, path: &Path) -> Result<(
         let auth = auth.clone();
         async move {
             let headers = req.headers_mut();
-            proxy::strip_internal_except(headers, &[selvedge_workerd::render::KV_NAMESPACE_HEADER]);
+            proxy::strip_internal_except(
+                headers,
+                &[selvedge_workerd::render::KV_NAMESPACE_HEADER, selvedge_workerd::render::R2_BUCKET_HEADER],
+            );
             headers.insert(ACCOUNT_HEADER, account_header);
             headers.insert(http::header::AUTHORIZATION, auth);
-            match proxy::forward(Target::Tcp(&cfg.data_addr), req).await {
+            let sent = match proxy::connect_retrying(&cfg.data_addr, 4).await {
+                Ok(sender) => proxy::send(sender, req).await,
+                Err(e) => Err(e),
+            };
+            match sent {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(error = %e, "binding request to data service failed");

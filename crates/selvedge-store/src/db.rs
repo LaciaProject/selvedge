@@ -5,7 +5,11 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use tokio_postgres::NoTls;
 
 /// Migrations in order. Released entries are never edited or removed.
-const MIGRATIONS: &[(i32, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i32, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (2, include_str!("../migrations/0002_r2.sql")),
+    (3, include_str!("../migrations/0003_generation_sequence.sql")),
+];
 
 /// An arbitrary constant identifying Selvedge's migration lock.
 const MIGRATION_LOCK: i64 = 0x5e1_7ed9e;

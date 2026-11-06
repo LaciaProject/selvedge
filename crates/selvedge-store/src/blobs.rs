@@ -56,6 +56,42 @@ impl Blobs {
         Ok(sha)
     }
 
+    fn raw(&self, path: &str) -> Path {
+        let mut p = self.prefix.clone();
+        for part in path.split('/') {
+            p = p.child(part);
+        }
+        p
+    }
+
+    /// A streaming writer for a blob at `path` (relative to the prefix). Call
+    /// `shutdown()` to finish the upload.
+    pub fn writer(&self, path: &str) -> object_store::buffered::BufWriter {
+        object_store::buffered::BufWriter::new(self.store.clone(), self.raw(path))
+    }
+
+    /// Bytes `start..end` of the blob at `path`.
+    pub async fn read_range(
+        &self,
+        path: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<futures::stream::BoxStream<'static, object_store::Result<Bytes>>> {
+        let opts = object_store::GetOptions {
+            range: Some(object_store::GetRange::Bounded(start..end)),
+            ..Default::default()
+        };
+        Ok(self.store.get_opts(&self.raw(path), opts).await?.into_stream())
+    }
+
+    /// Deletes the blob at `path`; a missing blob is not an error.
+    pub async fn delete(&self, path: &str) -> Result<()> {
+        match self.store.delete(&self.raw(path)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn get(&self, sha256: &str) -> Result<Option<Bytes>> {
         anyhow::ensure!(
             sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()),

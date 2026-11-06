@@ -85,6 +85,25 @@ wrangler rollback "$V1" --message e2e -y > /dev/null 2>&1
 settle
 check "rollback serves the old version" "one #43" "$(get /)"
 
+# R2: a bucket through wrangler, then the binding from a Worker.
+wrangler r2 bucket create e2e-files > /dev/null 2>&1
+echo -n "from wrangler" > "$WORK/obj.txt"
+wrangler r2 object put e2e-files/seed.txt --file "$WORK/obj.txt" --remote > /dev/null 2>&1
+curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/r2test" -H "Authorization: Bearer $TOKEN" \
+  -F 'metadata={"main_module":"index.js","compatibility_date":"2026-10-01","bindings":[{"type":"r2_bucket","name":"BUCKET","bucket_name":"e2e-files"}]};type=application/json' \
+  -F "index.js=@$E2E/fixtures/r2.js;filename=index.js;type=application/javascript+module" > /dev/null
+settle
+R2_OUT=$(curl -s -H "Host: r2test.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/run")
+r2() { python3 -c "import sys, json; print(json.dumps(json.loads(sys.argv[1])$1, separators=(',', ':')))" "$R2_OUT"; }
+check "R2 get with metadata" '"hello world"' "$(r2 '["get"]')"
+check "R2 etag is the MD5" 'true' "$(r2 '["etagIsMd5"]')"
+check "R2 ranges" '["world","rld"]' "[$(r2 '["range"]'),$(r2 '["suffix"]')]"
+check "R2 list with a delimiter" '[["seed.txt","top.txt"],["a/","b/"]]' "[$(r2 '["list.objects"]'),$(r2 '["list.prefixes"]')]"
+check "R2 pagination" '[["a/one.txt","a/two.txt"],true]' "$(r2 '["page1"]')"
+check "R2 conditional puts" '[null,true,null]' "[$(r2 '["onlyIfMatchFails"]'),$(r2 '["onlyIfNoneMatchCreates"]'),$(r2 '["onlyIfNoneMatchBlocks"]')]"
+check "R2 multipart upload" '[5242884,true,"aatail",true]' "[$(r2 '["multipart.size"]'),$(r2 '["multipart.etag"]'),$(r2 '["multipart.tail"]'),$(r2 '["multipart.minPartSize"]')]"
+check "R2 object from wrangler is readable" "from wrangler" "$(wrangler r2 object get e2e-files/seed.txt --pipe --remote 2>/dev/null)"
+
 wrangler delete > /dev/null 2>&1
 settle
 check "delete unroutes the hostname" "404" "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$GATEWAY_PORT/")"

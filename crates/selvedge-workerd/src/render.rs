@@ -21,6 +21,8 @@ use selvedge_core::{AccountBundle, Binding, BundleScript, ModuleKind};
 
 /// The header carrying the KV namespace id on binding requests.
 pub const KV_NAMESPACE_HEADER: &str = "x-selvedge-kv-namespace";
+/// The header carrying the R2 bucket name on binding requests.
+pub const R2_BUCKET_HEADER: &str = "x-selvedge-r2-bucket";
 
 const MISSING_SERVICE: &str = "selvedge-missing";
 const MISSING_WORKER: &str = "export default { fetch() { return new Response(\
@@ -108,6 +110,10 @@ fn kv_service(namespace: &str) -> String {
     format!("kv-{namespace}")
 }
 
+fn r2_service(bucket: &str) -> String {
+    format!("r2-{bucket}")
+}
+
 /// A Durable Object `uniqueKey`: stable per account, script and class, and one
 /// path component as cluster mode requires.
 pub fn durable_object_key(account: &str, script: &str, class: &str) -> String {
@@ -138,12 +144,17 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
     let mut sockets_cfg = Vec::new();
     let mut sockets = Vec::new();
     let mut kv_namespaces = BTreeSet::new();
+    let mut r2_buckets = BTreeSet::new();
     let mut need_missing = false;
 
     for (index, script) in bundle.scripts.iter().enumerate() {
         let (worker, kvs, missing) = render_worker(bundle, script, opts, modules, &deployed, &do_classes)?;
         need_missing |= missing;
         kv_namespaces.extend(kvs);
+        r2_buckets.extend(script.bindings.iter().filter_map(|b| match b {
+            Binding::R2Bucket { bucket_name, .. } => Some(bucket_name.clone()),
+            _ => None,
+        }));
         services.push(format!("(name = {}, worker = {worker})", quote(&worker_service(&script.name))));
         let socket = opts.socket_dir.join(format!("{index}.sock"));
         if socket.as_os_str().len() > 100 {
@@ -165,6 +176,15 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(&format!("unix:{}", opts.binding_socket.display())),
             quote(KV_NAMESPACE_HEADER),
             quote(ns),
+        ));
+    }
+    for bucket in &r2_buckets {
+        services.push(format!(
+            "(name = {}, external = (address = {}, http = (injectRequestHeaders = [(name = {}, value = {})])))",
+            quote(&r2_service(bucket)),
+            quote(&format!("unix:{}", opts.binding_socket.display())),
+            quote(R2_BUCKET_HEADER),
+            quote(bucket),
         ));
     }
     if need_missing {
@@ -291,6 +311,9 @@ fn render_worker(
                     }
                     _ => format!("service = {}", quote(&target)),
                 }
+            }
+            Binding::R2Bucket { bucket_name, .. } => {
+                format!("r2Bucket = {}", quote(&r2_service(bucket_name)))
             }
             Binding::DurableObjectNamespace { class_name, script_name, .. } => {
                 let host = script_name.clone().unwrap_or_else(|| script.name.clone());

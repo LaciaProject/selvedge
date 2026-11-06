@@ -19,6 +19,12 @@ spec:
       labels: {{- include "selvedge.selector" $c | nindent 8 }}
     spec:
       securityContext: { fsGroup: 70, seccompProfile: { type: RuntimeDefault } }
+      {{- with .Values.postgres.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.postgres.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}

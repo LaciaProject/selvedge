@@ -13,7 +13,7 @@ compatibility date later than that release supports is lowered to the newest one
 | --- | --- | --- |
 | ES module Workers, multiple modules | Supported | Module types: ES, CommonJS, text, data, WebAssembly, JSON, Python |
 | Service-worker syntax | Not supported | Rejected on upload |
-| Compatibility dates and flags | Supported | Passed to workerd as given |
+| Compatibility dates and flags | Supported | Passed to workerd as given, except flags that are experimental in workerd (`unsafe_module`, `rtti_api`, ...), which uploads may not use; Cloudflare does not offer them either |
 | Outbound `fetch()` and `connect()` | Supported | Public addresses only; private, loopback and link-local addresses are refused |
 | `request.cf` | Partial | An object with `httpProtocol` only: there is no geo or network data. Clients cannot set it |
 | Per-request CPU time limit (error 1102) | Different | Limits apply to the account's process (cgroup); a runaway request is stopped by restarting the process, which also fails the account's other in-flight requests |

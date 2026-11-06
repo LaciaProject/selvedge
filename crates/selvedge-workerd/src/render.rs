@@ -564,9 +564,17 @@ fn render_worker(
     let mut fields = vec![
         format!("modules = [{}]", module_cfg.join(", ")),
         format!("compatibilityDate = {}", quote(&date)),
+        // Experimental flags are refused on upload; versions stored before that
+        // lose them here.
         format!(
             "compatibilityFlags = [{}]",
-            script.compatibility_flags.iter().map(|f| quote(f)).collect::<Vec<_>>().join(", ")
+            script
+                .compatibility_flags
+                .iter()
+                .filter(|f| !crate::is_experimental_flag(f))
+                .map(|f| quote(f))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         format!("bindings = [{}]", bindings.join(", ")),
         "globalOutbound = \"internet\"".to_owned(),
@@ -614,6 +622,15 @@ pub async fn workerd_max_date(workerd: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use selvedge_core::{HexId, Module};
+
+    #[test]
+    fn experimental_flags() {
+        assert!(crate::is_experimental_flag("unsafe_module"));
+        assert!(crate::is_experimental_flag("experimental"));
+        assert!(!crate::is_experimental_flag("nodejs_compat"));
+        assert!(!crate::is_experimental_flag("enable_ctx_exports"));
+        assert!(!crate::is_experimental_flag("# workerd"));
+    }
 
     #[test]
     fn quoting() {

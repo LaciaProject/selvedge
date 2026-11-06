@@ -224,6 +224,13 @@ check "a Worker with only assets serves them" "<h1>spa</h1>" "$(curl -s -H "Host
 check "single-page-application serves index.html for unknown paths" "<h1>spa</h1>" \
   "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/deep/link")"
 
+# Experimental workerd flags would be live in processes running with
+# --experimental (cluster mode), so uploads may not use them.
+printf 'export default { fetch() { return new Response("x"); } };' > "$WORK/exp.js"
+check "an experimental compatibility flag is refused" "False" "$(curl -s -X PUT "$API/accounts/$ACCOUNT/workers/scripts/exp" \
+  -H "Authorization: Bearer $TOKEN" -F 'metadata={"main_module":"exp.js","compatibility_date":"2026-10-01","compatibility_flags":["unsafe_module"]};type=application/json' \
+  -F "exp.js=@$WORK/exp.js;type=application/javascript+module" | json '["success"]')"
+
 # Per-account users (only when the agent runs as root with --account-uids).
 if [ -n "${SELVEDGE_ACCOUNT_UIDS:-}" ]; then
   wuids=$(ps -o uid= -C workerd | tr -d ' ' | sort -u)

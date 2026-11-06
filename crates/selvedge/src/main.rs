@@ -1,0 +1,406 @@
+//! `selvedge`: one binary for every Selvedge role.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::{Args, Parser, Subcommand};
+use selvedge_server::agent::{AgentCluster, AgentConfig};
+use selvedge_server::api::ApiState;
+use selvedge_server::gateway::{GatewayConfig, Runners};
+use selvedge_store::{Blobs, Db, SecretBox};
+
+#[derive(Parser)]
+#[command(
+    name = "selvedge",
+    version,
+    about = "A highly available, Workers-compatible platform for Kubernetes"
+)]
+struct Cli {
+    /// Log as JSON lines.
+    #[arg(long, env = "SELVEDGE_LOG_JSON", global = true)]
+    log_json: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the /client/v4 API and internal endpoints.
+    Api(ApiArgs),
+    /// Serve the binding data service (KV).
+    Data(DataArgs),
+    /// Run workers: one workerd process per account.
+    Agent(AgentArgs),
+    /// Route requests by hostname to runners.
+    Gateway(GatewayArgs),
+    /// Run every role in one process (the minimal profile).
+    All(AllArgs),
+    /// Apply database migrations and exit.
+    Migrate(DbArgs),
+    /// Administrative commands.
+    #[command(subcommand)]
+    Admin(AdminCommand),
+}
+
+#[derive(Args, Clone)]
+struct DbArgs {
+    /// PostgreSQL URL.
+    #[arg(long, env = "SELVEDGE_DATABASE_URL")]
+    database_url: String,
+    #[arg(long, env = "SELVEDGE_DATABASE_POOL", default_value_t = 16)]
+    database_pool: usize,
+}
+
+#[derive(Args, Clone)]
+struct InternalArgs {
+    /// Shared secret between platform components.
+    #[arg(long, env = "SELVEDGE_INTERNAL_TOKEN", hide_env_values = true)]
+    internal_token: String,
+}
+
+#[derive(Args, Clone)]
+struct ApiArgs {
+    #[command(flatten)]
+    db: DbArgs,
+    #[command(flatten)]
+    internal: InternalArgs,
+    #[arg(long, env = "SELVEDGE_API_LISTEN", default_value = "0.0.0.0:8787")]
+    listen: SocketAddr,
+    /// Where module bytes live: s3://bucket/prefix, file:///dir or memory://.
+    #[arg(long, env = "SELVEDGE_BLOB_URL")]
+    blob_url: String,
+    /// 64 hex characters; encrypts secrets at rest.
+    #[arg(long, env = "SELVEDGE_MASTER_KEY", hide_env_values = true)]
+    master_key: String,
+    /// A platform admin token to create if missing.
+    #[arg(long, env = "SELVEDGE_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+    /// Zone for <script>.<subdomain>.<zone> hostnames.
+    #[arg(long, env = "SELVEDGE_WORKERS_DEV_ZONE")]
+    workers_dev_zone: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct DataArgs {
+    #[command(flatten)]
+    db: DbArgs,
+    #[command(flatten)]
+    internal: InternalArgs,
+    #[arg(long, env = "SELVEDGE_DATA_LISTEN", default_value = "0.0.0.0:8788")]
+    listen: SocketAddr,
+}
+
+#[derive(Args, Clone)]
+struct AgentArgs {
+    #[command(flatten)]
+    internal: InternalArgs,
+    #[arg(long, env = "SELVEDGE_AGENT_LISTEN", default_value = "0.0.0.0:8789")]
+    listen: SocketAddr,
+    #[arg(long, env = "SELVEDGE_API_URL", default_value = "http://127.0.0.1:8787")]
+    api_url: String,
+    /// The data service, host:port.
+    #[arg(long, env = "SELVEDGE_DATA_ADDR", default_value = "127.0.0.1:8788")]
+    data_addr: String,
+    /// The official workerd binary.
+    #[arg(long, env = "SELVEDGE_WORKERD", default_value = "workerd")]
+    workerd: PathBuf,
+    #[arg(long, env = "SELVEDGE_STATE_DIR", default_value = "/var/lib/selvedge")]
+    state_dir: PathBuf,
+    /// Keep short: Unix socket paths must fit in 107 bytes.
+    #[arg(long, env = "SELVEDGE_RUN_DIR", default_value = "/run/selvedge")]
+    run_dir: PathBuf,
+    /// Stop an account's process after this many idle seconds.
+    #[arg(long, env = "SELVEDGE_IDLE_TIMEOUT", default_value_t = 600)]
+    idle_timeout: u64,
+    /// Bucket for Durable Objects (workerd cluster mode): s3://bucket/prefix.
+    #[arg(long, env = "SELVEDGE_DO_BUCKET")]
+    do_bucket: Option<String>,
+    /// key=value bucket options (aws_endpoint=..., aws_region=...). Repeatable.
+    #[arg(long = "do-bucket-option", env = "SELVEDGE_DO_BUCKET_OPTIONS", value_delimiter = ',')]
+    do_bucket_options: Vec<String>,
+    /// IP workerd binds its cluster port on; peers must reach it (the pod IP).
+    #[arg(long, env = "SELVEDGE_CLUSTER_HOST", default_value = "127.0.0.1")]
+    cluster_host: String,
+    /// Secret shared by all agents; per-account cluster keys derive from it.
+    #[arg(long, env = "SELVEDGE_CLUSTER_SECRET", hide_env_values = true)]
+    cluster_secret: Option<String>,
+    /// Allow Durable Objects without a bucket. Only safe with a single runner.
+    #[arg(long, env = "SELVEDGE_ALLOW_LOCAL_DURABLE_OBJECTS")]
+    allow_local_durable_objects: bool,
+}
+
+#[derive(Args, Clone)]
+struct GatewayArgs {
+    #[command(flatten)]
+    internal: InternalArgs,
+    #[arg(long, env = "SELVEDGE_GATEWAY_LISTEN", default_value = "0.0.0.0:8080")]
+    listen: SocketAddr,
+    #[arg(long, env = "SELVEDGE_API_URL", default_value = "http://127.0.0.1:8787")]
+    api_url: String,
+    /// Runner agents, host:port, comma separated.
+    #[arg(long, env = "SELVEDGE_RUNNERS", value_delimiter = ',')]
+    runners: Vec<String>,
+    /// A DNS name resolving to every runner (headless Service), with --runner-port.
+    #[arg(long, env = "SELVEDGE_RUNNER_DNS")]
+    runner_dns: Option<String>,
+    #[arg(long, env = "SELVEDGE_RUNNER_PORT", default_value_t = 8789)]
+    runner_port: u16,
+    /// How many runners serve each account.
+    #[arg(long, env = "SELVEDGE_REPLICAS", default_value_t = 2)]
+    replicas: usize,
+    /// Trust X-Forwarded-For/-Proto from the load balancer in front.
+    #[arg(long, env = "SELVEDGE_TRUST_FORWARDED")]
+    trust_forwarded: bool,
+}
+
+#[derive(Args, Clone)]
+struct AllArgs {
+    #[command(flatten)]
+    api: ApiArgs,
+    #[arg(long, env = "SELVEDGE_DATA_LISTEN", default_value = "127.0.0.1:8788")]
+    data_listen: SocketAddr,
+    #[arg(long, env = "SELVEDGE_AGENT_LISTEN", default_value = "127.0.0.1:8789")]
+    agent_listen: SocketAddr,
+    #[arg(long, env = "SELVEDGE_GATEWAY_LISTEN", default_value = "0.0.0.0:8080")]
+    gateway_listen: SocketAddr,
+    #[arg(long, env = "SELVEDGE_WORKERD", default_value = "workerd")]
+    workerd: PathBuf,
+    #[arg(long, env = "SELVEDGE_STATE_DIR", default_value = "/var/lib/selvedge")]
+    state_dir: PathBuf,
+    #[arg(long, env = "SELVEDGE_RUN_DIR", default_value = "/run/selvedge")]
+    run_dir: PathBuf,
+    #[arg(long, env = "SELVEDGE_DO_BUCKET")]
+    do_bucket: Option<String>,
+    #[arg(long = "do-bucket-option", env = "SELVEDGE_DO_BUCKET_OPTIONS", value_delimiter = ',')]
+    do_bucket_options: Vec<String>,
+    #[arg(long, env = "SELVEDGE_CLUSTER_SECRET", hide_env_values = true)]
+    cluster_secret: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum AdminCommand {
+    /// Create an account and print its id and an account API token.
+    CreateAccount {
+        #[command(flatten)]
+        db: DbArgs,
+        name: String,
+    },
+}
+
+fn init_logging(json: bool) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if json {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = ctrl_c.await;
+    tracing::info!("shutting down");
+}
+
+async fn open_db(args: &DbArgs) -> Result<Db> {
+    let db = Db::connect(&args.database_url, args.database_pool).await?;
+    db.migrate().await?;
+    Ok(db)
+}
+
+fn blob_options() -> Vec<(String, String)> {
+    // object_store reads AWS_* itself; nothing extra by default.
+    vec![]
+}
+
+async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
+    let db = open_db(&args.db).await?;
+    if let Some(t) = &args.admin_token {
+        db.ensure_admin_token(t).await?;
+    }
+    Ok(Arc::new(ApiState {
+        db,
+        blobs: Blobs::open(&args.blob_url, &blob_options())?,
+        secrets: SecretBox::from_hex(&args.master_key)?,
+        internal_token: args.internal.internal_token.clone(),
+        workers_dev_zone: args.workers_dev_zone.clone(),
+    }))
+}
+
+async fn serve_axum(
+    listen: SocketAddr,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let listener =
+        tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+    tracing::info!(addr = %listen, "listening");
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    Ok(())
+}
+
+fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
+    let cluster = match (&a.do_bucket, &a.cluster_secret) {
+        (Some(bucket), Some(secret)) => Some(AgentCluster {
+            bucket: bucket.clone(),
+            bucket_options: a.do_bucket_options.clone(),
+            bind_host: a.cluster_host.clone(),
+            secret: secret.clone(),
+        }),
+        (Some(_), None) => anyhow::bail!("--do-bucket needs --cluster-secret"),
+        _ => None,
+    };
+    Ok(AgentConfig {
+        listen: a.listen,
+        api_url: a.api_url.trim_end_matches('/').to_owned(),
+        data_addr: a.data_addr.clone(),
+        internal_token: a.internal.internal_token.clone(),
+        workerd: a.workerd.clone(),
+        state_dir: a.state_dir.clone(),
+        run_dir: a.run_dir.clone(),
+        idle_timeout: Duration::from_secs(a.idle_timeout),
+        cluster,
+        allow_local_durable_objects: a.allow_local_durable_objects,
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    init_logging(cli.log_json);
+    match cli.command {
+        Command::Migrate(db) => {
+            open_db(&db).await?;
+            tracing::info!("migrations applied");
+        }
+        Command::Admin(AdminCommand::CreateAccount { db, name }) => {
+            let db = open_db(&db).await?;
+            let account = db.create_account(&name).await?;
+            let token = db.create_token(Some(&account.id), "initial").await?;
+            println!("account_id={}\napi_token={token}", account.id);
+        }
+        Command::Api(args) => {
+            let state = api_state(&args).await?;
+            serve_axum(args.listen, selvedge_server::api::router(state), shutdown_signal()).await?;
+        }
+        Command::Data(args) => {
+            let db = open_db(&args.db).await?;
+            let state =
+                selvedge_server::data::DataState::new(db.clone(), args.internal.internal_token.clone());
+            tokio::spawn(purge_expired(db));
+            serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
+        }
+        Command::Agent(args) => {
+            selvedge_server::agent::run(agent_config(&args)?, shutdown_signal()).await?;
+        }
+        Command::Gateway(args) => {
+            let runners = match args.runner_dns {
+                Some(host) => Runners::Dns { host, port: args.runner_port },
+                None => Runners::Static(args.runners),
+            };
+            selvedge_server::gateway::run(
+                GatewayConfig {
+                    listen: args.listen,
+                    api_url: args.api_url.trim_end_matches('/').to_owned(),
+                    internal_token: args.internal.internal_token,
+                    runners,
+                    replicas: args.replicas,
+                    trust_forwarded: args.trust_forwarded,
+                },
+                shutdown_signal(),
+            )
+            .await?;
+        }
+        Command::All(args) => run_all(args).await?,
+    }
+    Ok(())
+}
+
+async fn purge_expired(db: Db) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        match db.kv_purge_expired().await {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(n, "purged expired KV entries"),
+            Err(e) => tracing::warn!(error = %e, "purging expired KV entries failed"),
+        }
+    }
+}
+
+/// Every role in one process, for a single node.
+async fn run_all(args: AllArgs) -> Result<()> {
+    let state = api_state(&args.api).await?;
+    let token = args.api.internal.internal_token.clone();
+    let (tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let stop = |tx: &tokio::sync::broadcast::Sender<()>| {
+        let mut rx = tx.subscribe();
+        async move {
+            let _ = rx.recv().await;
+        }
+    };
+    let api_url = format!("http://{}", loopback(args.api.listen));
+    let data = selvedge_server::data::DataState::new(state.db.clone(), token.clone());
+    tokio::spawn(purge_expired(state.db.clone()));
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
+    tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));
+    let agent = agent_config(&AgentArgs {
+        internal: args.api.internal.clone(),
+        listen: args.agent_listen,
+        api_url: api_url.clone(),
+        data_addr: loopback(args.data_listen).to_string(),
+        workerd: args.workerd,
+        state_dir: args.state_dir,
+        run_dir: args.run_dir,
+        idle_timeout: 600,
+        do_bucket: args.do_bucket,
+        do_bucket_options: args.do_bucket_options,
+        cluster_host: "127.0.0.1".into(),
+        cluster_secret: args.cluster_secret,
+        allow_local_durable_objects: true,
+    })?;
+    tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
+    tasks.spawn(selvedge_server::gateway::run(
+        GatewayConfig {
+            listen: args.gateway_listen,
+            api_url,
+            internal_token: token,
+            runners: Runners::Static(vec![loopback(args.agent_listen).to_string()]),
+            replicas: 1,
+            trust_forwarded: false,
+        },
+        stop(&tx),
+    ));
+    tokio::select! {
+        () = shutdown_signal() => {}
+        Some(r) = tasks.join_next() => {
+            r??;
+            anyhow::bail!("a role exited unexpectedly");
+        }
+    }
+    let _ = tx.send(());
+    while let Some(r) = tasks.join_next().await {
+        r??;
+    }
+    Ok(())
+}
+
+/// A wildcard listen address, as a loopback address to connect to.
+fn loopback(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_unspecified() { SocketAddr::from(([127, 0, 0, 1], addr.port())) } else { addr }
+}

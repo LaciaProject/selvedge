@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/LaciaProject/selvedge"
+rust-version = "1.88"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# axum handlers return `Result<Response, Response>`; nested `if let` reads better here.
+result_large_err = "allow"
+collapsible_if = "allow"
+
+[workspace.dependencies]
+selvedge-core = { path = "crates/selvedge-core" }
+selvedge-store = { path = "crates/selvedge-store" }
+selvedge-workerd = { path = "crates/selvedge-workerd" }
+selvedge-server = { path = "crates/selvedge-server" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["multipart", "macros"] }
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+deadpool-postgres = "0.14"
+futures = "0.3"
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server"] }
+object_store = { version = "0.12", features = ["aws"] }
+percent-encoding = "2"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+aes-gcm = "0.10"
+url = "2"
+multer = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

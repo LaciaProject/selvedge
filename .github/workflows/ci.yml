@@ -64,6 +64,14 @@ jobs:
         env:
           SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
         run: test/e2e/single-node.sh
+      - name: Single-node end-to-end as root, one Linux user per account
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+        run: |
+          # Account users must be able to run workerd: outside the home directory.
+          sudo install -m 755 "$SELVEDGE_WORKERD" /usr/local/bin/workerd
+          sudo --preserve-env=SELVEDGE_DATABASE_URL env "PATH=$PATH" SELVEDGE_WORKERD=/usr/local/bin/workerd \
+            SELVEDGE_ACCOUNT_UIDS=10000-59999 PORT_BASE=28400 test/e2e/single-node.sh
       - name: Start SeaweedFS (S3 with conditional writes)
         run: |
           docker run -d --name seaweedfs -p 127.0.0.1:29000:8333 chrislusf/seaweedfs:4.50 \

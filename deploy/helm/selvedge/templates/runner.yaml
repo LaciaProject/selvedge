@@ -20,6 +20,9 @@ spec:
       {{- with .Values.runner.runtimeClassName }}
       runtimeClassName: {{ . }}
       {{- end }}
+      {{- if eq (toString .Values.runner.hostUsers) "false" }}
+      hostUsers: false
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.runner.terminationGracePeriodSeconds }}
       containers:
         - name: runner
@@ -42,6 +45,10 @@ spec:
               value: {{ .Values.runner.drainDelaySeconds | quote }}
             - name: SELVEDGE_ASSET_CACHE_MB
               value: {{ .Values.runner.assetCacheMB | quote }}
+            {{- if .Values.runner.accountUsers.enabled }}
+            - name: SELVEDGE_ACCOUNT_UIDS
+              value: {{ .Values.runner.accountUsers.uidRange | quote }}
+            {{- end }}
             # Durable Objects: workerd cluster mode over the object store.
             - name: SELVEDGE_DO_BUCKET
               value: s3://{{ .Values.objectStore.bucket }}/do
@@ -60,7 +67,14 @@ spec:
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 1 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.runner.resources | nindent 12 }}
+          {{- if .Values.runner.accountUsers.enabled }}
+          # The agent runs as root with only what it needs to start each
+          # account's workerd as its own user; workerd keeps no capabilities.
+          securityContext:
+            {{- toYaml (mergeOverwrite (deepCopy .Values.securityContext) (dict "runAsUser" 0 "runAsGroup" 0 "runAsNonRoot" false "capabilities" (dict "drop" (list "ALL") "add" (list "SETUID" "SETGID" "CHOWN" "DAC_OVERRIDE" "FOWNER" "KILL")))) | nindent 12 }}
+          {{- else }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - { name: state, mountPath: /var/lib/selvedge }
             - { name: run, mountPath: /run/selvedge }

@@ -86,6 +86,7 @@ pub struct Manager {
     last_used: StdMutex<HashMap<AccountId, Instant>>,
     /// Scripts someone is tailing, from the change feed.
     tails: super::bindings::Tailed,
+    uids: Option<super::uids::Uids>,
 }
 
 pub enum Lookup {
@@ -95,8 +96,14 @@ pub enum Lookup {
 }
 
 impl Manager {
-    pub fn new(cfg: Arc<AgentConfig>, max_date: String) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(cfg: Arc<AgentConfig>, max_date: String) -> Result<Arc<Self>> {
+        let uids = cfg
+            .account_uids
+            .clone()
+            .map(|r| super::uids::Uids::open(r, cfg.state_dir.join("uids.json")))
+            .transpose()?;
+        Ok(Arc::new(Self {
+            uids,
             cfg,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
@@ -112,7 +119,7 @@ impl Manager {
             accounts: StdMutex::new(HashMap::new()),
             last_used: StdMutex::new(HashMap::new()),
             tails: super::bindings::Tailed::default(),
-        })
+        }))
     }
 
     fn account(&self, account: &AccountId) -> Arc<AccountState> {
@@ -252,6 +259,14 @@ impl Manager {
             return Ok(Lookup::NotFound);
         }
 
+        let uid = self.uids.as_ref().map(|u| u.uid(account)).transpose()?;
+        let account_dir = self.cfg.state_dir.join("a").join(account.as_str());
+        for dir in [self.account_run_dir(account), account_dir.clone()] {
+            std::fs::create_dir_all(&dir)?;
+            if let Some(uid) = uid {
+                super::uids::own(&dir, uid, 0o700)?;
+            }
+        }
         let (binding_socket, starts) = {
             let mut slot = state.slot.lock().await;
             if slot.binding_socket.is_none() {
@@ -262,6 +277,7 @@ impl Manager {
                     &p,
                     self.tails.clone(),
                     self.http.clone(),
+                    uid,
                 )?;
                 slot.binding_socket = Some(p);
             }
@@ -287,7 +303,6 @@ impl Manager {
         }
 
         let tag = format!("g{}-{starts}", bundle.generation);
-        let account_dir = self.cfg.state_dir.join("a").join(account.as_str());
         let do_dir =
             if local_do { account_dir.join("do-local") } else { account_dir.join(format!("do-{tag}")) };
         let opts = RenderOptions {
@@ -304,10 +319,24 @@ impl Manager {
             std::fs::read(blob_dir.join(sha)).with_context(|| format!("blob {sha}"))
         };
         let rendered = render(&bundle, &opts, &source)?;
+        if let Some(uid) = uid {
+            std::fs::create_dir_all(&opts.socket_dir)?;
+            super::uids::own(&opts.socket_dir, uid, 0o700)?;
+            super::uids::own_tree(&opts.dir, uid)?;
+            if do_dir.exists() {
+                super::uids::own_tree(&do_dir, uid)?;
+            }
+        }
         let label = format!("{account}/{tag}");
-        let process =
-            WorkerdProcess::start(&self.cfg.workerd, &rendered, &workerd_env(), &label, READY_TIMEOUT)
-                .await?;
+        let process = WorkerdProcess::start_as(
+            &self.cfg.workerd,
+            &rendered,
+            &workerd_env(),
+            &label,
+            READY_TIMEOUT,
+            uid,
+        )
+        .await?;
         tracing::info!(%account, generation = bundle.generation, "account process ready");
         let live = Arc::new(Live {
             generation: bundle.generation,

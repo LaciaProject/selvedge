@@ -7,6 +7,7 @@
 
 mod bindings;
 mod manager;
+pub mod uids;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -56,15 +57,33 @@ pub struct AgentConfig {
     pub drain_delay: Duration,
     /// Bound on the local static asset cache (`<state_dir>/assets`).
     pub asset_cache_bytes: u64,
+    /// Run each account's workerd as its own user, from this range.
+    pub account_uids: Option<std::ops::Range<u32>>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
+    if uids::euid() == 0 && cfg.account_uids.is_none() {
+        anyhow::bail!(
+            "the agent is running as root without --account-uids: tenant code would run as root. \
+             Set --account-uids (e.g. 10000-59999) or run the agent as an unprivileged user"
+        );
+    }
     std::fs::create_dir_all(&cfg.state_dir)?;
     std::fs::create_dir_all(&cfg.run_dir)?;
+    if cfg.account_uids.is_some() {
+        uids::check_executable_by_others(&cfg.workerd)?;
+        // Account users pass through these to their own 0700 directories, but
+        // cannot list them.
+        let accounts = cfg.state_dir.join("a");
+        std::fs::create_dir_all(&accounts)?;
+        for dir in [&cfg.state_dir, &accounts, &cfg.run_dir] {
+            uids::traversable(dir)?;
+        }
+    }
     let max_date = selvedge_workerd::workerd_max_date(&cfg.workerd).await?;
     tracing::info!(workerd = %cfg.workerd.display(), %max_date, "agent starting");
     let cfg = Arc::new(cfg);
-    let manager = Manager::new(cfg.clone(), max_date);
+    let manager = Manager::new(cfg.clone(), max_date)?;
 
     let evictor = {
         let manager = manager.clone();

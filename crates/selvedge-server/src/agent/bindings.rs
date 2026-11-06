@@ -37,12 +37,17 @@ pub fn serve(
     path: &Path,
     tailed: Tailed,
     http: reqwest::Client,
+    uid: Option<u32>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(path);
     let listener = tokio::net::UnixListener::bind(path)?;
+    if let Some(uid) = uid {
+        // Only the account's own process may connect.
+        super::uids::own(path, uid, 0o600)?;
+    }
     let account_header = HeaderValue::from_str(account.as_str())?;
     let auth = HeaderValue::from_str(&format!("Bearer {}", cfg.internal_token))?;
     let cache_dir = cfg.state_dir.join("assets").join(account.as_str());

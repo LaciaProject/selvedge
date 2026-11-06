@@ -28,7 +28,8 @@ compatibility date later than that release supports is lowered to the newest one
 | KV | Supported | See below |
 | Durable Objects | Supported | See below |
 | R2 | Supported | See below |
-| D1, Queues, Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
+| D1 | Supported | See below |
+| Queues, Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
 
 ## KV
 
@@ -61,6 +62,26 @@ Differences:
 - SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
 - Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
   the same size is not enforced.
+
+## D1
+
+The binding is workerd's own D1 client (`cloudflare-internal:d1-api`), backed by a Selvedge system
+Worker in which each database is a Durable Object with SQLite storage. Databases therefore have one
+writer, durable commits and failover exactly like Durable Objects.
+
+Supported: `prepare`/`bind` (numbers, strings, null, booleans, blobs), `first`, `all`, `run`, `raw`
+(with `columnNames`), `batch` (one transaction: a failing statement rolls the whole batch back) and
+`exec`. The REST API serves `wrangler d1 create`, `list`, `info`, `delete`, `execute --remote
+--command` and `migrations apply --remote`.
+
+Differences:
+
+- SQL runs on Durable Object SQLite, so the same statements are refused as in a Durable Object
+  (for example `BEGIN`/`COMMIT` and most `PRAGMA`s; D1 refuses these too).
+- Not available yet: read replication and sessions (`withSession` works but always reads from the
+  primary), Time Travel, `wrangler d1 export`, and `execute --file` for large imports.
+- `meta.rows_read` and `meta.rows_written` count what SQLite reports, which can differ from D1's
+  billing counters.
 
 ## Durable Objects
 

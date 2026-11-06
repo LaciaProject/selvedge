@@ -295,7 +295,8 @@ Selvedge 只需要做配置生成、凭据和测试。
 | Durable Objects（cluster 模式）：fetch、RPC、SQLite、alarm、WebSocket hibernation | 完成 | 两 runner 测试：单一所有者、runner 崩溃后 20 秒内全部恢复、无丢写 |
 | Helm chart（minimal / ha）、镜像（官方 workerd + sha512 校验）、NetworkPolicy | 完成 | `helm lint`；kind 三可用区测试在 GitHub Actions 上跑 |
 | R2：绑定协议（含 multipart、条件请求、范围读取）、REST API、旧内容延迟回收 | 完成 | 端到端测试（绑定 + `wrangler r2`） |
-| D1、Queues、Cron、Workflows、Static Assets | 未开始 | |
+| D1：官方 `d1-api` 绑定 + 系统 worker（每个数据库一个 SQLite DO，自动获得 cluster 模式的高可用）、REST API（create / execute / migrations） | 完成 | 绑定和 wrangler 的端到端测试；runner 崩溃后数据仍在 |
+| Queues、Cron、Workflows、Static Assets | 未开始 | |
 | 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 
 Spike 结论：

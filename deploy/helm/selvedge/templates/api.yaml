@@ -28,6 +28,8 @@ spec:
               value: 0.0.0.0:8787
             - name: SELVEDGE_BLOB_URL
               value: s3://{{ .Values.objectStore.bucket }}/blobs
+            - name: SELVEDGE_GATEWAY_URL
+              value: http://{{ $name }}-gateway:{{ .Values.gateway.service.port }}
             - name: SELVEDGE_WORKERS_DEV_ZONE
               value: {{ .Values.workersDevZone | quote }}
             - name: SELVEDGE_MASTER_KEY

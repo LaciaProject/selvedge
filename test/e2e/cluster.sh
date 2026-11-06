@@ -17,6 +17,7 @@ export SELVEDGE_ADMIN_TOKEN=admin-$(openssl rand -hex 8)
 export SELVEDGE_WORKERS_DEV_ZONE=workers.test
 export SELVEDGE_API_LISTEN=127.0.0.1:$((P + 87)) SELVEDGE_API_URL=http://127.0.0.1:$((P + 87))
 export SELVEDGE_DATA_LISTEN=127.0.0.1:$((P + 88)) SELVEDGE_DATA_ADDR=127.0.0.1:$((P + 88))
+export SELVEDGE_GATEWAY_URL=http://127.0.0.1:$((P + 80))
 export SELVEDGE_DO_BUCKET="s3://${DO_S3_BUCKET:-selvedge-do}/cluster-$$"
 export SELVEDGE_DO_BUCKET_OPTIONS="aws_endpoint=${DO_S3_ENDPOINT:-http://127.0.0.1:29000},aws_region=us-east-1,aws_access_key_id=${DO_S3_KEY:-any},aws_secret_access_key=${DO_S3_SECRET:-any}"
 export SELVEDGE_CLUSTER_SECRET=$(openssl rand -hex 32)
@@ -82,6 +83,12 @@ for i in $(seq 1 10); do seq_out="$seq_out $(get /)"; done
 check "one owner across runners" " 1 2 3 4 5 6 7 8 9 10" "$seq_out"
 check "JS RPC with SQLite storage" "1" "$(get /rpc)"
 
+# A D1 database lives in a Durable Object too.
+DB=$(curl -sf -X POST "$API/accounts/$ACCOUNT/d1/database" -H "Authorization: Bearer $TOKEN" -d '{"name":"crash"}' | json '["result"]["uuid"]')
+d1() { curl -sf -X POST "$API/accounts/$ACCOUNT/d1/database/$DB/query" -H "Authorization: Bearer $TOKEN" -d "$1"; }
+d1 '{"sql":"CREATE TABLE t (v TEXT)"}' > /dev/null
+d1 '{"sql":"INSERT INTO t VALUES (?)","params":["kept"]}' > /dev/null
+
 # Spread objects over both runners, then kill one runner and its workerd.
 for n in a b c d e f g h; do get "/?name=$n" > /dev/null; done
 kill -9 "$PID_a1"; pkill -9 -f "$WORK/a1/" || true
@@ -102,4 +109,13 @@ for n in a b c d e f g h; do
 done
 echo "     every object was back within $(( $(date +%s) - start_ts ))s (workerd's cluster lease is 20s)"
 check "the first object kept its count" "11" "$(retry_get /)"
+d1_value() {
+  local deadline=$(( $(date +%s) + 45 )) out
+  while :; do
+    out=$(d1 '{"sql":"SELECT v FROM t"}' 2>/dev/null | json '["result"][0]["results"][0]["v"]' 2>/dev/null) && { echo "$out"; return; }
+    [ "$(date +%s)" -ge "$deadline" ] && { echo "unavailable"; return; }
+    sleep 0.5
+  done
+}
+check "D1 data survives a runner crash" "kept" "$(d1_value)"
 echo "all cluster checks passed"

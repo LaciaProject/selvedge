@@ -104,6 +104,23 @@ check "R2 conditional puts" '[null,true,null]' "[$(r2 '["onlyIfMatchFails"]'),$(
 check "R2 multipart upload" '[5242884,true,"aatail",true]' "[$(r2 '["multipart.size"]'),$(r2 '["multipart.etag"]'),$(r2 '["multipart.tail"]'),$(r2 '["multipart.minPartSize"]')]"
 check "R2 object from wrangler is readable" "from wrangler" "$(wrangler r2 object get e2e-files/seed.txt --pipe --remote 2>/dev/null)"
 
+# D1: a database through wrangler, migrations, then the binding from a Worker.
+wrangler d1 create e2e-db > /dev/null 2>&1
+DB=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/d1/database?name=e2e-db" | json '["result"][0]["uuid"]')
+mkdir -p "$APP/migrations"
+printf "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT);\nINSERT INTO posts (title) VALUES ('first');\n" > "$APP/migrations/0001_init.sql"
+sed -i "s|\"kv_namespaces\"|\"d1_databases\": [{ \"binding\": \"DB\", \"database_name\": \"e2e-db\", \"database_id\": \"$DB\" }],\n  \"kv_namespaces\"|" "$APP/wrangler.jsonc"
+wrangler d1 migrations apply e2e-db --remote > "$WORK/migrate.log" 2>&1 || { cat "$WORK/migrate.log"; exit 1; }
+check "wrangler d1 execute sees the migration" "1" \
+  "$(curl -sf -H "Authorization: Bearer $TOKEN" -X POST "$API/accounts/$ACCOUNT/d1/database/$DB/query" -d '{"sql":"SELECT count(*) AS n FROM posts"}' | json '["result"][0]["results"][0]["n"]')"
+curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/d1test" -H "Authorization: Bearer $TOKEN" \
+  -F "metadata={\"main_module\":\"index.js\",\"compatibility_date\":\"2026-10-01\",\"bindings\":[{\"type\":\"d1\",\"name\":\"DB\",\"id\":\"$DB\"}]};type=application/json" \
+  -F "index.js=@$E2E/fixtures/d1.js;filename=index.js;type=application/javascript+module" > /dev/null
+settle
+check "D1 binding: prepare, bind, run, first, blobs, batch, all, raw, rollback, errors" \
+  '{"insert":[true,1,true],"first":"ada","blob":[1,2,3],"batch":3,"all":["ada","grace","linus"],"raw":[["id","name"],[1,"ada"]],"rollback":true,"error":true}' \
+  "$(curl -s -H "Host: d1test.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/run")"
+
 wrangler delete > /dev/null 2>&1
 settle
 check "delete unroutes the hostname" "404" "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$GATEWAY_PORT/")"

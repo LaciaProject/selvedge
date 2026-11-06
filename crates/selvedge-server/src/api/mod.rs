@@ -2,6 +2,7 @@
 //! internal endpoints for agents and gateways.
 
 mod accounts;
+mod d1;
 mod domains;
 mod internal;
 mod kv;
@@ -27,6 +28,9 @@ pub struct ApiState {
     pub internal_token: String,
     /// Zone for `<script>.<subdomain>.<zone>` hostnames, like workers.dev.
     pub workers_dev_zone: Option<String>,
+    /// The gateway, for requests the API sends into account processes (D1).
+    pub gateway_url: Option<String>,
+    pub http: reqwest::Client,
 }
 
 pub type State = Arc<ApiState>;
@@ -42,6 +46,7 @@ pub fn router(state: State) -> Router {
         .merge(domains::routes())
         .merge(versions::routes())
         .merge(r2::routes())
+        .merge(d1::routes())
         .merge(internal::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(no_method)

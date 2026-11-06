@@ -82,6 +82,10 @@ pub enum Binding {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         script_name: Option<String>,
     },
+    D1 {
+        name: String,
+        id: String,
+    },
     R2Bucket {
         name: String,
         bucket_name: String,
@@ -93,7 +97,6 @@ pub enum Binding {
 /// Binding types Selvedge knows about but does not implement yet. An upload that
 /// uses one is rejected instead of silently missing the binding.
 const NOT_YET: &[&str] = &[
-    "d1",
     "queue",
     "analytics_engine",
     "ai",
@@ -120,7 +123,8 @@ impl Binding {
             | Self::KvNamespace { name, .. }
             | Self::Service { name, .. }
             | Self::DurableObjectNamespace { name, .. }
-            | Self::R2Bucket { name, .. } => name,
+            | Self::R2Bucket { name, .. }
+            | Self::D1 { name, .. } => name,
         }
     }
 
@@ -159,6 +163,10 @@ pub struct AccountBundle {
     /// Increases whenever anything in the bundle changes.
     pub generation: i64,
     pub scripts: Vec<BundleScript>,
+    /// Every D1 database of the account, so the REST API can reach one even
+    /// when no script binds it.
+    #[serde(default)]
+    pub d1_databases: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,7 +196,9 @@ mod tests {
         assert!(matches!(kv, Binding::KvNamespace { .. }));
         let r2 = Binding::parse(&json!({"type": "r2_bucket", "name": "B", "bucket_name": "files"})).unwrap();
         assert!(matches!(r2, Binding::R2Bucket { .. }));
-        let err = Binding::parse(&json!({"type": "d1", "name": "DB", "id": "x"})).unwrap_err();
+        let d1 = Binding::parse(&json!({"type": "d1", "name": "DB", "id": "x"})).unwrap();
+        assert!(matches!(d1, Binding::D1 { .. }));
+        let err = Binding::parse(&json!({"type": "queue", "name": "Q", "queue_name": "x"})).unwrap_err();
         assert!(err.contains("not supported"));
         let err =
             Binding::parse(&json!({"type": "kv_namespace", "name": "KV", "namespace_id": "x"})).unwrap_err();

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use selvedge_core::{AccountBundle, AccountId, Binding};
+use selvedge_core::{AccountBundle, AccountId};
 use selvedge_workerd::{ClusterOptions, RenderOptions, WorkerdProcess, render};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -234,7 +234,7 @@ impl Manager {
         }
 
         let bundle = self.bundle(account).await?;
-        if bundle.scripts.is_empty() {
+        if bundle.scripts.is_empty() && bundle.d1_databases.is_empty() {
             stop_current(state).await;
             state.slot.lock().await.checked_at = Some(Instant::now());
             return Ok(Lookup::NotFound);
@@ -251,10 +251,7 @@ impl Manager {
             (slot.binding_socket.clone().expect("set above"), slot.starts)
         };
 
-        let has_do = bundle
-            .scripts
-            .iter()
-            .any(|s| s.bindings.iter().any(|b| matches!(b, Binding::DurableObjectNamespace { .. })));
+        let has_do = selvedge_workerd::render::uses_durable_objects(&bundle);
         let cluster = if has_do { self.cluster_options(account) } else { None };
         if has_do && cluster.is_none() && !self.cfg.allow_local_durable_objects {
             bail!(

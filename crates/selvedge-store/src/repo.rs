@@ -62,6 +62,13 @@ pub struct VersionInfo {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct D1Info {
+    pub id: String,
+    pub name: String,
+    pub created_on: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct KvNamespace {
     pub id: NamespaceId,
     pub title: String,
@@ -610,7 +617,77 @@ impl Db {
                 name,
             });
         }
-        Ok(Some(AccountBundle { account_id: account.clone(), generation: gen_row.get(0), scripts }))
+        let d1_databases = tx_d1_ids(&**self.client().await?, account).await?;
+        Ok(Some(AccountBundle {
+            account_id: account.clone(),
+            generation: gen_row.get(0),
+            scripts,
+            d1_databases,
+        }))
+    }
+
+    // ---- D1 databases ----
+
+    /// Creates a database; `None` if the name is taken. Bumps the generation so
+    /// runners start the D1 backend.
+    pub async fn create_d1(&self, account: &AccountId, name: &str) -> Result<Option<D1Info>> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let id = selvedge_core::new_version_id();
+        let r = tx
+            .query_one(
+                "INSERT INTO d1_databases (id, account_id, name) VALUES ($1, $2, $3) RETURNING created_at",
+                &[&id, &account.as_str(), &name],
+            )
+            .await;
+        let created = match r {
+            Ok(row) => row.get(0),
+            Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        bump_generation(&tx, account).await?;
+        tx.commit().await?;
+        Ok(Some(D1Info { id, name: name.to_owned(), created_on: ts(created) }))
+    }
+
+    pub async fn d1_databases(&self, account: &AccountId) -> Result<Vec<D1Info>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id, name, created_at FROM d1_databases WHERE account_id = $1 ORDER BY name",
+                &[&account.as_str()],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| D1Info { id: r.get(0), name: r.get(1), created_on: ts(r.get(2)) }).collect())
+    }
+
+    /// A database by id or by name.
+    pub async fn d1_database(&self, account: &AccountId, id_or_name: &str) -> Result<Option<D1Info>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT id, name, created_at FROM d1_databases WHERE account_id = $1 AND (id = $2 OR name = $2)",
+                &[&account.as_str(), &id_or_name],
+            )
+            .await?;
+        Ok(row.map(|r| D1Info { id: r.get(0), name: r.get(1), created_on: ts(r.get(2)) }))
+    }
+
+    pub async fn delete_d1(&self, account: &AccountId, id: &str) -> Result<bool> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let n = tx
+            .execute("DELETE FROM d1_databases WHERE account_id = $1 AND id = $2", &[&account.as_str(), &id])
+            .await?;
+        if n > 0 {
+            bump_generation(&tx, account).await?;
+        }
+        tx.commit().await?;
+        Ok(n > 0)
     }
 
     // ---- KV namespaces ----
@@ -885,7 +962,15 @@ fn binding_type(b: &Binding) -> &'static str {
         Binding::Service { .. } => "service",
         Binding::DurableObjectNamespace { .. } => "durable_object_namespace",
         Binding::R2Bucket { .. } => "r2_bucket",
+        Binding::D1 { .. } => "d1",
     }
+}
+
+async fn tx_d1_ids(client: &tokio_postgres::Client, account: &AccountId) -> Result<Vec<String>> {
+    let rows = client
+        .query("SELECT id FROM d1_databases WHERE account_id = $1 ORDER BY id", &[&account.as_str()])
+        .await?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
 }
 
 async fn bump_generation(tx: &tokio_postgres::Transaction<'_>, account: &AccountId) -> Result<()> {

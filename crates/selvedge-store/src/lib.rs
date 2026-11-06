@@ -11,5 +11,7 @@ pub mod secrets;
 
 pub use blobs::Blobs;
 pub use db::Db;
-pub use repo::{Account, KvEntry, KvKey, KvNamespace, NewVersion, Principal, Route, ScriptInfo, VersionInfo};
+pub use repo::{
+    Account, D1Info, KvEntry, KvKey, KvNamespace, NewVersion, Principal, Route, ScriptInfo, VersionInfo,
+};
 pub use secrets::SecretBox;

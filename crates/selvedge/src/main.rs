@@ -81,6 +81,9 @@ struct ApiArgs {
     /// Zone for <script>.<subdomain>.<zone> hostnames.
     #[arg(long, env = "SELVEDGE_WORKERS_DEV_ZONE")]
     workers_dev_zone: Option<String>,
+    /// The gateway, for API requests into account processes (D1 queries).
+    #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
+    gateway_url: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -245,6 +248,11 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         secrets: SecretBox::from_hex(&args.master_key)?,
         internal_token: args.internal.internal_token.clone(),
         workers_dev_zone: args.workers_dev_zone.clone(),
+        gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
+        http: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(60))
+            .build()?,
     }))
 }
 
@@ -368,7 +376,10 @@ async fn collect_garbage(db: Db, blobs: Blobs) {
 }
 
 /// Every role in one process, for a single node.
-async fn run_all(args: AllArgs) -> Result<()> {
+async fn run_all(mut args: AllArgs) -> Result<()> {
+    if args.api.gateway_url.is_none() {
+        args.api.gateway_url = Some(format!("http://{}", loopback(args.gateway_listen)));
+    }
     let state = api_state(&args.api).await?;
     let token = args.api.internal.internal_token.clone();
     let (tx, _) = tokio::sync::broadcast::channel::<()>(1);

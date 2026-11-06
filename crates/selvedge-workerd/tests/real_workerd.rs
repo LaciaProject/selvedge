@@ -36,6 +36,11 @@ export default {
     const url = new URL(req.url);
     if (url.pathname === "/other") return env.OTHER.fetch("http://x/");
     if (url.pathname === "/missing") return env.MISSING.fetch("http://x/");
+    if (url.pathname === "/d1") {
+      await env.DB.exec("CREATE TABLE IF NOT EXISTS t (v INTEGER)");
+      await env.DB.prepare("INSERT INTO t VALUES (?)").bind(41).run();
+      return new Response(String((await env.DB.prepare("SELECT sum(v) + 1 AS s FROM t").first("s"))));
+    }
     return new Response(greet(env.NAME) + " " + env.CONF.n + " " + env.SECRET.length);
   }
 };"#;
@@ -64,6 +69,7 @@ export default {
                     Binding::SecretText { name: "SECRET".into(), text: Some("abc".into()) },
                     Binding::Service { name: "OTHER".into(), service: "other".into(), entrypoint: None },
                     Binding::Service { name: "MISSING".into(), service: "gone".into(), entrypoint: None },
+                    Binding::D1 { name: "DB".into(), id: "db-1".into() },
                 ],
             },
             BundleScript {
@@ -76,6 +82,7 @@ export default {
                 bindings: vec![],
             },
         ],
+        d1_databases: vec!["db-1".into()],
     };
     let opts = RenderOptions {
         dir: dir.path().join("cfg"),
@@ -100,5 +107,7 @@ export default {
     assert!(get(&main_sock, "/other").await.ends_with("from other"));
     let missing = get(&main_sock, "/missing").await;
     assert!(missing.starts_with("HTTP/1.1 503"), "{missing}");
+    let d1 = get(&main_sock, "/d1").await;
+    assert!(d1.ends_with("\r\n\r\n42") || d1.ends_with("42"), "{d1}");
     proc.stop(Duration::from_secs(5)).await;
 }

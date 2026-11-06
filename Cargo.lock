@@ -1801,6 +1801,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "reqwest",
  "selvedge-server",
  "selvedge-store",
  "tokio",

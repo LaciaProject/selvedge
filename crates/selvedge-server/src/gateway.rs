@@ -211,14 +211,30 @@ async fn handle(
     if req.uri().path() == "/__selvedge/healthz" {
         return proxy::full(StatusCode::OK, "ok");
     }
-    let Some(host) = hostname(&req) else {
-        return proxy::full(StatusCode::BAD_REQUEST, "missing Host header");
+    // Platform components (the API) may name the account and script directly.
+    let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let internal = header(TOKEN_HEADER)
+        .is_some_and(|t| crate::constant_time_eq(t.as_bytes(), cfg.internal_token.as_bytes()));
+    let direct = match (internal, header(ACCOUNT_HEADER), header(SCRIPT_HEADER)) {
+        (true, Some(account), Some(service)) => {
+            account.parse().ok().map(|account_id| Route { hostname: String::new(), account_id, service })
+        }
+        _ => None,
     };
-    let Some(route) = shared.routes.read().expect("poisoned").get(&host).cloned() else {
-        return proxy::full(
-            StatusCode::NOT_FOUND,
-            "There is nothing here yet. (Selvedge: no Worker is routed for this hostname)",
-        );
+    let route = match direct {
+        Some(r) => r,
+        None => {
+            let Some(host) = hostname(&req) else {
+                return proxy::full(StatusCode::BAD_REQUEST, "missing Host header");
+            };
+            let Some(route) = shared.routes.read().expect("poisoned").get(&host).cloned() else {
+                return proxy::full(
+                    StatusCode::NOT_FOUND,
+                    "There is nothing here yet. (Selvedge: no Worker is routed for this hostname)",
+                );
+            };
+            route
+        }
     };
 
     let headers = req.headers_mut();

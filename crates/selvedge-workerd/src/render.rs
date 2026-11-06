@@ -24,6 +24,25 @@ pub const KV_NAMESPACE_HEADER: &str = "x-selvedge-kv-namespace";
 /// The header carrying the R2 bucket name on binding requests.
 pub const R2_BUCKET_HEADER: &str = "x-selvedge-r2-bucket";
 
+/// The system worker behind D1 bindings and the D1 REST API.
+pub const D1_SERVICE: &str = "selvedge-d1";
+const D1_WORKER: &str = include_str!("d1.js");
+
+/// Whether a bundle needs the D1 system worker.
+pub fn uses_d1(bundle: &AccountBundle) -> bool {
+    !bundle.d1_databases.is_empty()
+        || bundle.scripts.iter().any(|s| s.bindings.iter().any(|b| matches!(b, Binding::D1 { .. })))
+}
+
+/// Whether a bundle needs Durable Object storage (and, with a bucket, cluster mode).
+pub fn uses_durable_objects(bundle: &AccountBundle) -> bool {
+    uses_d1(bundle)
+        || bundle
+            .scripts
+            .iter()
+            .any(|s| s.bindings.iter().any(|b| matches!(b, Binding::DurableObjectNamespace { .. })))
+}
+
 const MISSING_SERVICE: &str = "selvedge-missing";
 const MISSING_WORKER: &str = "export default { fetch() { return new Response(\
 'Service binding target is not deployed', { status: 503 }); } };";
@@ -194,7 +213,27 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(MISSING_WORKER),
         ));
     }
-    if !do_classes.is_empty() {
+    let d1 = uses_d1(bundle);
+    if d1 {
+        std::fs::write(opts.dir.join("m").join("selvedge-d1.js"), D1_WORKER)?;
+        services.push(format!(
+            "(name = {}, worker = (modules = [(name = \"d1.js\", esModule = embed \"m/selvedge-d1.js\")], \
+             compatibilityDate = \"2025-09-01\", bindings = [(name = \"D1\", durableObjectNamespace = \"D1Database\")], \
+             durableObjectNamespaces = [(className = \"D1Database\", uniqueKey = {}, enableSql = true)], \
+             durableObjectStorage = (localDisk = \"do-storage\")))",
+            quote(D1_SERVICE),
+            quote(&durable_object_key(bundle.account_id.as_str(), D1_SERVICE, "D1Database")),
+        ));
+        let socket = opts.socket_dir.join("d1.sock");
+        sockets_cfg.push(format!(
+            "(name = {}, address = {}, http = (), service = {})",
+            quote(D1_SERVICE),
+            quote(&format!("unix:{}", socket.display())),
+            quote(D1_SERVICE),
+        ));
+        sockets.push((D1_SERVICE.to_owned(), socket));
+    }
+    if !do_classes.is_empty() || d1 {
         std::fs::create_dir_all(&opts.do_storage_dir)?;
         services.push(format!(
             "(name = \"do-storage\", disk = (path = {}, writable = true))",
@@ -219,7 +258,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         let _ = writeln!(text, "    {s},");
     }
     text.push_str("  ],\n");
-    let experimental = opts.cluster.is_some() && !do_classes.is_empty();
+    let experimental = opts.cluster.is_some() && (!do_classes.is_empty() || d1);
     if experimental {
         let c = opts.cluster.as_ref().expect("checked above");
         let mut fields = vec![
@@ -312,6 +351,12 @@ fn render_worker(
                     _ => format!("service = {}", quote(&target)),
                 }
             }
+            Binding::D1 { id, .. } => format!(
+                "wrapped = (moduleName = \"cloudflare-internal:d1-api\", innerBindings = [(name = \"fetcher\", \
+                 service = (name = {}, props = (json = {})))])",
+                quote(D1_SERVICE),
+                quote(&serde_json::json!({ "db": id }).to_string()),
+            ),
             Binding::R2Bucket { bucket_name, .. } => {
                 format!("r2Bucket = {}", quote(&r2_service(bucket_name)))
             }
@@ -411,6 +456,7 @@ mod tests {
                     Binding::Service { name: "OTHER".into(), service: "nope".into(), entrypoint: None },
                 ],
             }],
+            d1_databases: vec![],
         };
         let opts = RenderOptions {
             dir: dir.path().join("g1"),

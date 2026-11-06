@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The official workerd release Selvedge is tested against.
+  WORKERD_VERSION: "1.20261106.1"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install official workerd
+        run: |
+          mkdir -p "$RUNNER_TEMP/workerd" && cd "$RUNNER_TEMP/workerd"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "workerd@$WORKERD_VERSION"
+          echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  e2e:
+    needs: rust
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: pg
+          POSTGRES_DB: selvedge
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --locked
+      - name: Install workerd and wrangler
+        run: |
+          cd test/e2e && npm install --no-audit --no-fund
+          echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
+      - name: Single-node end-to-end (wrangler against selvedge all)
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+        run: test/e2e/single-node.sh
+      - name: Start SeaweedFS (S3 with conditional writes)
+        run: |
+          docker run -d --name seaweedfs -p 127.0.0.1:29000:8333 chrislusf/seaweedfs:4.50 \
+            server -s3 -dir=/data -master.volumeSizeLimitMB=64 -volume.max=20
+          for _ in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:29000/ && break; sleep 1; done
+          curl -sf -X PUT http://127.0.0.1:29000/selvedge-do
+      - name: Durable Objects on two runners, with a runner crash
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+          DO_S3_ENDPOINT: http://127.0.0.1:29000
+        run: test/e2e/cluster.sh

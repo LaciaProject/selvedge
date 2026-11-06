@@ -237,6 +237,7 @@ async fn handle(
         }
     };
 
+    let version = req.version();
     let headers = req.headers_mut();
     proxy::strip_internal(headers);
     let client_ip = if cfg.trust_forwarded {
@@ -267,6 +268,11 @@ async fn handle(
     headers.insert(ACCOUNT_HEADER, account);
     headers.insert(SCRIPT_HEADER, script);
     headers.insert(TOKEN_HEADER, token);
+    // `request.cf`: only what the gateway knows. No geo or network data.
+    let cf = serde_json::json!({ "httpProtocol": format!("{:?}", version) }).to_string();
+    if let Ok(v) = HeaderValue::from_str(&cf) {
+        headers.insert(selvedge_workerd::render::CF_HEADER, v);
+    }
 
     let healthy = shared.healthy.read().expect("poisoned").clone();
     let mut ranked = rank(route.account_id.as_str(), &healthy);

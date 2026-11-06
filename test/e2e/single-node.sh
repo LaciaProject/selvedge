@@ -180,6 +180,9 @@ check "_redirects applies" "301" "$(ahead /old '%{http_code}')"
 check "run_worker_first sends /api/* to the Worker" "worker:/api/hello" "$(aget /api/hello)"
 check "the ASSETS binding fetches an asset" "asset:200:body { color: teal; }" "$(aget /api/asset)"
 check "a path with no asset falls through to the Worker" "worker:/nothing" "$(aget /nothing)"
+check "request.cf holds only what the gateway knows" '{"httpProtocol":"HTTP/1.1"}' "$(aget /api/cf)"
+check "a client cannot set request.cf" '{"httpProtocol":"HTTP/1.1"}' \
+  "$(curl -s -H "Host: $AHOST" -H 'x-selvedge-cf: {"country":"XX"}' "http://127.0.0.1:$GATEWAY_PORT/api/cf")"
 # wrangler tail: console.log lines and exceptions of live requests.
 # Its own process group: wrangler's launcher runs the CLI in a child process.
 setsid bash -c 'cd "$1" && exec "$2" tail --format json' _ "$ASSETS_APP" "$E2E/node_modules/.bin/wrangler" \

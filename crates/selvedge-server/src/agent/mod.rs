@@ -160,7 +160,15 @@ async fn handle(
     let Ok(account) = account.parse::<AccountId>() else {
         return proxy::full(StatusCode::BAD_REQUEST, "bad account");
     };
+    // `request.cf` from the gateway if it sent a JSON object; otherwise an
+    // empty one, so `request.cf.country` reads undefined instead of throwing.
+    let cf = header(selvedge_workerd::render::CF_HEADER)
+        .filter(|v| serde_json::from_str::<serde_json::Value>(v).is_ok_and(|j| j.is_object()))
+        .unwrap_or_else(|| "{}".to_owned());
     proxy::strip_internal(req.headers_mut());
+    if let Ok(v) = http::HeaderValue::from_str(&cf) {
+        req.headers_mut().insert(selvedge_workerd::render::CF_HEADER, v);
+    }
 
     let live = match manager.ensure(&account).await {
         Ok(manager::Lookup::Ready(live)) => live,

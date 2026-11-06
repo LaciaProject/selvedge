@@ -32,6 +32,8 @@ const DRAIN_GRACE: Duration = Duration::from_secs(30);
 pub struct Live {
     pub generation: i64,
     pub sockets: HashMap<String, PathBuf>,
+    /// Gradual deployments: script to (canary share 0-100, canary version id).
+    pub splits: HashMap<String, (f64, String)>,
     process: Mutex<Option<WorkerdProcess>>,
     render_dir: PathBuf,
     socket_dir: PathBuf,
@@ -357,6 +359,7 @@ impl Manager {
         let live = Arc::new(Live {
             generation: bundle.generation,
             sockets: rendered.sockets.iter().cloned().collect(),
+            splits: rendered.splits.iter().map(|(s, p, v)| (s.clone(), (*p, v.clone()))).collect(),
             process: Mutex::new(Some(process)),
             render_dir: opts.dir.clone(),
             socket_dir: opts.socket_dir.clone(),

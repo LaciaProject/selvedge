@@ -148,6 +148,15 @@ pub struct Rendered {
     pub sockets: Vec<(String, PathBuf)>,
     /// Whether the config needs `--experimental` (cluster mode).
     pub experimental: bool,
+    /// Gradual deployments: `(script, share of its requests for the canary
+    /// (0-100), the canary's version id)`. The canary's socket is
+    /// `<script>@canary`.
+    pub splits: Vec<(String, f64, String)>,
+}
+
+/// The socket name of a script's canary version.
+pub fn canary_socket(script: &str) -> String {
+    format!("{script}@canary")
 }
 
 /// Module bytes for rendering, looked up by SHA-256.
@@ -251,6 +260,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
     let mut need_missing = false;
 
     let mut need_assets_kv = false;
+    let mut splits = Vec::new();
     for (index, script) in bundle.scripts.iter().enumerate() {
         if let Some(assets) = &script.assets {
             need_assets_kv = true;
@@ -333,6 +343,34 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         // a system worker's socket.
         if !script.name.starts_with(selvedge_core::ids::RESERVED_SCRIPT_PREFIX) {
             sockets.push((script.name.clone(), socket));
+        }
+        // A gradual deployment's other version: its own service and socket.
+        // The API refuses splits of scripts with Durable Object classes or
+        // assets, so it hosts neither.
+        if let Some(c) = &script.canary {
+            let none = BTreeSet::new();
+            let (worker, kvs, missing) = render_worker(bundle, &c.script, opts, modules, &targets, &none)?;
+            need_missing |= missing;
+            kv_namespaces.extend(kvs);
+            r2_buckets.extend(c.script.bindings.iter().filter_map(|b| match b {
+                Binding::R2Bucket { bucket_name, .. } => Some(bucket_name.clone()),
+                _ => None,
+            }));
+            queues.extend(c.script.bindings.iter().filter_map(|b| match b {
+                Binding::Queue { queue_name, .. } => Some(queue_name.clone()),
+                _ => None,
+            }));
+            let service = format!("wv-{}", script.name);
+            services.push(format!("(name = {}, worker = {worker})", quote(&service)));
+            let socket = opts.socket_dir.join(format!("{index}c.sock"));
+            sockets_cfg.push(format!(
+                "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\", cfBlobHeader = \"x-selvedge-cf\"), service = {})",
+                quote(&canary_socket(&script.name)),
+                quote(&format!("unix:{}", socket.display())),
+                quote(&service),
+            ));
+            sockets.push((canary_socket(&script.name), socket));
+            splits.push((script.name.clone(), c.percentage, c.script.version_id.to_string()));
         }
     }
     if need_assets_kv {
@@ -548,7 +586,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
 
     let config_path = opts.dir.join("config.capnp");
     std::fs::write(&config_path, text)?;
-    Ok(Rendered { config_path, sockets, experimental })
+    Ok(Rendered { config_path, sockets, experimental, splits })
 }
 
 /// Renders one script's `Worker` struct. Returns it, the KV namespaces it binds,
@@ -778,6 +816,7 @@ mod tests {
                     Binding::Service { name: "OTHER".into(), service: "nope".into(), entrypoint: None },
                 ],
                 assets: None,
+                canary: None,
             }],
             d1_databases: vec![],
             workflows: vec![],

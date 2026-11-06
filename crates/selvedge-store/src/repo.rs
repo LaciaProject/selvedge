@@ -62,6 +62,7 @@ pub struct VersionInfo {
     pub compatibility_date: String,
     pub compatibility_flags: Vec<String>,
     pub bindings: Vec<Binding>,
+    pub has_assets: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -340,7 +341,8 @@ impl Db {
         .await?;
         if make_current {
             tx.execute(
-                "UPDATE scripts SET current_version_id = $3, updated_at = now() WHERE account_id = $1 AND name = $2",
+                "UPDATE scripts SET current_version_id = $3, split = NULL, updated_at = now()
+                 WHERE account_id = $1 AND name = $2",
                 &[&account.as_str(), &script, &id],
             )
             .await?;
@@ -435,7 +437,7 @@ impl Db {
             .await?
             .query(
                 "SELECT id, created_at, main_module, compatibility_date, compatibility_flags, bindings,
-                        row_number() OVER (ORDER BY created_at, id)
+                        row_number() OVER (ORDER BY created_at, id), assets IS NOT NULL
                  FROM script_versions WHERE account_id = $1 AND script_name = $2
                  ORDER BY created_at DESC, id DESC LIMIT 100",
                 &[&account.as_str(), &script],
@@ -448,13 +450,63 @@ impl Db {
         Ok(self.versions(account, script).await?.into_iter().find(|v| v.id == id))
     }
 
-    /// Makes an existing version current (deploy or rollback).
+    /// A gradual deployment's versions and percentages, if one is in place.
+    pub async fn split(&self, account: &AccountId, script: &str) -> Result<Option<Vec<(String, f64)>>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT split FROM scripts WHERE account_id = $1 AND name = $2",
+                &[&account.as_str(), &script],
+            )
+            .await?;
+        Ok(row
+            .and_then(|r| r.get::<_, Option<serde_json::Value>>(0))
+            .and_then(|v| serde_json::from_value(v).ok()))
+    }
+
+    /// Splits requests between two versions; the first, with the larger
+    /// share, becomes current. `false` if either version does not exist.
+    pub async fn set_split(
+        &self,
+        account: &AccountId,
+        script: &str,
+        versions: &[(String, f64)],
+    ) -> Result<bool> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let found = tx
+            .query_one(
+                "SELECT count(*) FROM script_versions WHERE account_id = $1 AND script_name = $2 AND id = ANY($3)",
+                &[&account.as_str(), &script, &versions.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>()],
+            )
+            .await?
+            .get::<_, i64>(0);
+        if found as usize != versions.len() {
+            return Ok(false);
+        }
+        let n = tx
+            .execute(
+                "UPDATE scripts SET current_version_id = $3, split = $4, updated_at = now()
+                 WHERE account_id = $1 AND name = $2",
+                &[&account.as_str(), &script, &versions[0].0, &serde_json::to_value(versions)?],
+            )
+            .await?;
+        if n == 1 {
+            bump_generation(&tx, account).await?;
+        }
+        tx.commit().await?;
+        Ok(n == 1)
+    }
+
+    /// Makes an existing version current (deploy or rollback), ending any
+    /// gradual deployment.
     pub async fn set_current_version(&self, account: &AccountId, script: &str, id: &str) -> Result<bool> {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         let n = tx
             .execute(
-                "UPDATE scripts SET current_version_id = $3, updated_at = now()
+                "UPDATE scripts SET current_version_id = $3, split = NULL, updated_at = now()
                  WHERE account_id = $1 AND name = $2
                    AND EXISTS (SELECT 1 FROM script_versions v WHERE v.id = $3 AND v.account_id = $1 AND v.script_name = $2)",
                 &[&account.as_str(), &script, &id],
@@ -634,6 +686,16 @@ impl Db {
                 &[&account.as_str()],
             )
             .await?;
+        // A gradual deployment's other version: split = [[primary, %], [canary, %]].
+        let canary_rows = tx
+            .query(
+                "SELECT s.name, (s.split->1->>1)::float8, v.id, v.main_module, v.compatibility_date,
+                        v.compatibility_flags, v.modules, v.bindings, v.assets
+                 FROM scripts s JOIN script_versions v ON v.id = s.split->1->>0
+                 WHERE s.account_id = $1 AND s.split IS NOT NULL",
+                &[&account.as_str()],
+            )
+            .await?;
         let secret_rows = tx
             .query(
                 "SELECT script_name, name, ciphertext FROM script_secrets WHERE account_id = $1",
@@ -657,33 +719,48 @@ impl Db {
             })
             .collect();
         tx.commit().await?;
-        let mut scripts = Vec::new();
-        for r in rows {
-            let name: String = r.get(0);
-            let mut bindings: Vec<Binding> = serde_json::from_value(r.get(6))?;
+        // A version row (columns from `at`: id, main module, date, flags,
+        // modules, bindings, assets) as the script `name`, secrets filled in.
+        let to_script = |name: &str, r: &tokio_postgres::Row, at: usize| -> Result<BundleScript> {
+            let mut bindings: Vec<Binding> = serde_json::from_value(r.get(at + 5))?;
             for b in &mut bindings {
                 if let Binding::SecretText { name: secret, text } = b {
                     let row = secret_rows
                         .iter()
                         .find(|s| s.get::<_, &str>(0) == name && s.get::<_, &str>(1) == secret.as_str());
                     if let Some(row) = row {
-                        let plain = secrets.open(row.get(2), &secret_aad(account, &name, secret))?;
+                        let plain = secrets.open(row.get(2), &secret_aad(account, name, secret))?;
                         *text = Some(String::from_utf8(plain)?);
                     }
                 }
             }
-            scripts.push(BundleScript {
-                version_id: r.get(1),
-                main_module: r.get(2),
-                compatibility_date: r.get(3),
-                compatibility_flags: serde_json::from_value(r.get(4))?,
-                modules: serde_json::from_value(r.get(5))?,
+            Ok(BundleScript {
+                version_id: r.get(at),
+                main_module: r.get(at + 1),
+                compatibility_date: r.get(at + 2),
+                compatibility_flags: serde_json::from_value(r.get(at + 3))?,
+                modules: serde_json::from_value(r.get(at + 4))?,
                 bindings,
-                assets: r.get::<_, Option<serde_json::Value>>(7).map(serde_json::from_value).transpose()?,
-                name,
-            });
+                assets: r
+                    .get::<_, Option<serde_json::Value>>(at + 6)
+                    .map(serde_json::from_value)
+                    .transpose()?,
+                canary: None,
+                name: name.to_owned(),
+            })
+        };
+        let mut scripts = Vec::new();
+        for r in &rows {
+            let name: String = r.get(0);
+            let mut script = to_script(&name, r, 1)?;
+            if let Some(c) = canary_rows.iter().find(|c| c.get::<_, &str>(0) == name) {
+                script.canary = Some(Box::new(selvedge_core::Canary {
+                    percentage: c.get(1),
+                    script: to_script(&name, c, 2)?,
+                }));
+            }
+            scripts.push(script);
         }
-
         Ok(Some(AccountBundle {
             account_id: account.clone(),
             generation: gen_row.get(0),
@@ -1071,6 +1148,7 @@ fn row_to_version(r: &tokio_postgres::Row) -> Result<VersionInfo> {
         compatibility_flags: serde_json::from_value(r.get(4))?,
         bindings: serde_json::from_value(r.get(5))?,
         number: r.get(6),
+        has_assets: r.get(7),
     })
 }
 

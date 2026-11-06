@@ -285,6 +285,26 @@ check "describe lists its steps" "double-1 approval-1 pause-1" \
 check "wrangler workflows instances list sees both" "2" \
   "$(wwr workflows instances list e2e-flow --json 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')"
 
+# Gradual deployments: two versions share the requests.
+SPLIT="$WORK/split-app"
+cp -r "$E2E/fixtures/split-app" "$SPLIT"
+swr() { (cd "$SPLIT" && "$E2E/node_modules/.bin/wrangler" "$@"); }
+swr deploy > "$WORK/split1.log" 2>&1 || { cat "$WORK/split1.log"; exit 1; }
+V1=$(grep -o 'Current Version ID: [0-9a-f-]*' "$WORK/split1.log" | awk '{print $4}')
+swr versions upload --var VERSION:two > "$WORK/split2.log" 2>&1 || { cat "$WORK/split2.log"; exit 1; }
+V2=$(grep -o 'Worker Version ID: [0-9a-f-]*' "$WORK/split2.log" | awk '{print $4}')
+swr versions deploy "$V1@50%" "$V2@50%" --yes > "$WORK/split3.log" 2>&1 || { cat "$WORK/split3.log"; exit 1; }
+settle
+sp() { curl -s -H "Host: split-app.$SUBDOMAIN.workers.test" "$@" "http://127.0.0.1:$GATEWAY_PORT/"; }
+seen=$(for k in $(seq 1 40); do sp -H "Cloudflare-Workers-Version-Key: user-$k"; echo; done | sort -u | tr '\n' ' ')
+check "a 50/50 deployment serves both versions" "one two " "$seen"
+check "a version key keeps a client on one version" "1" \
+  "$(for _ in 1 2 3 4 5; do sp -H 'Cloudflare-Workers-Version-Key: sticky'; echo; done | sort -u | wc -l)"
+check "a version override picks the version" "two" "$(sp -H "Cloudflare-Workers-Version-Overrides: split-app=\"$V2\"")"
+swr versions deploy "$V2@100%" --yes > /dev/null 2>&1
+settle
+check "deploying one version at 100% ends the split" "two two two" "$(for _ in 1 2 3; do sp; echo; done | tr '\n' ' ' | sed 's/ $//')"
+
 # Per-account limits, on a second account so the first is not disturbed.
 ACCOUNT2=$(admin -X POST "$API/accounts" -d '{"name":"hog"}' | json '["result"]["id"]')
 TOKEN2=$(admin -X POST "$API/accounts/$ACCOUNT2/selvedge/tokens" -d '{"name":"hog"}' | json '["result"]["value"]')

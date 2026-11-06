@@ -99,10 +99,17 @@ async fn deployments(
 ) -> ApiResult<Response> {
     let id = script_access(&state, &caller, &account, &script).await?;
     let s = state.db.script(&id, &script).await?.ok_or_else(worker_not_found)?;
+    let split = state.db.split(&id, &script).await?;
     let deployments: Vec<Value> = s
         .current_version_id
         .iter()
         .map(|v| {
+            let versions = match &split {
+                Some(parts) => {
+                    parts.iter().map(|(v, p)| json!({ "version_id": v, "percentage": p })).collect::<Vec<_>>()
+                }
+                None => vec![json!({ "version_id": v, "percentage": 100.0 })],
+            };
             json!({
                 "id": v,
                 "source": "api",
@@ -110,7 +117,7 @@ async fn deployments(
                 "author_email": "",
                 "created_on": s.modified_on,
                 "annotations": { "workers/triggered_by": "deployment" },
-                "versions": [{ "version_id": v, "percentage": 100.0 }],
+                "versions": versions,
             })
         })
         .collect();
@@ -137,15 +144,46 @@ async fn deploy(
     super::JsonBody(body): super::JsonBody<DeployBody>,
 ) -> ApiResult<Response> {
     let id = script_access(&state, &caller, &account, &script).await?;
-    let live: Vec<_> = body.versions.iter().filter(|v| v.percentage > 0.0).collect();
-    let [only] = live.as_slice() else {
+    let mut live: Vec<_> = body.versions.iter().filter(|v| v.percentage > 0.0).collect();
+    let total: f64 = live.iter().map(|v| v.percentage).sum();
+    if live.is_empty() || live.len() > 2 || (total - 100.0).abs() > 0.01 {
         return Err(ApiError::bad_request(
-            "Selvedge deploys one version at a time: gradual deployments are not supported",
+            "a deployment is one or two versions whose percentages add up to 100",
         ));
-    };
-    if (only.percentage - 100.0).abs() > f64::EPSILON {
-        return Err(ApiError::bad_request("the deployed version must receive 100% of traffic"));
     }
+    if live.len() == 2 {
+        // The larger share is the current version.
+        live.sort_by(|a, b| b.percentage.total_cmp(&a.percentage));
+        for v in &live {
+            let info = state.db.version(&id, &script, &v.version_id).await?.ok_or_else(|| {
+                ApiError::new(http::StatusCode::NOT_FOUND, 10220, "The specified version does not exist")
+            })?;
+            let hosts_objects = info.bindings.iter().any(|b| {
+                matches!(b, selvedge_core::Binding::DurableObjectNamespace { script_name, .. }
+                    if script_name.as_deref().is_none_or(|s| s == script))
+            });
+            if hosts_objects || info.has_assets {
+                return Err(ApiError::bad_request(
+                    "gradual deployments of Workers that define Durable Objects or have static assets are not supported",
+                ));
+            }
+        }
+        let parts: Vec<(String, f64)> = live.iter().map(|v| (v.version_id.clone(), v.percentage)).collect();
+        if !state.db.set_split(&id, &script, &parts).await? {
+            return Err(ApiError::new(
+                http::StatusCode::NOT_FOUND,
+                10220,
+                "The specified version does not exist",
+            ));
+        }
+        return Ok(ok(json!({
+            "id": parts[0].0,
+            "source": "api",
+            "strategy": "percentage",
+            "versions": parts.iter().map(|(v, p)| json!({ "version_id": v, "percentage": p })).collect::<Vec<_>>(),
+        })));
+    }
+    let only = live[0];
     if !state.db.set_current_version(&id, &script, &only.version_id).await? {
         return Err(ApiError::new(
             http::StatusCode::NOT_FOUND,

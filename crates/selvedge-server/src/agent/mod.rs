@@ -234,6 +234,31 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     Ok(())
 }
 
+/// Whether a request goes to a gradual deployment's canary, as on Cloudflare:
+/// `Cloudflare-Workers-Version-Overrides: <script>="<version id>"` picks a
+/// version; `Cloudflare-Workers-Version-Key` keeps a client on one version;
+/// otherwise each request is assigned at random by the percentages.
+fn pick_canary(headers: &http::HeaderMap, script: &str, share: f64, canary: &str) -> bool {
+    let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok());
+    if let Some(overrides) = h("cloudflare-workers-version-overrides") {
+        for item in overrides.split(',') {
+            if let Some((name, version)) = item.split_once('=')
+                && name.trim() == script
+            {
+                return version.trim().trim_matches('"') == canary;
+            }
+        }
+    }
+    let roll = match h("cloudflare-workers-version-key") {
+        Some(key) => {
+            let d = selvedge_core::sha256_hex(format!("{script}\0{key}").as_bytes());
+            (u64::from_str_radix(&d[..12], 16).unwrap_or_default() % 10_000) as f64 / 100.0
+        }
+        None => rand::random::<f64>() * 100.0,
+    };
+    roll < share
+}
+
 async fn handle(
     cfg: &AgentConfig,
     manager: &Arc<Manager>,
@@ -277,7 +302,13 @@ async fn handle(
             return proxy::full(StatusCode::SERVICE_UNAVAILABLE, "Worker unavailable");
         }
     };
-    let Some(socket) = live.sockets.get(&script) else {
+    let target = match live.splits.get(&script) {
+        Some((share, canary)) if pick_canary(req.headers(), &script, *share, canary) => {
+            selvedge_workerd::render::canary_socket(&script)
+        }
+        _ => script.clone(),
+    };
+    let Some(socket) = live.sockets.get(&target) else {
         return proxy::full(StatusCode::NOT_FOUND, "Worker not found");
     };
     match proxy::forward(Target::Unix(socket), req).await {

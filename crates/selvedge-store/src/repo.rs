@@ -640,6 +640,22 @@ impl Db {
                 &[&account.as_str()],
             )
             .await?;
+        // In the snapshot, on this connection: taking a second one from the
+        // pool while holding this one deadlocks when many bundles load at once.
+        let d1_databases = tx_d1_ids(&*tx, account).await?;
+        let workflows = tx
+            .query(
+                "SELECT name, script_name, class_name FROM workflows WHERE account_id = $1 ORDER BY name",
+                &[&account.as_str()],
+            )
+            .await?
+            .iter()
+            .map(|r| selvedge_core::WorkflowDef {
+                name: r.get(0),
+                script_name: r.get(1),
+                class_name: r.get(2),
+            })
+            .collect();
         tx.commit().await?;
         let mut scripts = Vec::new();
         for r in rows {
@@ -667,21 +683,7 @@ impl Db {
                 name,
             });
         }
-        let client = self.client().await?;
-        let d1_databases = tx_d1_ids(&client, account).await?;
-        let workflows = client
-            .query(
-                "SELECT name, script_name, class_name FROM workflows WHERE account_id = $1 ORDER BY name",
-                &[&account.as_str()],
-            )
-            .await?
-            .iter()
-            .map(|r| selvedge_core::WorkflowDef {
-                name: r.get(0),
-                script_name: r.get(1),
-                class_name: r.get(2),
-            })
-            .collect();
+
         Ok(Some(AccountBundle {
             account_id: account.clone(),
             generation: gen_row.get(0),
@@ -1034,7 +1036,7 @@ fn binding_type(b: &Binding) -> &'static str {
     }
 }
 
-async fn tx_d1_ids(client: &tokio_postgres::Client, account: &AccountId) -> Result<Vec<String>> {
+async fn tx_d1_ids<C: tokio_postgres::GenericClient>(client: &C, account: &AccountId) -> Result<Vec<String>> {
     let rows = client
         .query("SELECT id FROM d1_databases WHERE account_id = $1 ORDER BY id", &[&account.as_str()])
         .await?;

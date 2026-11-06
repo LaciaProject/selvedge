@@ -305,7 +305,8 @@ Selvedge 只需要做配置生成、凭据和测试。
 | `request.cf` 由 gateway 设置，不再暴露 runner 本地 socket 的 PID/UID | 完成 | 端到端测试（含客户端伪造） |
 | 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 只拿到按账户派生的密钥；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |
 | R2 的 S3 兼容接口：data 服务上单独的监听端口，路径式寻址；SigV4（请求头和预签名 URL）、`aws-chunked` 请求体；对象、分段上传、列举、复制、条件读写；凭据同 Cloudflare（token id + token 的 SHA-256） | 完成 | 官方 AWS SDK 的 13 项端到端检查；S3 写入的对象可由 `wrangler r2` 读出 |
-| 每账户 cgroup、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
+| 每账户资源限制：cgroup v2 可写时由内核按账户执行 `memory.max`/`cpu.max`/`pids.max`；Kubernetes 里 cgroup 只读，由 agent 每 2 秒检查：超内存重启进程，超 CPU 份额降低优先级 | 完成 | 端到端测试：超内存的进程被重启，超 CPU 的进程 nice 为 10 |
+| 组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 
 Spike 结论：
 

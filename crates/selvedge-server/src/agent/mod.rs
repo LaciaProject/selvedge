@@ -6,6 +6,7 @@
 //! request reaches tenant code.
 
 mod bindings;
+pub mod limits;
 mod manager;
 pub mod s3proxy;
 pub mod uids;
@@ -99,6 +100,8 @@ pub struct AgentConfig {
     pub asset_cache_bytes: u64,
     /// Run each account's workerd as its own user, from this range.
     pub account_uids: Option<std::ops::Range<u32>>,
+    /// CPU, memory and process limits per account process.
+    pub limits: Option<limits::Limits>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -134,7 +137,30 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         }
         None => None,
     };
-    let manager = Manager::new(cfg.clone(), max_date, s3_proxy)?;
+    let limit_mode = cfg.limits.as_ref().map(|_| limits::detect());
+    let cgroup_dir = match &limit_mode {
+        Some(limits::Mode::Cgroup(d)) => Some(d.clone()),
+        _ => None,
+    };
+    let manager = Manager::new(cfg.clone(), max_date, s3_proxy, cgroup_dir)?;
+    let watchdog = match (&cfg.limits, &limit_mode) {
+        (Some(l), Some(limits::Mode::Watchdog)) => {
+            let (manager, l) = (manager.clone(), l.clone());
+            Some(tokio::spawn(async move {
+                let mut w = limits::Watchdog::default();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let pids = manager.live_pids().await;
+                    for (account, action) in w.check(&pids, &l) {
+                        if action == limits::Action::Kill {
+                            manager.kill(&account).await;
+                        }
+                    }
+                }
+            }))
+        }
+        _ => None,
+    };
 
     let evictor = {
         let manager = manager.clone();
@@ -200,6 +226,9 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     tracing::info!("agent draining");
     evictor.abort();
     pruner.abort();
+    if let Some(w) = watchdog {
+        w.abort();
+    }
     watcher.abort();
     manager.stop_all().await;
     Ok(())

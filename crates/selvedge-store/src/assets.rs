@@ -138,7 +138,12 @@ impl Db {
     }
 
     /// Records the files a version manifest references, so they are kept.
-    pub async fn record_asset_manifest(&self, account: &AccountId, manifest: &str, hashes: &[String]) -> Result<()> {
+    pub async fn record_asset_manifest(
+        &self,
+        account: &AccountId,
+        manifest: &str,
+        hashes: &[String],
+    ) -> Result<()> {
         self.client()
             .await?
             .execute(

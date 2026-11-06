@@ -41,12 +41,15 @@ workerd process per account, started with an empty environment; tenant outbound 
 public addresses by workerd and by a NetworkPolicy; no database or platform credentials in runner
 processes; binding calls stamped with the account identity by the agent, outside tenant reach.
 
+Each account process has CPU, memory and process limits (`--account-memory-mb`, `--account-cpus`,
+`--account-pids`; Helm `runner.accountLimits`).
+
 With `--account-uids` (on by default in the Helm chart, `runner.accountUsers`), each account's
 workerd runs as its own Linux user with no capabilities. Its directories are 0700, and its binding
 socket, which stamps the account's identity on KV, R2, D1 and queue calls, is 0600. So a
 compromised process can neither read another account's files nor act as another account. The
 agent then runs as root in the container with only CAP_SETUID, CAP_SETGID, CAP_CHOWN,
-CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL, and refuses to run as root without `--account-uids`.
+CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_KILL and CAP_SYS_NICE, and refuses to run as root without `--account-uids`.
 `runner.hostUsers: false` adds a user namespace, so root in the container is unprivileged on the
 node. Runner pods use the `RuntimeDefault` seccomp profile.
 
@@ -63,7 +66,10 @@ never from the runner's local sockets.
 
 Known gaps, tracked for the next releases:
 
-- Account processes in a runner pod share one cgroup: one account can use the pod's whole CPU and
-  memory limit. Per-account cgroups need a delegated cgroup tree, which Kubernetes does not give
-  containers by default (RFC 0001, spike S6).
+- Per-account limits are enforced by the agent where the cgroup tree is read-only, which is how
+  Kubernetes mounts it: a process over its memory limit is restarted within about two seconds, and
+  one over its CPU share is niced rather than capped. A burst of allocation faster than that can
+  still press on the pod's memory limit. With a writable cgroup v2 tree (bare metal, a delegated
+  systemd unit, a privileged pod), the kernel enforces `memory.max`, `cpu.max` and `pids.max` per
+  account instead.
 - Platform components authenticate each other with a shared token; mTLS is planned.

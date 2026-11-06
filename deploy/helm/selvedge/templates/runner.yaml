@@ -45,6 +45,12 @@ spec:
               value: {{ .Values.runner.drainDelaySeconds | quote }}
             - name: SELVEDGE_ASSET_CACHE_MB
               value: {{ .Values.runner.assetCacheMB | quote }}
+            - name: SELVEDGE_ACCOUNT_MEMORY_MB
+              value: {{ .Values.runner.accountLimits.memoryMB | quote }}
+            - name: SELVEDGE_ACCOUNT_CPUS
+              value: {{ .Values.runner.accountLimits.cpus | quote }}
+            - name: SELVEDGE_ACCOUNT_PIDS
+              value: {{ .Values.runner.accountLimits.pids | quote }}
             {{- if .Values.runner.accountUsers.enabled }}
             - name: SELVEDGE_ACCOUNT_UIDS
               value: {{ .Values.runner.accountUsers.uidRange | quote }}
@@ -71,7 +77,7 @@ spec:
           # The agent runs as root with only what it needs to start each
           # account's workerd as its own user; workerd keeps no capabilities.
           securityContext:
-            {{- toYaml (mergeOverwrite (deepCopy .Values.securityContext) (dict "runAsUser" 0 "runAsGroup" 0 "runAsNonRoot" false "capabilities" (dict "drop" (list "ALL") "add" (list "SETUID" "SETGID" "CHOWN" "DAC_OVERRIDE" "FOWNER" "KILL")))) | nindent 12 }}
+            {{- toYaml (mergeOverwrite (deepCopy .Values.securityContext) (dict "runAsUser" 0 "runAsGroup" 0 "runAsNonRoot" false "capabilities" (dict "drop" (list "ALL") "add" (list "SETUID" "SETGID" "CHOWN" "DAC_OVERRIDE" "FOWNER" "KILL" "SYS_NICE")))) | nindent 12 }}
           {{- else }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           {{- end }}

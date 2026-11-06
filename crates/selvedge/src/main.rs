@@ -147,9 +147,19 @@ struct AgentArgs {
     drain_delay: u64,
     /// Run each account's workerd as its own Linux user, with UIDs from this
     /// range (`first-last`, e.g. 10000-59999). Needs root with CAP_SETUID,
-    /// CAP_SETGID, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL.
+    /// CAP_SETGID, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_KILL and CAP_SYS_NICE.
     #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
     account_uids: Option<String>,
+    /// Memory limit per account process, in MiB (0: no CPU, memory or
+    /// process limits).
+    #[arg(long, env = "SELVEDGE_ACCOUNT_MEMORY_MB", default_value_t = 1024)]
+    account_memory_mb: u64,
+    /// CPUs an account process may use.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_CPUS", default_value_t = 1.0)]
+    account_cpus: f64,
+    /// Processes and threads per account process.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_PIDS", default_value_t = 1024)]
+    account_pids: u64,
     /// Local disk for cached static assets, in MiB.
     #[arg(long, env = "SELVEDGE_ASSET_CACHE_MB", default_value_t = 1024)]
     asset_cache_mb: u64,
@@ -207,6 +217,12 @@ struct AllArgs {
     /// Run each account's workerd as its own Linux user (see `agent --help`).
     #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
     account_uids: Option<String>,
+    /// Memory limit per account process, in MiB (0: no limits).
+    #[arg(long, env = "SELVEDGE_ACCOUNT_MEMORY_MB", default_value_t = 1024)]
+    account_memory_mb: u64,
+    /// CPUs an account process may use.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_CPUS", default_value_t = 1.0)]
+    account_cpus: f64,
 }
 
 #[derive(Subcommand)]
@@ -314,6 +330,11 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
         drain_delay: Duration::from_secs(a.drain_delay),
         asset_cache_bytes: a.asset_cache_mb << 20,
         account_uids: a.account_uids.as_deref().map(selvedge_server::agent::uids::parse_range).transpose()?,
+        limits: (a.account_memory_mb > 0).then_some(selvedge_server::agent::limits::Limits {
+            memory_bytes: a.account_memory_mb << 20,
+            cpus: a.account_cpus,
+            pids: a.account_pids,
+        }),
     })
 }
 
@@ -433,7 +454,8 @@ async fn collect_garbage(db: Db, blobs: Blobs) {
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "deleting unreferenced blobs failed"),
         }
         // Static asset files no version uses, a day after their last use.
-        let grace = std::env::var("SELVEDGE_ASSET_GC_GRACE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(86_400);
+        let grace =
+            std::env::var("SELVEDGE_ASSET_GC_GRACE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(86_400);
         match db.collect_asset_files(grace, 1000).await {
             Ok(paths) => {
                 for p in &paths {
@@ -505,6 +527,9 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         drain_delay: 0,
         asset_cache_mb: 1024,
         account_uids: args.account_uids,
+        account_memory_mb: args.account_memory_mb,
+        account_cpus: args.account_cpus,
+        account_pids: 1024,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(

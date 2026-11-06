@@ -28,6 +28,8 @@ S3_PORT=$((PORT_BASE + 90))
 export SELVEDGE_R2_S3_LISTEN=127.0.0.1:$S3_PORT
 # Collect unused static asset files within seconds, not a day.
 export SELVEDGE_GC_INTERVAL_SECS=1 SELVEDGE_ASSET_GC_GRACE_SECS=2
+# Per-account limits, low enough for a test to cross.
+export SELVEDGE_ACCOUNT_MEMORY_MB=384 SELVEDGE_ACCOUNT_CPUS=0.5
 
 "$BIN" all > "$WORK/selvedge.log" 2>&1 &
 PID=$!
@@ -282,6 +284,32 @@ check "describe lists its steps" "double-1 approval-1 pause-1" \
   "$(auth "$API/accounts/$ACCOUNT/workflows/e2e-flow/instances/$TID" | python3 -c 'import sys,json; print(" ".join(x["name"] for x in json.load(sys.stdin)["result"]["steps"]))')"
 check "wrangler workflows instances list sees both" "2" \
   "$(wwr workflows instances list e2e-flow --json 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')"
+
+# Per-account limits, on a second account so the first is not disturbed.
+ACCOUNT2=$(admin -X POST "$API/accounts" -d '{"name":"hog"}' | json '["result"]["id"]')
+TOKEN2=$(admin -X POST "$API/accounts/$ACCOUNT2/selvedge/tokens" -d '{"name":"hog"}' | json '["result"]["value"]')
+SUB2=$(curl -sf -H "Authorization: Bearer $TOKEN2" "$API/accounts/$ACCOUNT2/workers/subdomain" | json '["result"]["subdomain"]')
+curl -sf -X PUT "$API/accounts/$ACCOUNT2/workers/scripts/hog" -H "Authorization: Bearer $TOKEN2" \
+  -F 'metadata={"main_module":"hog.js","compatibility_date":"2026-10-01"};type=application/json' \
+  -F "hog.js=@$E2E/fixtures/hog.js;type=application/javascript+module" > /dev/null
+settle
+hog() { curl -s -m 10 -H "Host: hog.$SUB2.workers.test" "http://127.0.0.1:$GATEWAY_PORT$1"; }
+hog / > /dev/null
+check "a fresh account process counts from 1" "2" "$(hog /)"
+for _ in $(seq 1 10); do [[ "$(hog /grow)" =~ ^[0-9]+$ ]] || break; sleep 0.3; done
+sleep 3
+check "a process over its memory limit is restarted" "1" "$(hog /)"
+hog_pid() { pgrep -f "workerd serve .*/a/$ACCOUNT2/" | head -1; }
+SPINNERS=()
+for _ in 1 2 3; do (for _ in $(seq 1 12); do hog /spin > /dev/null; done) & SPINNERS+=($!); done
+nice_value=""
+for _ in $(seq 1 30); do
+  nice_value=$(ps -o ni= -p "$(hog_pid)" 2>/dev/null | tr -d ' ')
+  [ "$nice_value" = 10 ] && break
+  sleep 0.5
+done
+wait "${SPINNERS[@]}"
+check "a process over its CPU share is niced" "10" "$nice_value"
 
 # Experimental workerd flags would be live in processes running with
 # --experimental (cluster mode), so uploads may not use them.

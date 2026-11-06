@@ -18,6 +18,7 @@ futures.workspace = true
 chrono.workspace = true
 hex.workspace = true
 hmac.workspace = true
+rustix.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

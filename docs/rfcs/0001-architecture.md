@@ -1,6 +1,6 @@
 # RFC 0001：Selvedge 总体架构
 
-- 状态：**草案**
+- 状态：**已采纳**，按此实现中（实现进度见 §15）
 - 日期：2026-11-06
 - 范围：v1（单集群、跨可用区）
 
@@ -57,7 +57,7 @@ Selvedge 是一个开源、运行在 Kubernetes 上、高可用的 Workers 平�
                   │                                                           │
                   │  selvedge-data (Deployment, ≥3)   KV / R2 / Queues 服务   │
                   │  selvedge-api (Deployment, ≥2)    /client/v4、Dashboard   │
-                  │  selvedge-controller (Deployment, 选主)  调度、放置        │
+                  │  selvedge-controller (P2 引入, 选主)  Cron、Queue 调度     │
                   │                                                           │
                   │  依赖：PostgreSQL (CNPG)   S3 兼容对象存储（支持条件写入） │
                   └───────────────────────────────────────────────────────────┘
@@ -76,8 +76,8 @@ Selvedge 是一个开源、运行在 Kubernetes 上、高可用的 Workers 平�
 
 ### 4.1 selvedge-gateway
 
-- 基于 [Pingora](https://github.com/cloudflare/pingora)（Apache-2.0）。
-- 路由表（host/route → 账户 → script → 当前 version）由 controller 推送，gateway 本地全量缓存。
+- v1 直接基于 hyper 实现（HTTP/1.1，支持 WebSocket 升级）。[Pingora](https://github.com/cloudflare/pingora) 留作以后的性能优化选项。
+- 路由表（hostname → 账户 → script）由 gateway 每 2 秒从 api 拉取（带 ETag），本地全量缓存；api 不可用时继续用旧表。
 - 把请求转给持有该账户进程的 runner Pod，按一致性哈希加有界负载选择，至少分布在两个 AZ。
 - TLS 证书用 cert-manager 签发。对外暴露用标准 Service / Gateway API，不绑定云厂商 LB。
 
@@ -88,7 +88,8 @@ Selvedge 是一个开源、运行在 Kubernetes 上、高可用的 Workers 平�
 - **每个账户一个 workerd 进程**。同账户的 script 在同一进程里，所以同账户内的 Service Binding 直接走 workerd 原生调用。
 - **同账户的进程组成一个 workerd cluster**（§7）。每个账户的 cluster 有自己的对象存储前缀、存储凭据和 cluster 密钥。
 - **代码包按内容哈希存储**在对象存储里，agent 按需拉取并缓存到本地。回滚就是换一个哈希。
-- **放置**：controller 把每个账户分配到至少 2 个、位于不同 AZ 的 runner Pod，再按负载扩容。
+- **放置**：不需要集中调度。gateway 对健康的 runner 做 rendezvous 哈希，每个账户固定落在排名前 2 的 runner 上
+  （每个请求随机选其一，两边都保持热），其余 runner 按排名依次作为后备。所有 gateway 算出的结果一致。
   冷账户在第一个请求到来时才启动进程，空闲一段时间后回收。
 - **部署是滚动替换进程，不是热更新。** workerd 的配置是静态的，cluster 模式也只在启动时读取配置。
   agent 先启动新配置的进程，让它加入 cluster，健康检查通过后切流量，再给旧进程发 SIGTERM。
@@ -110,15 +111,11 @@ Selvedge 实现这些服务端协议：
 - 元数据全部存在 Postgres。租户数据（Worker、KV namespace 等）不存成 CRD。
 - Dashboard 也由它提供。
 
-### 4.5 selvedge-controller
+### 4.5 selvedge-controller（P2 再引入）
 
-用 Kubernetes Lease 选主，只有一个实例在工作。它负责：
-
-- 把路由表和放置结果推送给 gateway 和 agent。
-- Cron 和 Queue consumer 的调度（§6）。
-- 为每个账户签发 cluster 密钥和只能访问该账户前缀的对象存储凭据。
-
-controller 挂掉或正在切主时，已有流量不受影响，只是 Cron 会延迟、不能新增账户。
+v1 不需要它：路由表由 gateway 直接从 api 拉取，放置用 rendezvous 哈希，每账户的 cluster 密钥由各 agent 从共享密钥派生。
+做 Cron 和 Queue consumer 调度时（§6）再引入，用 Kubernetes Lease 选主，同一时间只有一个实例工作；
+它挂掉或正在切主时，已有流量不受影响，只是 Cron 会延迟。
 
 ## 5. 请求路径
 
@@ -173,7 +170,7 @@ v1 用 Postgres 足够，存储层做成接口，以后有需要再加 NATS JetS
   这正好对应"每个账户一个进程"：一个账户的所有 workerd 进程组成一个 cluster，不同账户的 cluster 互不相通。
 - **每个账户的存储前缀和凭据独立**：`s3://<bucket>/do/<account_id>/`，凭据只能访问这个前缀。
   这样即使租户代码突破 V8 拿到了进程内的凭据，也只能读写自己账户的 DO 数据。
-- **每个账户的 cluster 密钥独立**（至少 32 字节随机数，由 controller 生成）。持有密钥就能访问进程里的所有服务，所以密钥绝不能共用。
+- **每个账户的 cluster 密钥独立**（由各 agent 从共享密钥按账户派生，32 字节）。持有密钥就能访问进程里的所有服务，所以密钥绝不能共用。
 - **不使用 cluster 的 deployment 功能**（`workerd deploy` 和对象存储里的 catalog）。配置由 agent 直接生成并传给进程，
   这样 Selvedge 能完全控制绑定，也不用给租户写入 catalog 的权限。
 - **D1 是系统 DO**：agent 在每个账户的配置里加入 Selvedge 的 D1 实现类，D1 数据库因此和用户的 DO 一样分布和切换。
@@ -244,7 +241,7 @@ open-compute 的 W2 补丁就是做这件事的，可以和它的维护者一起
 | 阶段 | 内容 | 完成标准 |
 | --- | --- | --- |
 | P0 | 本 RFC 定稿；完成 S1–S6；搭好仓库骨架、CI、`SECURITY.md`、`CONTRIBUTING.md`（DCO） | 每个 spike 有结论和数据 |
-| P1 | gateway、runner、api、controller、KV、R2、Static Assets、Secrets、日志；`minimal` 和 `ha` 两个 profile | `cf deploy` 能部署一个无状态应用；杀掉任意一个 Pod 或一个 AZ 的节点，请求不中断 |
+| P1 | gateway、runner、api、KV、R2、Static Assets、Secrets、日志；`minimal` 和 `ha` 两个 profile | `cf deploy` 能部署一个无状态应用；杀掉任意一个 Pod 或一个 AZ 的节点，请求不中断 |
 | P2 | cluster 模式接入、Durable Objects、Alarms、WebSocket Hibernation、D1、Queues、Cron | 杀掉 DO 所在的 Pod：已确认的写入不丢，30 秒内恢复，故障注入中不出现两个写入者 |
 | P3 | Workflows，以及 P2 中暴露的兼容性差距 | |
 
@@ -277,11 +274,34 @@ Selvedge 只需要做配置生成、凭据和测试。
 已解决：初稿的"workerd `localDisk` 提交时是否 fsync"已不再关键。cluster 模式下本地磁盘只是缓存，持久性以对象存储确认为准。
 （顺带确认：workerd 的 SQLite VFS 把 `xSync` 映射到 `datasync()` / `sync()`，见 `src/workerd/util/sqlite.c++`。）
 
-## 14. 待定问题
+## 14. 已定的问题
 
-1. **依赖实验性功能**：DO 依赖 workerd cluster 模式，它目前需要 `--experimental`。是否接受这个风险？
-   不接受的话，退路是初稿的方案：自己实现放置和转发，用跨 AZ 同步复制的块存储保证持久性，工作量会大很多。
-2. **隔离粒度**：每账户一个进程，还是每个 script 一个进程？后者更安全，但同账户的 Service Binding 就要跨进程了，
-   每个 script 也要各自组成 cluster。
-3. **管理面鉴权**：除了兼容 Cloudflare 的 API Token，Dashboard 是否需要接 OIDC？
-4. **KV 的后端**：v1 用 Postgres，规模大了以后换什么，是否现在就要定接口边界？
+2026-11-06 按"选最可行的方案"定下：
+
+1. **接受依赖实验性的 cluster 模式。** 风险缓解：固定 workerd 版本；每次升级前在 CI 跑 DO 兼容和故障注入测试；
+   cluster 的存储格式有文档、实现是 Apache-2.0 的 Rust 代码，必要时可以写导出工具，不会被格式锁死。
+2. **隔离粒度：每账户一个进程。** 同账户的 Service Binding 走原生调用，进程数随账户数增长而不是随 script 数增长。
+3. **管理面鉴权：v1 只做 Bearer API Token**（兼容 `wrangler` 和官方 SDK）。OIDC 等 Dashboard 做出来再加。
+4. **KV 后端：v1 用 Postgres，查询都在 `selvedge-store` 的 `kv_*` 函数里**，以后换后端只需替换这一层。
+
+## 15. 实现进度（2026-11-06）
+
+| 部分 | 状态 | 验证方式 |
+| --- | --- | --- |
+| api：`/client/v4` 子集（脚本、版本、部署、回滚、secret、KV、自定义域名、workers.dev 子域） | 完成 | `wrangler deploy / versions / rollback / delete / secret / kv` 端到端测试 |
+| data：KV 绑定协议服务端 | 完成 | 官方 workerd 绑定调用的端到端测试 |
+| agent：每账户一个官方 workerd 进程、按需启动、空闲回收、部署时滚动替换、SIGTERM 先摘流量再 drain | 完成 | 端到端测试；滚动重启压测零失败 |
+| gateway：按 hostname 路由、rendezvous 哈希、建连失败自动换 runner | 完成 | 端到端测试 |
+| Durable Objects（cluster 模式）：fetch、RPC、SQLite、alarm、WebSocket hibernation | 完成 | 两 runner 测试：单一所有者、runner 崩溃后 20 秒内全部恢复、无丢写 |
+| Helm chart（minimal / ha）、镜像（官方 workerd + sha512 校验）、NetworkPolicy | 完成 | `helm lint`；kind 三可用区测试在 GitHub Actions 上跑 |
+| R2、D1、Queues、Cron、Workflows、Static Assets | 未开始 | |
+| 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
+
+Spike 结论：
+
+- **S3（条件写入）**：SeaweedFS 4.50 通过 workerd 的启动检查，已用于 CI 和 Helm 的 minimal profile。
+  MinIO 在 Docker Hub 上的官方镜像已经拉不到，未测试。Garage、Rook-Ceph RGW 待测。
+- **S1（部分）**：本地两 runner：`kill -9` 一个 runner 后，它持有的对象在约 20 秒（租约时长）后恢复，期间对这些对象的调用失败、
+  不会挂起到超时；正常下线（SIGTERM）几乎无中断。Kubernetes 上的同类测试在 `test/k8s/e2e.sh`。
+- **S5（部分）**：单账户进程冷启动在本地约 0.1–0.4 秒（2 核虚拟机，含渲染配置）。
+- 实现中发现：workerd 子进程默认继承 agent 的环境变量（含内部 token），已改为清空环境、只传对象存储所需的变量。

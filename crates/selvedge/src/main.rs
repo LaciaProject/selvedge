@@ -130,6 +130,9 @@ struct AgentArgs {
     /// Allow Durable Objects without a bucket. Only safe with a single runner.
     #[arg(long, env = "SELVEDGE_ALLOW_LOCAL_DURABLE_OBJECTS")]
     allow_local_durable_objects: bool,
+    /// Seconds to keep serving, unhealthy, after SIGTERM before draining.
+    #[arg(long, env = "SELVEDGE_DRAIN_DELAY", default_value_t = 5)]
+    drain_delay: u64,
 }
 
 #[derive(Args, Clone)]
@@ -276,6 +279,7 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
         idle_timeout: Duration::from_secs(a.idle_timeout),
         cluster,
         allow_local_durable_objects: a.allow_local_durable_objects,
+        drain_delay: Duration::from_secs(a.drain_delay),
     })
 }
 
@@ -373,6 +377,7 @@ async fn run_all(args: AllArgs) -> Result<()> {
         cluster_host: "127.0.0.1".into(),
         cluster_secret: args.cluster_secret,
         allow_local_durable_objects: true,
+        drain_delay: 0,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(

@@ -1,0 +1,121 @@
+# Selvedge Helm values.
+#
+# `profile` picks defaults: `minimal` runs one replica of everything and bundles
+# PostgreSQL and SeaweedFS; `ha` runs several replicas spread over zones and
+# expects you to point it at a highly available PostgreSQL (e.g. CloudNativePG)
+# and S3-compatible store. Both profiles run the same code.
+profile: minimal
+
+image:
+  repository: ghcr.io/laciaproject/selvedge
+  tag: ""          # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+# Replica counts; empty means the profile default (minimal: 1, ha: see below).
+replicas:
+  api: null        # ha: 2
+  data: null       # ha: 3
+  gateway: null    # ha: 3
+  runner: null     # ha: 3
+
+# Hostnames `<script>.<account subdomain>.<zone>` route to scripts with
+# workers.dev enabled. Point a wildcard DNS record at the gateway.
+workersDevZone: workers.local
+
+# Platform secrets. Leave empty to generate them on install; they are kept in
+# a Secret that `helm uninstall` does not delete. Or name an existing Secret
+# with keys master-key, internal-token, admin-token and cluster-secret.
+secrets:
+  existingSecret: ""
+  masterKey: ""      # 64 hex characters; encrypts script secrets at rest
+  internalToken: ""
+  adminToken: ""     # a platform admin API token
+  clusterSecret: ""  # per-account workerd cluster keys derive from it
+
+postgres:
+  # Bundled single-instance PostgreSQL. Fine for `minimal`; for `ha` use an
+  # operator such as CloudNativePG and set `url` (or `existingSecret`).
+  bundled: true
+  image: postgres:17-alpine
+  storage: 8Gi
+  storageClass: ""
+  url: ""            # postgres://user:pass@host:5432/db
+  existingSecret: "" # a Secret with key `url`
+
+objectStore:
+  # Bundled single-node SeaweedFS. For `ha`, use a replicated S3-compatible
+  # store. It must support conditional writes (If-None-Match, If-Match):
+  # workerd's cluster mode refuses to start without them.
+  bundled: true
+  image: chrislusf/seaweedfs:4.50
+  storage: 20Gi
+  storageClass: ""
+  endpoint: ""       # https://s3.example.com (empty with bundled)
+  region: us-east-1
+  bucket: selvedge
+  accessKeyId: ""
+  secretAccessKey: ""
+  existingSecret: "" # a Secret with keys access-key-id and secret-access-key
+
+api:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+  service:
+    type: ClusterIP
+    port: 8787
+
+data:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+
+gateway:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+  # How many runners serve each account.
+  accountReplicas: 2
+  # Trust X-Forwarded-For/-Proto from the load balancer in front.
+  trustForwarded: false
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations: {}
+
+runner:
+  resources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits: { memory: 2Gi }
+  idleTimeoutSeconds: 600
+  # Seconds to keep serving, unhealthy, before draining on shutdown.
+  drainDelaySeconds: 5
+  terminationGracePeriodSeconds: 60
+  # e.g. gvisor, for an extra sandbox around workerd.
+  runtimeClassName: ""
+
+# Spread replicas over zones (on by default in `ha`).
+topologySpread:
+  enabled: null
+  topologyKey: topology.kubernetes.io/zone
+
+networkPolicy:
+  enabled: true
+  # Private ranges tenant code must not reach. workerd already limits tenant
+  # fetch() to public addresses; this is a second layer for the runner pods.
+  privateCIDRs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+    - 127.0.0.0/8
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile: { type: RuntimeDefault }
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }

@@ -1,0 +1,56 @@
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "gateway" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-gateway
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ include "selvedge.replicas" $c }}
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+    spec:
+      {{- include "selvedge.pod" $c | nindent 6 }}
+      containers:
+        - name: gateway
+          image: {{ include "selvedge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [gateway]
+          env:
+            {{- include "selvedge.commonEnv" . | nindent 12 }}
+            - name: SELVEDGE_GATEWAY_LISTEN
+              value: 0.0.0.0:8080
+            - name: SELVEDGE_API_URL
+              value: http://{{ $name }}-api:{{ .Values.api.service.port }}
+            - name: SELVEDGE_RUNNER_DNS
+              value: {{ $name }}-runner-headless.{{ .Release.Namespace }}.svc
+            - name: SELVEDGE_RUNNER_PORT
+              value: "8789"
+            - name: SELVEDGE_REPLICAS
+              value: {{ .Values.gateway.accountReplicas | quote }}
+            {{- if .Values.gateway.trustForwarded }}
+            - name: SELVEDGE_TRUST_FORWARDED
+              value: "true"
+            {{- end }}
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-gateway
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: http, port: {{ .Values.gateway.service.port }}, targetPort: http }]

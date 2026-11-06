@@ -1,0 +1,18 @@
+Selvedge {{ .Chart.AppVersion }} is installed ({{ .Values.profile }} profile).
+
+Admin API token:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "selvedge.secretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
+
+The /client/v4 API is the {{ include "selvedge.name" . }}-api Service (port {{ .Values.api.service.port }}).
+It is not exposed outside the cluster by default. To try it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "selvedge.name" . }}-api 8787:{{ .Values.api.service.port }}
+
+Create an account and an account token:
+  curl -s -X POST localhost:8787/client/v4/accounts -H "Authorization: Bearer $ADMIN" -d '{"name":"me"}'
+  curl -s -X POST localhost:8787/client/v4/accounts/$ACCOUNT/selvedge/tokens -H "Authorization: Bearer $ADMIN" -d '{"name":"cli"}'
+
+Deploy with wrangler:
+  CLOUDFLARE_API_BASE_URL=http://localhost:8787/client/v4 CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... wrangler deploy
+
+Workers are served by the {{ include "selvedge.name" . }}-gateway Service at
+<script>.<account subdomain>.{{ .Values.workersDevZone }} and at attached custom domains.

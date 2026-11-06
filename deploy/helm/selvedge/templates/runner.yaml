@@ -1,0 +1,81 @@
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "runner" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-runner
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  replicas: {{ include "selvedge.replicas" $c }}
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+    spec:
+      {{- include "selvedge.pod" $c | nindent 6 }}
+      {{- with .Values.runner.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.runner.terminationGracePeriodSeconds }}
+      containers:
+        - name: runner
+          image: {{ include "selvedge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [agent]
+          env:
+            {{- include "selvedge.commonEnv" . | nindent 12 }}
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: SELVEDGE_AGENT_LISTEN
+              value: 0.0.0.0:8789
+            - name: SELVEDGE_API_URL
+              value: http://{{ $name }}-api:{{ .Values.api.service.port }}
+            - name: SELVEDGE_DATA_ADDR
+              value: {{ $name }}-data:8788
+            - name: SELVEDGE_IDLE_TIMEOUT
+              value: {{ .Values.runner.idleTimeoutSeconds | quote }}
+            - name: SELVEDGE_DRAIN_DELAY
+              value: {{ .Values.runner.drainDelaySeconds | quote }}
+            # Durable Objects: workerd cluster mode over the object store.
+            - name: SELVEDGE_DO_BUCKET
+              value: s3://{{ .Values.objectStore.bucket }}/do
+            - name: SELVEDGE_DO_BUCKET_OPTIONS
+              value: aws_endpoint={{ include "selvedge.s3Endpoint" . }},aws_region={{ .Values.objectStore.region }}
+            - name: SELVEDGE_CLUSTER_HOST
+              value: $(POD_IP)
+            - name: SELVEDGE_CLUSTER_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: cluster-secret } }
+            # Read by workerd itself for the cluster bucket.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: access-key-id } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: secret-access-key } }
+          ports: [{ name: http, containerPort: 8789 }]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 1 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          resources: {{- toYaml .Values.runner.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/selvedge }
+            - { name: run, mountPath: /run/selvedge }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        # Code bundles and Durable Object caches; the bucket holds the truth.
+        - { name: state, emptyDir: {} }
+        - { name: run, emptyDir: { medium: Memory, sizeLimit: 16Mi } }
+        - { name: tmp, emptyDir: {} }
+---
+# Gateways discover ready runners through this headless Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-runner-headless
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: http, port: 8789, targetPort: http }]

@@ -64,8 +64,15 @@ curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/counter" -H "Authorizati
   -F 'metadata={"main_module":"index.js","compatibility_date":"2026-10-01","bindings":[{"type":"durable_object_namespace","name":"COUNTER","class_name":"Counter"}]};type=application/json' \
   -F "index.js=@$ROOT/test/e2e/fixtures/counter.js;filename=index.js;type=application/javascript+module" > /dev/null
 
-# Gateways refresh their routing table every 2 s.
+curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/room" -H "Authorization: Bearer $TOKEN" \
+  -F 'metadata={"main_module":"index.js","compatibility_date":"2026-10-01","bindings":[{"type":"durable_object_namespace","name":"ROOM","class_name":"Room"}]};type=application/json' \
+  -F "index.js=@$ROOT/test/e2e/fixtures/room.js;filename=index.js;type=application/javascript+module" > /dev/null
 sleep 3
+ROOM="room.$SUBDOMAIN.workers.test"
+check "WebSocket to a hibernatable Durable Object" "echo:hi" "$(python3 "$ROOT/test/e2e/ws.py" $((P + 80)) "$ROOM" /ws hi)"
+curl -s -H "Host: $ROOM" "http://127.0.0.1:$((P + 80))/alarm" > /dev/null
+sleep 3
+check "a Durable Object alarm fires" "1" "$(curl -s -H "Host: $ROOM" "http://127.0.0.1:$((P + 80))/")"
 HOST="counter.$SUBDOMAIN.workers.test"
 get() { curl -s -m 30 -H "Host: $HOST" "http://127.0.0.1:$((P + 80))$1"; }
 

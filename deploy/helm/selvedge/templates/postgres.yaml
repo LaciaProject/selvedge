@@ -1,0 +1,54 @@
+{{- if .Values.postgres.bundled }}
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "postgres" -}}
+# A single PostgreSQL instance for the minimal profile. For high availability
+# use an operator such as CloudNativePG and set postgres.bundled=false.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-postgres
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ $name }}-postgres
+  replicas: 1
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+    spec:
+      securityContext: { fsGroup: 70, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          env:
+            - { name: POSTGRES_USER, value: selvedge }
+            - { name: POSTGRES_DB, value: selvedge }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $name }}-database, key: password } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ name: postgres, containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, selvedge] }
+            periodSeconds: 2
+          securityContext: { runAsUser: 70, runAsGroup: 70, allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.postgres.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.postgres.storage }} } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-postgres
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: postgres, port: 5432, targetPort: postgres }]
+{{- end }}

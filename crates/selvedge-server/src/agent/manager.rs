@@ -189,7 +189,9 @@ impl Manager {
         };
         let rendered = render(&bundle, &opts, &source)?;
         let label = format!("{account}/{tag}");
-        let process = WorkerdProcess::start(&self.cfg.workerd, &rendered, &label, READY_TIMEOUT).await?;
+        let process =
+            WorkerdProcess::start(&self.cfg.workerd, &rendered, &workerd_env(), &label, READY_TIMEOUT)
+                .await?;
         tracing::info!(%account, generation = bundle.generation, "account process ready");
         let live = Arc::new(Live {
             generation: bundle.generation,
@@ -324,6 +326,24 @@ impl Manager {
             let _ = s.await;
         }
     }
+}
+
+/// The only variables workerd gets: what it needs to reach the cluster bucket,
+/// and a sane PATH/locale. Never the internal token or database URL.
+fn workerd_env() -> Vec<(String, String)> {
+    const PASS: &[&str] = &[
+        "AWS_ENDPOINT_URL",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CREDENTIALS_FILE",
+        "TZ",
+    ];
+    let mut env: Vec<(String, String)> =
+        PASS.iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
+    env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
+    env
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

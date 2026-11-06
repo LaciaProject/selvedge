@@ -15,6 +15,8 @@ use hyper_util::rt::TokioIo;
 
 pub type Body = BoxBody<Bytes, hyper::Error>;
 
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Headers between hops that must not be forwarded, except `upgrade`/`connection`
 /// on upgrade requests.
 const HOP_BY_HOP: &[&str] = &[
@@ -79,8 +81,11 @@ pub type Sender = hyper::client::conn::http1::SendRequest<Incoming>;
 pub async fn connect(target: Target<'_>) -> Result<Sender, String> {
     match target {
         Target::Tcp(addr) => {
-            let stream =
-                tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
+            // A vanished pod can drop SYNs silently; fail over instead of hanging.
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
+                .await
+                .map_err(|_| format!("connect {addr}: timed out"))?
+                .map_err(|e| format!("connect {addr}: {e}"))?;
             let _ = stream.set_nodelay(true);
             let (s, c) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
                 .await

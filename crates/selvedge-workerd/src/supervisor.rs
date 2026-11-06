@@ -20,9 +20,13 @@ pub struct WorkerdProcess {
 impl WorkerdProcess {
     /// Starts workerd on a rendered config and waits until every script socket
     /// accepts connections.
+    /// workerd starts with an empty environment plus `env`: the agent's own
+    /// environment holds platform secrets that tenant code must never reach,
+    /// even through a sandbox escape.
     pub async fn start(
         workerd: &Path,
         rendered: &Rendered,
+        env: &[(String, String)],
         label: &str,
         ready_timeout: Duration,
     ) -> Result<Self> {
@@ -37,6 +41,7 @@ impl WorkerdProcess {
         if rendered.experimental {
             cmd.arg("--experimental");
         }
+        cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
         cmd.arg(&rendered.config_path)
             .current_dir(rendered.config_path.parent().unwrap_or(Path::new(".")))
             .stdin(Stdio::null())

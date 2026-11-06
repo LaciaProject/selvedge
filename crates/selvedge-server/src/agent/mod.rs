@@ -11,6 +11,7 @@ mod manager;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -50,6 +51,9 @@ pub struct AgentConfig {
     pub idle_timeout: Duration,
     pub cluster: Option<AgentCluster>,
     pub allow_local_durable_objects: bool,
+    /// After a shutdown signal, how long to keep serving while reporting
+    /// unhealthy, so gateways stop sending new requests before the drain.
+    pub drain_delay: Duration,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -72,26 +76,41 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
 
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     tracing::info!(addr = %cfg.listen, "agent listening");
+    let draining = Arc::new(AtomicBool::new(false));
     let handler = {
         let cfg = cfg.clone();
         let manager = manager.clone();
+        let draining = draining.clone();
         Arc::new(move |req: Request<Incoming>| {
             let cfg = cfg.clone();
             let manager = manager.clone();
-            async move { handle(&cfg, &manager, req).await }
+            let draining = draining.clone();
+            async move { handle(&cfg, &manager, &draining, req).await }
         })
+    };
+    let accept = |accepted: std::io::Result<(tokio::net::TcpStream, SocketAddr)>| match accepted {
+        Ok((stream, _)) => {
+            let _ = stream.set_nodelay(true);
+            proxy::serve_connection(stream, handler.clone());
+        }
+        Err(e) => tracing::warn!(error = %e, "accept failed"),
     };
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nodelay(true);
-                    proxy::serve_connection(stream, handler.clone());
-                }
-                Err(e) => tracing::warn!(error = %e, "accept failed"),
-            },
+            accepted = listener.accept() => accept(accepted),
             () = &mut shutdown => break,
+        }
+    }
+    // Fail health checks but keep serving, so gateways move away first.
+    draining.store(true, Ordering::SeqCst);
+    tracing::info!(delay = ?cfg.drain_delay, "agent unhealthy; waiting before draining");
+    let delay = tokio::time::sleep(cfg.drain_delay);
+    tokio::pin!(delay);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => accept(accepted),
+            () = &mut delay => break,
         }
     }
     tracing::info!("agent draining");
@@ -100,9 +119,18 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     Ok(())
 }
 
-async fn handle(cfg: &AgentConfig, manager: &Arc<Manager>, mut req: Request<Incoming>) -> Response<Body> {
+async fn handle(
+    cfg: &AgentConfig,
+    manager: &Arc<Manager>,
+    draining: &AtomicBool,
+    mut req: Request<Incoming>,
+) -> Response<Body> {
     if req.uri().path() == "/healthz" && !req.headers().contains_key(ACCOUNT_HEADER) {
-        return proxy::full(StatusCode::OK, "ok");
+        return if draining.load(Ordering::SeqCst) {
+            proxy::full(StatusCode::SERVICE_UNAVAILABLE, "draining")
+        } else {
+            proxy::full(StatusCode::OK, "ok")
+        };
     }
     let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let authorized = header(TOKEN_HEADER)

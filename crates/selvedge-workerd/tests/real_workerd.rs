@@ -93,7 +93,7 @@ export default {
             .ok_or_else(|| anyhow::anyhow!("no blob {sha}"))
     };
     let rendered = render(&bundle, &opts, &src).unwrap();
-    let proc = WorkerdProcess::start(&bin, &rendered, "test", Duration::from_secs(20)).await.unwrap();
+    let proc = WorkerdProcess::start(&bin, &rendered, &[], "test", Duration::from_secs(20)).await.unwrap();
     let main_sock = proc.socket("main").unwrap().to_owned();
     let body = get(&main_sock, "/").await;
     assert!(body.ends_with("hello wor\"ld 7 3"), "{body}");

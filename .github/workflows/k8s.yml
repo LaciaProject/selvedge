@@ -1,0 +1,61 @@
+name: kubernetes
+
+# Multi-node high-availability tests on kind: three workers in three zones, the
+# ha profile, rolling restarts and runner crashes under load. Heavier than ci.yml,
+# so it runs on `ci/*` branches, on main, and on demand.
+on:
+  push:
+    branches: [main, "ci/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: selvedge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: selvedge
+          config: test/k8s/kind.yaml
+      - uses: azure/setup-helm@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wrangler
+        run: cd test/e2e && npm install --no-audit --no-fund
+      - name: Load the image and install Selvedge (ha profile)
+        run: |
+          kind load docker-image selvedge:ci --name selvedge
+          helm install slv deploy/helm/selvedge --namespace selvedge --create-namespace \
+            --set profile=ha --set image.repository=selvedge --set image.tag=ci \
+            --set image.pullPolicy=Never --set gateway.service.type=ClusterIP \
+            --set runner.resources.requests.cpu=100m --set runner.resources.requests.memory=128Mi \
+            --wait --timeout 10m
+          kubectl -n selvedge get pods -o wide
+      - name: High-availability tests
+        run: test/k8s/e2e.sh
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n selvedge get pods -o wide
+          kubectl -n selvedge get events --sort-by=.lastTimestamp | tail -40
+          for c in api data gateway runner; do
+            echo "=== $c"; kubectl -n selvedge logs -l app.kubernetes.io/component=$c --tail=80 --all-containers --prefix || true
+          done

@@ -267,6 +267,11 @@ pub(super) async fn create_version(
             Binding::Service { service, .. } => {
                 validate_script_name(service).map_err(|e| ApiError::bad_request(e.to_string()))?;
             }
+            Binding::Queue { queue_name, .. } => {
+                if state.db.queue(&id, queue_name).await?.is_none() {
+                    return Err(ApiError::bad_request(format!("Queue `{queue_name}` not found")));
+                }
+            }
             Binding::D1 { id: db, .. } => {
                 if state.db.d1_database(&id, db).await?.is_none_or(|d| d.id != *db) {
                     return Err(ApiError::bad_request(format!("D1 database `{db}` not found")));

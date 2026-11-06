@@ -121,6 +121,29 @@ check "D1 binding: prepare, bind, run, first, blobs, batch, all, raw, rollback, 
   '{"insert":[true,1,true],"first":"ada","blob":[1,2,3],"batch":3,"all":["ada","grace","linus"],"raw":[["id","name"],[1,"ada"]],"rollback":true,"error":true}' \
   "$(curl -s -H "Host: d1test.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/run")"
 
+# Queues: a queue through wrangler, one Worker producing and consuming it.
+wrangler queues create e2e-jobs > /dev/null 2>&1
+QAPP="$WORK/queue-app"
+mkdir -p "$QAPP" && cp "$E2E/fixtures/queue-app/index.js" "$QAPP/"
+cat > "$QAPP/wrangler.jsonc" <<JSON
+{ "name": "queue-app", "main": "index.js", "compatibility_date": "2026-10-01",
+  "kv_namespaces": [{ "binding": "KV", "id": "$NAMESPACE" }],
+  "queues": { "producers": [{ "binding": "JOBS", "queue": "e2e-jobs" }],
+              "consumers": [{ "queue": "e2e-jobs", "max_batch_size": 5, "max_retries": 2 }] } }
+JSON
+(cd "$QAPP" && "$E2E/node_modules/.bin/wrangler" deploy > "$WORK/queue.log" 2>&1) || { cat "$WORK/queue.log"; exit 1; }
+settle
+QHOST="queue-app.$SUBDOMAIN.workers.test"
+check "queue producer sends" "sent" "$(curl -s -H "Host: $QHOST" "http://127.0.0.1:$GATEWAY_PORT/send")"
+q_out=""
+for _ in $(seq 1 30); do
+  q_out=$(curl -s -H "Host: $QHOST" "http://127.0.0.1:$GATEWAY_PORT/")
+  [[ $q_out == *flaky* ]] && break
+  sleep 1
+done
+check "queue consumer receives, acks and retries" \
+  'e2e-jobs:{"n":1}#1;e2e-jobs:{"n":2}#1;e2e-jobs:"three"#1;e2e-jobs:{"flaky":true}#2;' "$q_out"
+
 # Cron Triggers: deployed by wrangler, fired on the next minute boundary.
 CRON="$WORK/cron-app"
 mkdir -p "$CRON" && cp "$E2E/fixtures/cron-app/index.js" "$CRON/"
@@ -132,7 +155,8 @@ JSON
 cron_out=never
 for _ in $(seq 1 70); do
   cron_out=$(curl -s -H "Host: cron-app.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/")
-  [ "$cron_out" != never ] && break
+  # Wait through "not routed yet" and "never": only a firing ends the loop.
+  [[ $cron_out == *"|"* ]] && break
   sleep 1
 done
 check "a Cron Trigger runs the scheduled handler" "* * * * *|number" "$cron_out"

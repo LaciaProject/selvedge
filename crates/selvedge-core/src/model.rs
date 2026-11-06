@@ -86,6 +86,10 @@ pub enum Binding {
         name: String,
         id: String,
     },
+    Queue {
+        name: String,
+        queue_name: String,
+    },
     R2Bucket {
         name: String,
         bucket_name: String,
@@ -97,7 +101,6 @@ pub enum Binding {
 /// Binding types Selvedge knows about but does not implement yet. An upload that
 /// uses one is rejected instead of silently missing the binding.
 const NOT_YET: &[&str] = &[
-    "queue",
     "analytics_engine",
     "ai",
     "browser",
@@ -124,7 +127,8 @@ impl Binding {
             | Self::Service { name, .. }
             | Self::DurableObjectNamespace { name, .. }
             | Self::R2Bucket { name, .. }
-            | Self::D1 { name, .. } => name,
+            | Self::D1 { name, .. }
+            | Self::Queue { name, .. } => name,
         }
     }
 
@@ -198,7 +202,9 @@ mod tests {
         assert!(matches!(r2, Binding::R2Bucket { .. }));
         let d1 = Binding::parse(&json!({"type": "d1", "name": "DB", "id": "x"})).unwrap();
         assert!(matches!(d1, Binding::D1 { .. }));
-        let err = Binding::parse(&json!({"type": "queue", "name": "Q", "queue_name": "x"})).unwrap_err();
+        let q = Binding::parse(&json!({"type": "queue", "name": "Q", "queue_name": "jobs"})).unwrap();
+        assert!(matches!(q, Binding::Queue { .. }));
+        let err = Binding::parse(&json!({"type": "vectorize", "name": "V", "index_name": "x"})).unwrap_err();
         assert!(err.contains("not supported"));
         let err =
             Binding::parse(&json!({"type": "kv_namespace", "name": "KV", "namespace_id": "x"})).unwrap_err();

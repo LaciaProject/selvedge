@@ -297,7 +297,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | R2：绑定协议（含 multipart、条件请求、范围读取）、REST API、旧内容延迟回收 | 完成 | 端到端测试（绑定 + `wrangler r2`） |
 | D1：官方 `d1-api` 绑定 + 系统 worker（每个数据库一个 SQLite DO，自动获得 cluster 模式的高可用）、REST API（create / execute / migrations） | 完成 | 绑定和 wrangler 的端到端测试；runner 崩溃后数据仍在 |
 | Cron：`triggers.crons`、`L/W/#` 语法，data 副本用 SKIP LOCKED 认领到期触发（每次触发只执行一次，不需要选主），经系统 worker `selvedge-events` 投递 | 完成 | wrangler 部署 + 真实定时触发的端到端测试 |
-| Queues | 未开始 | 官方 `Fetcher.queue()` 需要实验性标志 `service_binding_extra_handlers`，打开它会让租户也能用实验性标志，暂缓 |
+| Queues：官方 Queue 生产者绑定；消息存 Postgres，data 副本按租约认领批次（至少一次投递），经 `selvedge-events` 以 `MessageBatch` 形状的对象投递；重试、死信队列 | 完成（不支持 `v8` 格式：解码需要实验性标志） | wrangler 部署 + 生产、消费、重试的端到端测试 |
 | Workflows、Static Assets | 未开始 | |
 | 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 

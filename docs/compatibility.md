@@ -125,10 +125,26 @@ Differences:
 
 ## Queues
 
-Not supported yet. Delivering batches with workerd's own `Fetcher.queue()` requires the experimental
-`service_binding_extra_handlers` flag, and enabling experimental flags for account processes would
-let tenants turn on any experimental flag. Selvedge will add Queues once it can deliver batches
-without that.
+Producers use workerd's own `Queue` binding: `send` and `sendBatch`, with `delaySeconds` and the
+`json` (default), `text` and `bytes` content types. Messages are rows in PostgreSQL. Worker
+consumers (`queues.consumers` in a wrangler config, or `wrangler queues consumer add`) receive
+batches with `ack()`, `retry({ delaySeconds })`, `ackAll()` and `retryAll()`, and Cloudflare's rules
+for what a returning or throwing handler means. Messages that run out of retries move to the
+dead-letter queue if one is set, else they are dropped. `wrangler queues create/list/delete` work.
+
+Delivery is at least once: a batch is leased in the database while it is delivered, so data service
+replicas never deliver a message twice at the same time, and a lease left by a crashed replica
+expires and the batch is delivered again.
+
+Differences:
+
+- The `v8` content type (structured clone of arbitrary values) is refused by `send`. Decoding it for
+  the consumer would need workerd's experimental `service_binding_extra_handlers` flag, which
+  Selvedge does not enable for tenants. Use `json` (the default), `text` or `bytes`.
+- Batches are delivered as soon as messages are ready; `max_batch_timeout` is stored but does not
+  hold messages back to fill a batch.
+- HTTP pull consumers, `queue.metrics()` details beyond the backlog, and pausing delivery are not
+  available yet.
 
 ## Deployments and the API
 

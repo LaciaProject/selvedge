@@ -329,13 +329,21 @@ async fn main() -> Result<()> {
             match &args.gateway_url {
                 Some(url) => {
                     let d = selvedge_server::dispatch::Dispatcher::new(
-                        db,
+                        db.clone(),
                         url.clone(),
                         args.internal.internal_token.clone(),
                     );
                     tokio::spawn(d.run_cron());
+                    let q = selvedge_server::queues::QueueDispatcher::new(
+                        db,
+                        url.clone(),
+                        args.internal.internal_token.clone(),
+                    );
+                    tokio::spawn(q.run());
                 }
-                None => tracing::warn!("SELVEDGE_GATEWAY_URL is not set: Cron Triggers will not run"),
+                None => tracing::warn!(
+                    "SELVEDGE_GATEWAY_URL is not set: Cron Triggers and queue consumers will not run"
+                ),
             }
             serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
@@ -413,6 +421,12 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         token.clone(),
     );
     tokio::spawn(dispatcher.run_cron());
+    let queues = selvedge_server::queues::QueueDispatcher::new(
+        state.db.clone(),
+        args.api.gateway_url.clone().expect("set above"),
+        token.clone(),
+    );
+    tokio::spawn(queues.run());
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));

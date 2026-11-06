@@ -24,6 +24,9 @@ pub const KV_NAMESPACE_HEADER: &str = "x-selvedge-kv-namespace";
 /// The header carrying the R2 bucket name on binding requests.
 pub const R2_BUCKET_HEADER: &str = "x-selvedge-r2-bucket";
 
+/// The header carrying the queue name on producer requests.
+pub const QUEUE_HEADER: &str = "x-selvedge-queue";
+
 /// The system worker that delivers Cron Triggers and queue batches.
 pub const EVENTS_SERVICE: &str = "selvedge-events";
 const EVENTS_WORKER: &str = include_str!("events.js");
@@ -168,6 +171,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
     let mut sockets = Vec::new();
     let mut kv_namespaces = BTreeSet::new();
     let mut r2_buckets = BTreeSet::new();
+    let mut queues = BTreeSet::new();
     let mut need_missing = false;
 
     for (index, script) in bundle.scripts.iter().enumerate() {
@@ -176,6 +180,10 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         kv_namespaces.extend(kvs);
         r2_buckets.extend(script.bindings.iter().filter_map(|b| match b {
             Binding::R2Bucket { bucket_name, .. } => Some(bucket_name.clone()),
+            _ => None,
+        }));
+        queues.extend(script.bindings.iter().filter_map(|b| match b {
+            Binding::Queue { queue_name, .. } => Some(queue_name.clone()),
             _ => None,
         }));
         services.push(format!("(name = {}, worker = {worker})", quote(&worker_service(&script.name))));
@@ -199,6 +207,15 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(&format!("unix:{}", opts.binding_socket.display())),
             quote(KV_NAMESPACE_HEADER),
             quote(ns),
+        ));
+    }
+    for queue in &queues {
+        services.push(format!(
+            "(name = {}, external = (address = {}, http = (injectRequestHeaders = [(name = {}, value = {})])))",
+            quote(&format!("q-{queue}")),
+            quote(&format!("unix:{}", opts.binding_socket.display())),
+            quote(QUEUE_HEADER),
+            quote(queue),
         ));
     }
     for bucket in &r2_buckets {
@@ -383,6 +400,7 @@ fn render_worker(
                     _ => format!("service = {}", quote(&target)),
                 }
             }
+            Binding::Queue { queue_name, .. } => format!("queue = {}", quote(&format!("q-{queue_name}"))),
             Binding::D1 { id, .. } => format!(
                 "wrapped = (moduleName = \"cloudflare-internal:d1-api\", innerBindings = [(name = \"fetcher\", \
                  service = (name = {}, props = (json = {})))])",

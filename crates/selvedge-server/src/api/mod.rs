@@ -6,6 +6,7 @@ mod d1;
 mod domains;
 mod internal;
 mod kv;
+mod queues;
 mod r2;
 mod scripts;
 mod versions;
@@ -47,6 +48,7 @@ pub fn router(state: State) -> Router {
         .merge(versions::routes())
         .merge(r2::routes())
         .merge(d1::routes())
+        .merge(queues::routes())
         .merge(internal::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(no_method)

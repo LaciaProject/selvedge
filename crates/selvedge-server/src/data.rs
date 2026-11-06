@@ -83,6 +83,37 @@ async fn dispatch(AxState(state): AxState<Arc<DataState>>, req: axum::extract::R
     if req.headers().contains_key(crate::r2::BUCKET_HEADER) {
         return r2_dispatch(&state, req).await;
     }
+    if let Some(queue) = req
+        .headers()
+        .get(selvedge_workerd::render::QUEUE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    {
+        let (parts, body) = req.into_parts();
+        let Some(account) =
+            parts.headers.get(ACCOUNT_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())
+        else {
+            return error(StatusCode::BAD_REQUEST, "missing account");
+        };
+        let Ok(body) = axum::body::to_bytes(
+            body,
+            crate::queues::MAX_MESSAGE_BYTES * crate::queues::MAX_BATCH_MESSAGES * 2,
+        )
+        .await
+        else {
+            return error(StatusCode::PAYLOAD_TOO_LARGE, "batch too large");
+        };
+        return crate::queues::produce(
+            &state.db,
+            &account,
+            &queue,
+            parts.method,
+            parts.uri.path(),
+            &parts.headers,
+            body,
+        )
+        .await;
+    }
     let (parts, body) = req.into_parts();
     let Ok(body) = axum::body::to_bytes(body, kvlogic::MAX_VALUE_BYTES + 4096).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "Value too large");

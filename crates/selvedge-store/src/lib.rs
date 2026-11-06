@@ -6,6 +6,7 @@
 pub mod blobs;
 pub mod cron;
 pub mod db;
+pub mod queues;
 pub mod r2;
 pub mod repo;
 pub mod secrets;

@@ -51,11 +51,12 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | --- | --- |
 | ES module Workers, multiple modules, `nodejs_compat` and other compatibility flags | Service-worker syntax |
 | `wrangler deploy`, `versions upload/deploy`, `rollback`, `delete`, `secret put/delete` | Gradual (percentage) deployments |
-| KV (binding and REST API, `wrangler kv`) | Queues, Workflows |
+| KV (binding and REST API, `wrangler kv`) | Workflows |
 | Durable Objects: fetch, WebSockets, JS RPC, SQLite and KV storage, alarms | Static assets, Workers AI, Hyperdrive, Analytics Engine |
 | R2 (binding, multipart, conditional requests; `wrangler r2`) | R2's S3-compatible endpoint, presigned URLs |
 | D1 (binding, batches, `wrangler d1 create/execute/migrations`) | D1 read replicas, Time Travel, import/export |
 | Cron Triggers (`triggers.crons`, including `L`, `W` and `#`) | |
+| Queues (producers, Worker consumers, retries, dead-letter queues; `wrangler queues`) | `v8` message format, HTTP pull consumers |
 | Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush, `wrangler tail` |
 | workers.dev-style hostnames and custom domains | Routes on zones |
 
@@ -80,12 +81,14 @@ cargo build --release
 npm install -g workerd@1.20261106.1 wrangler   # or point SELVEDGE_WORKERD at a workerd binary
 
 export SELVEDGE_DATABASE_URL=postgres://user:pass@localhost/selvedge
-export SELVEDGE_BLOB_URL=file:///var/lib/selvedge/blobs
+export SELVEDGE_BLOB_URL=file://$HOME/.local/share/selvedge/blobs
 export SELVEDGE_MASTER_KEY=$(openssl rand -hex 32)
 export SELVEDGE_INTERNAL_TOKEN=$(openssl rand -hex 16)
 export SELVEDGE_ADMIN_TOKEN=$(openssl rand -hex 16)
 export SELVEDGE_WORKERS_DEV_ZONE=workers.localhost
-./target/release/selvedge all
+export SELVEDGE_STATE_DIR=$HOME/.local/share/selvedge
+export SELVEDGE_RUN_DIR=$XDG_RUNTIME_DIR/selvedge   # keep short: Unix socket paths are limited
+./target/release/selvedge all                      # API :8787, gateway :8080
 ```
 
 Then create an account and deploy:

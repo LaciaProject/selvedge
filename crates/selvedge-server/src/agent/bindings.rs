@@ -30,7 +30,11 @@ pub fn serve(cfg: Arc<AgentConfig>, account: AccountId, path: &Path) -> Result<(
             let headers = req.headers_mut();
             proxy::strip_internal_except(
                 headers,
-                &[selvedge_workerd::render::KV_NAMESPACE_HEADER, selvedge_workerd::render::R2_BUCKET_HEADER],
+                &[
+                    selvedge_workerd::render::KV_NAMESPACE_HEADER,
+                    selvedge_workerd::render::R2_BUCKET_HEADER,
+                    selvedge_workerd::render::QUEUE_HEADER,
+                ],
             );
             headers.insert(ACCOUNT_HEADER, account_header);
             headers.insert(http::header::AUTHORIZATION, auth);

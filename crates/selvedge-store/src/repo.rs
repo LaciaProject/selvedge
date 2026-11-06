@@ -104,6 +104,11 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
+/// A timestamp formatted like every other API timestamp.
+pub fn rfc3339(t: std::time::SystemTime) -> String {
+    ts(t)
+}
+
 /// The current time, formatted like every other API timestamp.
 pub fn now_rfc3339() -> String {
     ts(std::time::SystemTime::now())
@@ -968,6 +973,7 @@ fn binding_type(b: &Binding) -> &'static str {
         Binding::DurableObjectNamespace { .. } => "durable_object_namespace",
         Binding::R2Bucket { .. } => "r2_bucket",
         Binding::D1 { .. } => "d1",
+        Binding::Queue { .. } => "queue",
     }
 }
 

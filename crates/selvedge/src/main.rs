@@ -97,6 +97,9 @@ struct DataArgs {
     /// Where R2 object bytes live (the same store as the API's blobs).
     #[arg(long, env = "SELVEDGE_BLOB_URL")]
     blob_url: String,
+    /// The gateway, for delivering Cron Triggers.
+    #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
+    gateway_url: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -322,7 +325,18 @@ async fn main() -> Result<()> {
                 args.internal.internal_token.clone(),
             );
             tokio::spawn(purge_expired(db.clone()));
-            tokio::spawn(collect_garbage(db, blobs));
+            tokio::spawn(collect_garbage(db.clone(), blobs));
+            match &args.gateway_url {
+                Some(url) => {
+                    let d = selvedge_server::dispatch::Dispatcher::new(
+                        db,
+                        url.clone(),
+                        args.internal.internal_token.clone(),
+                    );
+                    tokio::spawn(d.run_cron());
+                }
+                None => tracing::warn!("SELVEDGE_GATEWAY_URL is not set: Cron Triggers will not run"),
+            }
             serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
         Command::Agent(args) => {
@@ -393,6 +407,12 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     let data = selvedge_server::data::DataState::new(state.db.clone(), state.blobs.clone(), token.clone());
     tokio::spawn(purge_expired(state.db.clone()));
     tokio::spawn(collect_garbage(state.db.clone(), state.blobs.clone()));
+    let dispatcher = selvedge_server::dispatch::Dispatcher::new(
+        state.db.clone(),
+        args.api.gateway_url.clone().expect("set above"),
+        token.clone(),
+    );
+    tokio::spawn(dispatcher.run_cron());
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));

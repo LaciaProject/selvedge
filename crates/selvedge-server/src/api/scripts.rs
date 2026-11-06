@@ -527,22 +527,49 @@ async fn set_script_subdomain(
     Ok(ok(json!({ "enabled": body.enabled, "previews_enabled": false })))
 }
 
-/// Cron triggers are not implemented yet: report none, and reject setting any.
-async fn schedules(caller: Caller, Path((_account, _script)): Path<(String, String)>) -> Response {
-    let _ = caller;
-    ok(json!({ "schedules": [] }))
+async fn schedules(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, script)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let id = script_access(&state, &caller, &account, &script).await?;
+    let list = state.db.schedules(&id, &script).await?;
+    Ok(ok(json!({
+        "schedules": list.iter().map(|(cron, created)| json!({ "cron": cron, "created_on": created, "modified_on": created })).collect::<Vec<_>>()
+    })))
 }
 
+#[derive(Deserialize)]
+struct Schedule {
+    cron: String,
+}
+
+/// Replaces a script's Cron Triggers (`wrangler deploy` with `triggers.crons`).
 async fn put_schedules(
+    AxState(state): AxState<State>,
     caller: Caller,
-    Path((_account, _script)): Path<(String, String)>,
-    super::JsonBody(body): super::JsonBody<Value>,
+    Path((account, script)): Path<(String, String)>,
+    super::JsonBody(body): super::JsonBody<Vec<Schedule>>,
 ) -> ApiResult<Response> {
-    let _ = caller;
-    if body.as_array().is_some_and(|a| !a.is_empty()) {
-        return Err(ApiError::bad_request("Cron Triggers are not supported by Selvedge yet"));
+    let id = script_access(&state, &caller, &account, &script).await?;
+    if body.len() > 5 {
+        return Err(ApiError::bad_request("a Worker can have at most 5 Cron Triggers"));
     }
-    Ok(ok(json!({ "schedules": [] })))
+    let crons: Vec<String> = body.iter().map(|s| s.cron.trim().to_owned()).collect();
+    for c in &crons {
+        selvedge_store::cron::parse(c).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    }
+    if !state.db.set_schedules(&id, &script, &crons).await? {
+        return Err(ApiError::new(
+            http::StatusCode::NOT_FOUND,
+            10007,
+            "This Worker does not exist on your account.",
+        ));
+    }
+    let now = selvedge_store::repo::now_rfc3339();
+    Ok(ok(json!({
+        "schedules": crons.iter().map(|c| json!({ "cron": c, "created_on": now, "modified_on": now })).collect::<Vec<_>>()
+    })))
 }
 
 async fn do_namespaces(caller: Caller, Path(_account): Path<String>) -> Response {

@@ -4,6 +4,7 @@
 //! blobs in an S3-compatible bucket. Migrations are append-only.
 
 pub mod blobs;
+pub mod cron;
 pub mod db;
 pub mod r2;
 pub mod repo;

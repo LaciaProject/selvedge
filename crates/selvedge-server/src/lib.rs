@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod api;
 pub mod data;
+pub mod dispatch;
 pub mod error;
 pub mod gateway;
 pub mod kvlogic;

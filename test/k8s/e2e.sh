@@ -62,8 +62,18 @@ check "Durable Object counts" "1" "$(do_get first)"
 for n in $OBJECTS; do do_get $n > /dev/null; done
 
 # Stateless load in the background for the length of a disruption.
-load_start() { rm -f "$WORK/stop"; ( f=0 t=0; while [ ! -f "$WORK/stop" ]; do t=$((t+1)); [ "$(kv)" = 200 ] || f=$((f+1)); sleep 0.05; done; echo "$f $t" > "$WORK/load.out" ) & LOAD=$!; }
-load_stop() { touch "$WORK/stop"; wait $LOAD; read -r FAILS TOTAL < "$WORK/load.out"; }
+load_start() {
+  rm -f "$WORK/stop" "$WORK/codes"
+  ( f=0 t=0
+    while [ ! -f "$WORK/stop" ]; do
+      t=$((t+1)); code=$(kv); [ "$code" = 200 ] || { f=$((f+1)); echo "$(date +%T) $code" >> "$WORK/codes"; }; sleep 0.05
+    done
+    echo "$f $t" > "$WORK/load.out" ) & LOAD=$!
+}
+load_stop() {
+  touch "$WORK/stop"; wait $LOAD; read -r FAILS TOTAL < "$WORK/load.out"
+  [ -f "$WORK/codes" ] && { echo "     failed requests:"; sed 's/^/       /' "$WORK/codes"; } || true
+}
 
 # 1. Rolling restart of every runner: graceful drains, no failed requests.
 load_start

@@ -104,6 +104,11 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
+/// The current time, formatted like every other API timestamp.
+pub fn now_rfc3339() -> String {
+    ts(std::time::SystemTime::now())
+}
+
 fn ts(t: std::time::SystemTime) -> String {
     // RFC 3339 in UTC without pulling in a date library.
     let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();

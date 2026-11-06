@@ -24,6 +24,10 @@ pub const KV_NAMESPACE_HEADER: &str = "x-selvedge-kv-namespace";
 /// The header carrying the R2 bucket name on binding requests.
 pub const R2_BUCKET_HEADER: &str = "x-selvedge-r2-bucket";
 
+/// The system worker that delivers Cron Triggers and queue batches.
+pub const EVENTS_SERVICE: &str = "selvedge-events";
+const EVENTS_WORKER: &str = include_str!("events.js");
+
 /// The system worker behind D1 bindings and the D1 REST API.
 pub const D1_SERVICE: &str = "selvedge-d1";
 const D1_WORKER: &str = include_str!("d1.js");
@@ -212,6 +216,34 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(MISSING_SERVICE),
             quote(MISSING_WORKER),
         ));
+    }
+    if !bundle.scripts.is_empty() {
+        std::fs::write(opts.dir.join("m").join("selvedge-events.js"), EVENTS_WORKER)?;
+        let bindings: Vec<String> = bundle
+            .scripts
+            .iter()
+            .map(|s| {
+                format!(
+                    "(name = {}, service = {})",
+                    quote(&format!("S_{}", s.name)),
+                    quote(&worker_service(&s.name))
+                )
+            })
+            .collect();
+        services.push(format!(
+            "(name = {}, worker = (modules = [(name = \"events.js\", esModule = embed \"m/selvedge-events.js\")], \
+             compatibilityDate = \"2025-09-01\", bindings = [{}]))",
+            quote(EVENTS_SERVICE),
+            bindings.join(", "),
+        ));
+        let socket = opts.socket_dir.join("events.sock");
+        sockets_cfg.push(format!(
+            "(name = {}, address = {}, http = (), service = {})",
+            quote(EVENTS_SERVICE),
+            quote(&format!("unix:{}", socket.display())),
+            quote(EVENTS_SERVICE),
+        ));
+        sockets.push((EVENTS_SERVICE.to_owned(), socket));
     }
     let d1 = uses_d1(bundle);
     if d1 {
@@ -477,6 +509,7 @@ mod tests {
         assert!(text.contains("service = \"selvedge-missing\""));
         assert!(text.contains("hi \\\"there\\\""));
         assert!(!r.experimental);
-        assert_eq!(r.sockets.len(), 1);
+        // The script and the events system worker.
+        assert_eq!(r.sockets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["hello", EVENTS_SERVICE]);
     }
 }

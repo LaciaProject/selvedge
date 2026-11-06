@@ -121,6 +121,22 @@ check "D1 binding: prepare, bind, run, first, blobs, batch, all, raw, rollback, 
   '{"insert":[true,1,true],"first":"ada","blob":[1,2,3],"batch":3,"all":["ada","grace","linus"],"raw":[["id","name"],[1,"ada"]],"rollback":true,"error":true}' \
   "$(curl -s -H "Host: d1test.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/run")"
 
+# Cron Triggers: deployed by wrangler, fired on the next minute boundary.
+CRON="$WORK/cron-app"
+mkdir -p "$CRON" && cp "$E2E/fixtures/cron-app/index.js" "$CRON/"
+cat > "$CRON/wrangler.jsonc" <<JSON
+{ "name": "cron-app", "main": "index.js", "compatibility_date": "2026-10-01",
+  "kv_namespaces": [{ "binding": "KV", "id": "$NAMESPACE" }], "triggers": { "crons": ["* * * * *"] } }
+JSON
+(cd "$CRON" && "$E2E/node_modules/.bin/wrangler" deploy > "$WORK/cron.log" 2>&1) || { cat "$WORK/cron.log"; exit 1; }
+cron_out=never
+for _ in $(seq 1 70); do
+  cron_out=$(curl -s -H "Host: cron-app.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/")
+  [ "$cron_out" != never ] && break
+  sleep 1
+done
+check "a Cron Trigger runs the scheduled handler" "* * * * *|number" "$cron_out"
+
 wrangler delete > /dev/null 2>&1
 settle
 check "delete unroutes the hostname" "404" "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$GATEWAY_PORT/")"

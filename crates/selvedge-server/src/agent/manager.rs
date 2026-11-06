@@ -332,13 +332,26 @@ impl Manager {
         })
     }
 
+    /// A GET to the API, retried when the connection fails or times out. Each
+    /// attempt is a new connection, so it can reach another API replica while
+    /// a dead one is still listed in the Service's endpoints.
+    async fn get(&self, client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match client.get(url).bearer_auth(&self.cfg.internal_token).send().await {
+                Ok(r) => return Ok(r),
+                Err(e) if attempt < 4 && (e.is_connect() || e.is_timeout()) => {
+                    tracing::debug!(%url, attempt, error = %e, "API request failed; retrying");
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     async fn generation(&self, account: &AccountId) -> Result<Option<i64>> {
-        let resp = self
-            .control
-            .get(format!("{}/internal/v1/accounts/{account}/generation", self.cfg.api_url))
-            .bearer_auth(&self.cfg.internal_token)
-            .send()
-            .await?;
+        let url = format!("{}/internal/v1/accounts/{account}/generation", self.cfg.api_url);
+        let resp = self.get(&self.control, &url).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -347,15 +360,8 @@ impl Manager {
     }
 
     async fn bundle(&self, account: &AccountId) -> Result<AccountBundle> {
-        Ok(self
-            .http
-            .get(format!("{}/internal/v1/accounts/{account}/bundle", self.cfg.api_url))
-            .bearer_auth(&self.cfg.internal_token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        let url = format!("{}/internal/v1/accounts/{account}/bundle", self.cfg.api_url);
+        Ok(self.get(&self.http, &url).await?.error_for_status()?.json().await?)
     }
 
     async fn fetch_blobs(&self, bundle: &AccountBundle) -> Result<()> {
@@ -366,15 +372,8 @@ impl Manager {
             if path.exists() {
                 continue;
             }
-            let bytes = self
-                .http
-                .get(format!("{}/internal/v1/blobs/{}", self.cfg.api_url, m.sha256))
-                .bearer_auth(&self.cfg.internal_token)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?;
+            let url = format!("{}/internal/v1/blobs/{}", self.cfg.api_url, m.sha256);
+            let bytes = self.get(&self.http, &url).await?.error_for_status()?.bytes().await?;
             anyhow::ensure!(
                 selvedge_core::sha256_hex(&bytes) == m.sha256,
                 "blob {} failed its hash check",

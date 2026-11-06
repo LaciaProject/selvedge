@@ -108,6 +108,28 @@ Differences:
 - Requires an S3-compatible store that supports conditional writes (`If-None-Match: *` and
   `If-Match`). Tested: SeaweedFS 4.50. workerd refuses to start against a store without them.
 
+## Cron Triggers
+
+`triggers.crons` in a wrangler config, or `PUT /workers/scripts/:name/schedules`, sets up to five
+triggers per script. Expressions have five fields in UTC and support Cloudflare's `L`, `W` and `#`.
+Firings are claimed in PostgreSQL by whichever data service replica gets there first, so each runs
+once.
+
+Differences:
+
+- `event.noRetry()` is accepted but has no effect: like Cloudflare, Selvedge does not retry a
+  failed firing.
+- A trigger that falls behind (for example while PostgreSQL is down) fires once when it can, not
+  once per missed slot.
+- `wrangler dev --test-scheduled` is a local feature and is unaffected.
+
+## Queues
+
+Not supported yet. Delivering batches with workerd's own `Fetcher.queue()` requires the experimental
+`service_binding_extra_handlers` flag, and enabling experimental flags for account processes would
+let tenants turn on any experimental flag. Selvedge will add Queues once it can deliver batches
+without that.
+
 ## Deployments and the API
 
 `wrangler deploy`, `wrangler versions upload`, `wrangler versions deploy` (one version at 100%),

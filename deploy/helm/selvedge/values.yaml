@@ -96,6 +96,19 @@ runner:
   terminationGracePeriodSeconds: 60
   # e.g. gvisor, for an extra sandbox around workerd.
   runtimeClassName: ""
+  # Run each account's workerd as its own Linux user, so a compromised
+  # process cannot read another account's files or use its binding socket.
+  # The agent then runs as root with CAP_SETUID, CAP_SETGID, CAP_CHOWN,
+  # CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL only. Namespaces enforcing the
+  # `restricted` Pod Security Standard must disable this.
+  accountUsers:
+    enabled: true
+    # Below 65536, so it also works in a user namespace (hostUsers: false).
+    uidRange: "10000-59999"
+  # Set to false to run runner pods in a user namespace (Kubernetes 1.33+ with
+  # a supporting runtime): root in the container is then unprivileged on the
+  # node. Recommended with accountUsers.
+  hostUsers: null
 
 # Spread replicas over zones (on by default in `ha`).
 topologySpread:

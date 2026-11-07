@@ -38,6 +38,11 @@ const ASSETS_KV_SERVICE: &str = "selvedge-assets-kv";
 const ASSET_WORKER: &str = include_str!("vendor/asset-worker.js");
 const ROUTER_WORKER: &str = include_str!("vendor/router-worker.js");
 
+/// The header carrying `request.cf` as JSON on requests to a script's socket.
+/// workerd removes it before tenant code runs. Without it, workerd would fill
+/// `request.cf` with the socket peer's PID and UID.
+pub const CF_HEADER: &str = "x-selvedge-cf";
+
 /// The header marking trace events on the binding socket.
 pub const TAIL_HEADER: &str = "x-selvedge-tail";
 /// The tail worker every script with code reports to (`wrangler tail`).
@@ -258,7 +263,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         if !has_code(script) {
             let socket = opts.socket_dir.join(format!("{index}.sock"));
             sockets_cfg.push(format!(
-                "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\"), service = {})",
+                "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\", cfBlobHeader = \"x-selvedge-cf\"), service = {})",
                 quote(&script.name),
                 quote(&format!("unix:{}", socket.display())),
                 quote(&entry),
@@ -283,7 +288,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             bail!("socket path too long: {}", socket.display());
         }
         sockets_cfg.push(format!(
-            "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\"), service = {})",
+            "(name = {}, address = {}, http = (forwardedProtoHeader = \"x-forwarded-proto\", cfBlobHeader = \"x-selvedge-cf\"), service = {})",
             quote(&script.name),
             quote(&format!("unix:{}", socket.display())),
             quote(&entry),
@@ -559,9 +564,17 @@ fn render_worker(
     let mut fields = vec![
         format!("modules = [{}]", module_cfg.join(", ")),
         format!("compatibilityDate = {}", quote(&date)),
+        // Experimental flags are refused on upload; versions stored before that
+        // lose them here.
         format!(
             "compatibilityFlags = [{}]",
-            script.compatibility_flags.iter().map(|f| quote(f)).collect::<Vec<_>>().join(", ")
+            script
+                .compatibility_flags
+                .iter()
+                .filter(|f| !crate::is_experimental_flag(f))
+                .map(|f| quote(f))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         format!("bindings = [{}]", bindings.join(", ")),
         "globalOutbound = \"internet\"".to_owned(),
@@ -609,6 +622,15 @@ pub async fn workerd_max_date(workerd: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use selvedge_core::{HexId, Module};
+
+    #[test]
+    fn experimental_flags() {
+        assert!(crate::is_experimental_flag("unsafe_module"));
+        assert!(crate::is_experimental_flag("experimental"));
+        assert!(!crate::is_experimental_flag("nodejs_compat"));
+        assert!(!crate::is_experimental_flag("enable_ctx_exports"));
+        assert!(!crate::is_experimental_flag("# workerd"));
+    }
 
     #[test]
     fn quoting() {

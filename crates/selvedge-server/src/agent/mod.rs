@@ -7,6 +7,8 @@
 
 mod bindings;
 mod manager;
+pub mod s3proxy;
+pub mod uids;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -38,6 +40,45 @@ pub struct AgentCluster {
     pub secret: String,
 }
 
+/// Bucket options that carry the object store's endpoint or credentials.
+/// workerd never gets them: it talks to the agent's S3 proxy instead.
+pub const UPSTREAM_OPTIONS: &[&str] =
+    &["aws_endpoint", "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "aws_token"];
+
+impl AgentCluster {
+    fn option(&self, key: &str) -> Option<String> {
+        self.bucket_options
+            .iter()
+            .find_map(|o| o.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned()))
+    }
+
+    /// The real object store, from the bucket options or the agent's `AWS_*`
+    /// environment.
+    pub fn upstream(&self) -> Result<s3proxy::Upstream> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let region =
+            self.option("aws_region").or_else(|| env("AWS_REGION")).unwrap_or_else(|| "us-east-1".into());
+        let endpoint = self
+            .option("aws_endpoint")
+            .or_else(|| env("AWS_ENDPOINT_URL"))
+            .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
+        Ok(s3proxy::Upstream {
+            endpoint,
+            access_key_id: self.option("aws_access_key_id").or_else(|| env("AWS_ACCESS_KEY_ID")).ok_or_else(
+                || anyhow::anyhow!("no object store access key for Durable Objects (AWS_ACCESS_KEY_ID)"),
+            )?,
+            secret_access_key: self
+                .option("aws_secret_access_key")
+                .or_else(|| env("AWS_SECRET_ACCESS_KEY"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no object store secret key for Durable Objects (AWS_SECRET_ACCESS_KEY)")
+                })?,
+            session_token: self.option("aws_session_token").or_else(|| env("AWS_SESSION_TOKEN")),
+            region,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
     pub listen: SocketAddr,
@@ -56,15 +97,44 @@ pub struct AgentConfig {
     pub drain_delay: Duration,
     /// Bound on the local static asset cache (`<state_dir>/assets`).
     pub asset_cache_bytes: u64,
+    /// Run each account's workerd as its own user, from this range.
+    pub account_uids: Option<std::ops::Range<u32>>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
+    if uids::euid() == 0 && cfg.account_uids.is_none() {
+        anyhow::bail!(
+            "the agent is running as root without --account-uids: tenant code would run as root. \
+             Set --account-uids (e.g. 10000-59999) or run the agent as an unprivileged user"
+        );
+    }
     std::fs::create_dir_all(&cfg.state_dir)?;
     std::fs::create_dir_all(&cfg.run_dir)?;
+    if cfg.account_uids.is_some() {
+        uids::check_executable_by_others(&cfg.workerd)?;
+        // Account users pass through these to their own 0700 directories, but
+        // cannot list them.
+        let accounts = cfg.state_dir.join("a");
+        std::fs::create_dir_all(&accounts)?;
+        for dir in [&cfg.state_dir, &accounts, &cfg.run_dir] {
+            uids::traversable(dir)?;
+        }
+    }
     let max_date = selvedge_workerd::workerd_max_date(&cfg.workerd).await?;
     tracing::info!(workerd = %cfg.workerd.display(), %max_date, "agent starting");
     let cfg = Arc::new(cfg);
-    let manager = Manager::new(cfg.clone(), max_date);
+    // Durable Object storage goes through the agent's S3 proxy, so workerd
+    // processes hold only per-account credentials.
+    let s3_proxy = match &cfg.cluster {
+        Some(c) => {
+            let proxy = s3proxy::S3Proxy::new(c.upstream()?, &c.bucket, c.secret.clone())?;
+            let addr = proxy.serve(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+            tracing::info!(%addr, "Durable Object storage proxy listening");
+            Some(addr)
+        }
+        None => None,
+    };
+    let manager = Manager::new(cfg.clone(), max_date, s3_proxy)?;
 
     let evictor = {
         let manager = manager.clone();
@@ -160,7 +230,15 @@ async fn handle(
     let Ok(account) = account.parse::<AccountId>() else {
         return proxy::full(StatusCode::BAD_REQUEST, "bad account");
     };
+    // `request.cf` from the gateway if it sent a JSON object; otherwise an
+    // empty one, so `request.cf.country` reads undefined instead of throwing.
+    let cf = header(selvedge_workerd::render::CF_HEADER)
+        .filter(|v| serde_json::from_str::<serde_json::Value>(v).is_ok_and(|j| j.is_object()))
+        .unwrap_or_else(|| "{}".to_owned());
     proxy::strip_internal(req.headers_mut());
+    if let Ok(v) = http::HeaderValue::from_str(&cf) {
+        req.headers_mut().insert(selvedge_workerd::render::CF_HEADER, v);
+    }
 
     let live = match manager.ensure(&account).await {
         Ok(manager::Lookup::Ready(live)) => live,

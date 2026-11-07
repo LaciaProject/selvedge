@@ -41,10 +41,29 @@ workerd process per account, started with an empty environment; tenant outbound 
 public addresses by workerd and by a NetworkPolicy; no database or platform credentials in runner
 processes; binding calls stamped with the account identity by the agent, outside tenant reach.
 
+With `--account-uids` (on by default in the Helm chart, `runner.accountUsers`), each account's
+workerd runs as its own Linux user with no capabilities. Its directories are 0700, and its binding
+socket, which stamps the account's identity on KV, R2, D1 and queue calls, is 0600. So a
+compromised process can neither read another account's files nor act as another account. The
+agent then runs as root in the container with only CAP_SETUID, CAP_SETGID, CAP_CHOWN,
+CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL, and refuses to run as root without `--account-uids`.
+`runner.hostUsers: false` adds a user namespace, so root in the container is unprivileged on the
+node. Runner pods use the `RuntimeDefault` seccomp profile.
+
+Compatibility flags that workerd marks experimental are refused on upload and dropped when
+rendering. Processes with Durable Objects run with `--experimental` (cluster mode), so otherwise a
+tenant could enable them, and some, such as `unsafe_module` and
+`allow_insecure_inefficient_logged_eval`, weaken the sandbox.
+
+workerd processes never hold the object store's credentials. Durable Object storage goes through
+an S3 proxy in the agent. Each account's process gets a key derived for its account alone, and the
+proxy checks the SigV4 signature, allows only that account's prefix and the operations cluster mode
+uses, then signs the request again with the real credentials. `request.cf` is set by the gateway,
+never from the runner's local sockets.
+
 Known gaps, tracked for the next releases:
 
-- Account processes in a runner pod share one Linux user and cgroup; per-account UIDs, cgroups and
-  seccomp profiles are planned (RFC 0001, spike S6).
-- Durable Object storage uses one set of object store credentials for every account; per-account,
-  prefix-scoped credentials are planned.
+- Account processes in a runner pod share one cgroup: one account can use the pod's whole CPU and
+  memory limit. Per-account cgroups need a delegated cgroup tree, which Kubernetes does not give
+  containers by default (RFC 0001, spike S6).
 - Platform components authenticate each other with a shared token; mTLS is planned.

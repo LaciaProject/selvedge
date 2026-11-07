@@ -250,6 +250,11 @@ pub(super) async fn create_version(
         Some(a) => Some(super::assets::resolve(state, &id, a).await?),
         None => None,
     };
+    if let Some(f) = meta.compatibility_flags.iter().find(|f| selvedge_workerd::is_experimental_flag(f)) {
+        return Err(ApiError::bad_request(format!(
+            "compatibility flag `{f}` is experimental in workerd and cannot be used on Selvedge"
+        )));
+    }
     let compatibility_date = meta.compatibility_date.clone().unwrap_or_else(|| "2024-01-01".to_owned());
     if !is_date(&compatibility_date) {
         return Err(ApiError::bad_request("compatibility_date must be YYYY-MM-DD"));

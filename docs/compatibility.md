@@ -13,9 +13,9 @@ compatibility date later than that release supports is lowered to the newest one
 | --- | --- | --- |
 | ES module Workers, multiple modules | Supported | Module types: ES, CommonJS, text, data, WebAssembly, JSON, Python |
 | Service-worker syntax | Not supported | Rejected on upload |
-| Compatibility dates and flags | Supported | Passed to workerd as given |
+| Compatibility dates and flags | Supported | Passed to workerd as given, except flags that are experimental in workerd (`unsafe_module`, `rtti_api`, ...), which uploads may not use; Cloudflare does not offer them either |
 | Outbound `fetch()` and `connect()` | Supported | Public addresses only; private, loopback and link-local addresses are refused |
-| `request.cf` | Not supported | |
+| `request.cf` | Partial | An object with `httpProtocol` only: there is no geo or network data. Clients cannot set it |
 | Per-request CPU time limit (error 1102) | Different | Limits apply to the account's process (cgroup); a runaway request is stopped by restarting the process, which also fails the account's other in-flight requests |
 
 ## Bindings
@@ -190,7 +190,7 @@ Differences:
 - Delivery is best effort, as on Cloudflare: a client that falls behind loses events.
 - An event larger than about 7.9 KB, PostgreSQL's limit on a notification, is shortened: log
   lines, exception messages and header values are cut, and `truncated` is set.
-- `request.cf` holds only `clientIp`. `--version-id` is accepted and does not filter.
+- `request.cf` in events holds `httpProtocol` and `clientIp`. `--version-id` is accepted and does not filter.
 - The WebSocket URL points at the API host the request came to (`Host`, or `X-Forwarded-Host` and
   `X-Forwarded-Proto` from a proxy), at `/tail/v1/<token>`. A proxy in front of the API must pass
   WebSocket upgrades on that path.

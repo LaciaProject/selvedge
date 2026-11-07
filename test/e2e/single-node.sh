@@ -7,6 +7,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 E2E="$ROOT/test/e2e"
 WORK=$(mktemp -d)
+# Account users (with --account-uids) must pass through to their directories.
+[ -n "${SELVEDGE_ACCOUNT_UIDS:-}" ] && chmod 711 "$WORK"
 BIN=${SELVEDGE_BIN:-$ROOT/target/debug/selvedge}
 PORT_BASE=${PORT_BASE:-28700}
 API_PORT=$((PORT_BASE + 87)) GATEWAY_PORT=$((PORT_BASE + 80))
@@ -180,6 +182,9 @@ check "_redirects applies" "301" "$(ahead /old '%{http_code}')"
 check "run_worker_first sends /api/* to the Worker" "worker:/api/hello" "$(aget /api/hello)"
 check "the ASSETS binding fetches an asset" "asset:200:body { color: teal; }" "$(aget /api/asset)"
 check "a path with no asset falls through to the Worker" "worker:/nothing" "$(aget /nothing)"
+check "request.cf holds only what the gateway knows" '{"httpProtocol":"HTTP/1.1"}' "$(aget /api/cf)"
+check "a client cannot set request.cf" '{"httpProtocol":"HTTP/1.1"}' \
+  "$(curl -s -H "Host: $AHOST" -H 'x-selvedge-cf: {"country":"XX"}' "http://127.0.0.1:$GATEWAY_PORT/api/cf")"
 # wrangler tail: console.log lines and exceptions of live requests.
 # Its own process group: wrangler's launcher runs the CLI in a child process.
 setsid bash -c 'cd "$1" && exec "$2" tail --format json' _ "$ASSETS_APP" "$E2E/node_modules/.bin/wrangler" \
@@ -218,6 +223,22 @@ SHOST="static-site.$SUBDOMAIN.workers.test"
 check "a Worker with only assets serves them" "<h1>spa</h1>" "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/")"
 check "single-page-application serves index.html for unknown paths" "<h1>spa</h1>" \
   "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/deep/link")"
+
+# Experimental workerd flags would be live in processes running with
+# --experimental (cluster mode), so uploads may not use them.
+printf 'export default { fetch() { return new Response("x"); } };' > "$WORK/exp.js"
+check "an experimental compatibility flag is refused" "False" "$(curl -s -X PUT "$API/accounts/$ACCOUNT/workers/scripts/exp" \
+  -H "Authorization: Bearer $TOKEN" -F 'metadata={"main_module":"exp.js","compatibility_date":"2026-10-01","compatibility_flags":["unsafe_module"]};type=application/json' \
+  -F "exp.js=@$WORK/exp.js;type=application/javascript+module" | json '["success"]')"
+
+# Per-account users (only when the agent runs as root with --account-uids).
+if [ -n "${SELVEDGE_ACCOUNT_UIDS:-}" ]; then
+  wuids=$(ps -o uid= -C workerd | tr -d ' ' | sort -u)
+  check "account processes do not run as root" "" "$(echo "$wuids" | awk '$1 < 10000')"
+  read -r bmode owner < <(stat -c '%a %u' "$SELVEDGE_RUN_DIR/${ACCOUNT:0:12}/b.sock")
+  check "the binding socket is the account's alone" "600 yes" "$bmode $(echo "$wuids" | grep -qx "$owner" && echo yes || echo no)"
+  check "the account's state directory is private" "700 $owner" "$(stat -c '%a %u' "$SELVEDGE_STATE_DIR/a/$ACCOUNT")"
+fi
 
 wrangler delete > /dev/null 2>&1
 settle

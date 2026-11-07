@@ -142,6 +142,11 @@ struct AgentArgs {
     /// Seconds to keep serving, unhealthy, after SIGTERM before draining.
     #[arg(long, env = "SELVEDGE_DRAIN_DELAY", default_value_t = 5)]
     drain_delay: u64,
+    /// Run each account's workerd as its own Linux user, with UIDs from this
+    /// range (`first-last`, e.g. 10000-59999). Needs root with CAP_SETUID,
+    /// CAP_SETGID, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
+    account_uids: Option<String>,
     /// Local disk for cached static assets, in MiB.
     #[arg(long, env = "SELVEDGE_ASSET_CACHE_MB", default_value_t = 1024)]
     asset_cache_mb: u64,
@@ -193,6 +198,9 @@ struct AllArgs {
     do_bucket_options: Vec<String>,
     #[arg(long, env = "SELVEDGE_CLUSTER_SECRET", hide_env_values = true)]
     cluster_secret: Option<String>,
+    /// Run each account's workerd as its own Linux user (see `agent --help`).
+    #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
+    account_uids: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -299,6 +307,7 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
         allow_local_durable_objects: a.allow_local_durable_objects,
         drain_delay: Duration::from_secs(a.drain_delay),
         asset_cache_bytes: a.asset_cache_mb << 20,
+        account_uids: a.account_uids.as_deref().map(selvedge_server::agent::uids::parse_range).transpose()?,
     })
 }
 
@@ -451,6 +460,7 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         allow_local_durable_objects: true,
         drain_delay: 0,
         asset_cache_mb: 1024,
+        account_uids: args.account_uids,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(

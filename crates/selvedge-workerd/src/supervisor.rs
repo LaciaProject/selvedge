@@ -30,6 +30,20 @@ impl WorkerdProcess {
         label: &str,
         ready_timeout: Duration,
     ) -> Result<Self> {
+        Self::start_as(workerd, rendered, env, label, ready_timeout, None).await
+    }
+
+    /// Like [`start`](Self::start), as user and group `uid` when given (the
+    /// caller must be allowed to switch to it). Supplementary groups are
+    /// dropped and, as a non-root user, workerd has no capabilities.
+    pub async fn start_as(
+        workerd: &Path,
+        rendered: &Rendered,
+        env: &[(String, String)],
+        label: &str,
+        ready_timeout: Duration,
+        uid: Option<u32>,
+    ) -> Result<Self> {
         for (_, socket) in &rendered.sockets {
             if let Some(parent) = socket.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -42,6 +56,10 @@ impl WorkerdProcess {
             cmd.arg("--experimental");
         }
         cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
+        if let Some(uid) = uid {
+            // std drops supplementary groups (setgroups) when running as root.
+            cmd.uid(uid).gid(uid);
+        }
         cmd.arg(&rendered.config_path)
             .current_dir(rendered.config_path.parent().unwrap_or(Path::new(".")))
             .stdin(Stdio::null())

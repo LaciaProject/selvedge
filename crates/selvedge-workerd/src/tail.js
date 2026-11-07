@@ -14,9 +14,12 @@ export default {
     const out = JSON.parse(JSON.stringify(events)).map((e) => {
       e.scriptName = script;
       const req = e.event?.request;
-      // The client address the gateway saw. The rest of `cf` describes the
-      // runner's local socket (peer PID and UID), not the client.
-      if (req) req.cf = { clientIp: req.headers?.["cf-connecting-ip"] ?? "" };
+      // The client address the gateway saw. A local socket's peer PID and UID
+      // never belong in an event.
+      if (req) {
+        const { clientPid, clientUid, ...cf } = req.cf ?? {};
+        req.cf = { ...cf, clientIp: req.headers?.["cf-connecting-ip"] ?? "" };
+      }
       return e;
     });
     const r = await env.SINK.fetch("http://tail/", {

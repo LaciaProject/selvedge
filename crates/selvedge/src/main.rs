@@ -115,6 +115,10 @@ struct DataArgs {
     /// Zone for public bucket URLs, pub-<id>.<zone>, as the API names them.
     #[arg(long, env = "SELVEDGE_R2_DEV_ZONE")]
     r2_dev_zone: Option<String>,
+    /// The R2 S3 endpoint's domain, for virtual-hosted requests
+    /// (<bucket>.<domain>); path-style requests work either way.
+    #[arg(long, env = "SELVEDGE_R2_S3_DOMAIN")]
+    r2_s3_domain: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -461,6 +465,7 @@ async fn main() -> Result<()> {
                         db: db.clone(),
                         blobs: blobs.clone(),
                         r2_dev_zone: args.r2_dev_zone.clone(),
+                        domain: args.r2_s3_domain.clone().filter(|d| !d.is_empty()),
                     }),
                 )
             });
@@ -627,6 +632,7 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         db: state.db.clone(),
         blobs: state.blobs.clone(),
         r2_dev_zone: args.api.r2_dev_zone.clone(),
+        domain: std::env::var("SELVEDGE_R2_S3_DOMAIN").ok().filter(|d| !d.is_empty()),
     });
     tokio::spawn(purge_expired(state.db.clone()));
     tokio::spawn(collect_garbage(state.db.clone(), state.blobs.clone()));

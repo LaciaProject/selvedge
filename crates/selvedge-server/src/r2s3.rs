@@ -1,7 +1,8 @@
 //! R2's S3-compatible API, for S3 clients (the AWS SDKs, rclone, ...).
 //!
-//! Path-style addressing (`/<bucket>/<key>`) on its own listener in the data
-//! service, over the same buckets and objects as the binding. Requests are
+//! Path-style addressing (`/<bucket>/<key>`), and virtual-hosted style
+//! (`<bucket>.<domain>/<key>`) when a domain is configured, on its own
+//! listener in the data service, over the same buckets and objects as the binding. Requests are
 //! signed with SigV4, in headers or as presigned URLs; as on Cloudflare, the
 //! access key id is an account API token's id and the secret is the SHA-256 of
 //! the token's value. Bodies may be `aws-chunked` (what current SDKs send for
@@ -37,6 +38,15 @@ pub struct S3State {
     pub blobs: Blobs,
     /// Zone of public bucket URLs, `pub-<id>.<zone>`.
     pub r2_dev_zone: Option<String>,
+    /// The S3 endpoint's domain, for virtual-hosted requests
+    /// (`<bucket>.<domain>`).
+    pub domain: Option<String>,
+}
+
+/// The bucket a virtual-hosted request names in its host, if any.
+fn host_bucket(host: Option<&str>, domain: Option<&str>) -> Option<String> {
+    let bucket = host?.strip_suffix(domain?)?.strip_suffix('.')?;
+    (!bucket.is_empty() && !bucket.contains('.')).then(|| bucket.to_owned())
 }
 
 pub fn router(state: Arc<S3State>) -> axum::Router {
@@ -517,6 +527,11 @@ async fn dispatch(st: &S3State, req: Request) -> S3Result<Response> {
 
     let decoded =
         percent_decode_str(&path).decode_utf8().map_err(|_| S3Error::bad("invalid path"))?.into_owned();
+    // Virtual-hosted style: the bucket is in the host, the key is the path.
+    let decoded = match host_bucket(request_host(&parts.headers).as_deref(), st.domain.as_deref()) {
+        Some(bucket) => format!("/{bucket}{decoded}"),
+        None => decoded,
+    };
     let rest = decoded.trim_start_matches('/');
     let (bucket_name, key) = match rest.split_once('/') {
         Some((b, k)) if !k.is_empty() => (b.to_owned(), Some(k.to_owned())),
@@ -993,6 +1008,16 @@ async fn list_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_hosted_buckets() {
+        let d = Some("s3.example.com");
+        assert_eq!(host_bucket(Some("photos.s3.example.com"), d).as_deref(), Some("photos"));
+        assert_eq!(host_bucket(Some("s3.example.com"), d), None);
+        assert_eq!(host_bucket(Some("a.b.s3.example.com"), d), None);
+        assert_eq!(host_bucket(Some("photos.s3.example.com"), None), None);
+        assert_eq!(host_bucket(Some("photoss3.example.com"), d), None);
+    }
 
     #[test]
     fn hosts_and_signatures() {

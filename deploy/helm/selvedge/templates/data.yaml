@@ -34,6 +34,10 @@ spec:
             {{- if .Values.data.r2S3.enabled }}
             - name: SELVEDGE_R2_S3_LISTEN
               value: 0.0.0.0:8790
+            {{- with .Values.data.r2S3.domain }}
+            - name: SELVEDGE_R2_S3_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.data.r2S3.devZone }}
             - name: SELVEDGE_R2_DEV_ZONE
               value: {{ . | quote }}

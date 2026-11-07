@@ -109,8 +109,10 @@ Differences:
 
 The data service serves R2's S3 API (`--r2-s3-listen`; in Helm, the `<release>-r2-s3` Service).
 Credentials work as on Cloudflare: the access key id is an account API token's id, and the secret
-access key is the SHA-256 (hex) of the token's value. Creating a token returns both. Use path-style
-addressing (`forcePathStyle: true`, or rclone's `force_path_style`) and region `auto`.
+access key is the SHA-256 (hex) of the token's value. Creating a token returns both. Use region
+`auto`. Path-style addressing (`forcePathStyle: true`, or rclone's `force_path_style`) always works;
+virtual-hosted addressing (`<bucket>.<domain>`, the SDKs' default) works once the operator sets the
+endpoint's domain (`SELVEDGE_R2_S3_DOMAIN`; Helm `data.r2S3.domain`) and points `*.<domain>` at it.
 
 Supported: ListBuckets, CreateBucket, HeadBucket, DeleteBucket and GetBucketLocation; PutObject,
 GetObject (ranges, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`),
@@ -122,7 +124,6 @@ with the binding and `wrangler r2`.
 
 Differences:
 
-- Virtual-hosted addressing (`<bucket>.<host>`) is not supported.
 - The signatures of individual `aws-chunked` chunks and trailing checksums are not checked; the
   request's signature and the object's MD5 are.
 - Object tagging, ACLs, versioning, lifecycle rules, CORS and bucket policies are not available.

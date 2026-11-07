@@ -90,7 +90,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |
 | mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |
-| R2 | 生命周期规则不做存储类别转换（只有 `Standard`）。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
+| R2 | 生命周期规则不做存储类别转换（只有 `Standard`）。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 没有 tagging、ACL、版本控制和 CORS（虚拟主机寻址需要运营方配置域名） |
 | D1 | 没有读副本和 Time Travel；导入文件最大 64 MB，导入导出都在 Durable Object 内存中完成 |
 | Queues | 不支持 `v8` 内容类型；`queue.metrics()` 只有积压数 |
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |

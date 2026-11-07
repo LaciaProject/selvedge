@@ -19,6 +19,7 @@ export SELVEDGE_INTERNAL_TOKEN=$(openssl rand -hex 16)
 export SELVEDGE_ADMIN_TOKEN=admin-$(openssl rand -hex 8)
 export SELVEDGE_WORKERS_DEV_ZONE=workers.test
 export SELVEDGE_R2_DEV_ZONE=r2.test
+export SELVEDGE_R2_S3_DOMAIN=s3.test
 export SELVEDGE_STATE_DIR="$WORK/state"
 export SELVEDGE_RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/slv-e2e-$$"
 export SELVEDGE_API_LISTEN=127.0.0.1:$API_PORT
@@ -130,6 +131,25 @@ new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { ac
   "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET")
 check "an object written over S3 is the binding's object" "written over S3" \
   "$(wrangler r2 object get e2e-files/from-s3.txt --pipe --remote 2>/dev/null)"
+check "virtual-hosted S3 requests (<bucket>.<domain>) work through the AWS SDK" "vhost ok|1" \
+  "$(cd "$E2E" && node -e '
+const http = require("node:http");
+const { NodeHttpHandler } = require("@smithy/node-http-handler");
+const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
+const [port, accessKeyId, secretAccessKey] = process.argv.slice(1);
+// Every <bucket>.s3.test resolves to this machine.
+const lookup = (host, opts, cb) => (opts && opts.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4));
+const s3 = new S3Client({
+  endpoint: `http://s3.test:${port}`, region: "auto", forcePathStyle: false,
+  credentials: { accessKeyId, secretAccessKey },
+  requestHandler: new NodeHttpHandler({ httpAgent: new http.Agent({ lookup }) }),
+});
+(async () => {
+  await s3.send(new PutObjectCommand({ Bucket: "e2e-files", Key: "vhost/a.txt", Body: "vhost ok" }));
+  const got = await (await s3.send(new GetObjectCommand({ Bucket: "e2e-files", Key: "vhost/a.txt" }))).Body.transformToString();
+  const list = await s3.send(new ListObjectsV2Command({ Bucket: "e2e-files", Prefix: "vhost/" }));
+  console.log(`${got}|${list.KeyCount}`);
+})().catch((e) => console.log("error: " + e.name + " " + e.message));' "$S3_PORT" "$S3_KEY" "$S3_SECRET")"
 
 # D1: a database through wrangler, migrations, then the binding from a Worker.
 wrangler d1 create e2e-db > /dev/null 2>&1

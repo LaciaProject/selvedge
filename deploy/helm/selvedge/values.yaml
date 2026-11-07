@@ -85,6 +85,9 @@ data:
     # `wrangler r2 bucket dev-url enable` turns on. Point *.<zone> and any R2
     # custom domains at the r2-s3 Service. Empty: public URLs are off.
     devZone: ""
+    # The S3 endpoint's domain, for virtual-hosted requests (<bucket>.<domain>);
+    # point *.<domain> at the r2-s3 Service. Empty: path-style only.
+    domain: ""
     service:
       type: ClusterIP
       port: 80

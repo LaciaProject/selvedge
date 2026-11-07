@@ -308,7 +308,9 @@ Selvedge 只需要做配置生成、凭据和测试。
 | 每账户资源限制：cgroup v2 可写时由内核按账户执行 `memory.max`/`cpu.max`/`pids.max`；Kubernetes 里 cgroup 只读，由 agent 每 2 秒检查：超内存重启进程，超 CPU 份额降低优先级 | 完成 | 端到端测试：超内存的进程被重启，超 CPU 的进程 nice 为 10 |
 | 灰度部署：两个版本按百分比分流（`Cloudflare-Workers-Version-Key` 保持同一版本、`Cloudflare-Workers-Version-Overrides` 指定版本），另一个版本作为同一账户进程里的独立 worker 服务 | 完成 | `wrangler versions deploy a@50% b@50%` 的端到端测试 |
 | Zone 路由：zone 由运营方（admin token）分配给账户，账户用 wrangler 的 `routes` 或 zone 路由接口添加路由；gateway 先查自定义域名和 workers.dev，再按最具体的模式匹配 | 完成 | wrangler 部署带 `routes` 的端到端测试（精确、通配主机、未匹配路径、租户不能认领 zone） |
-| 组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
+| 组件间 mTLS：平台 CA 签发 `selvedge.internal` 证书，Helm 默认开启并生成；agent、data 监听端口强制客户端证书，API 和 gateway 的内部接口、内部路由只在单独的 mTLS 端口上提供；内部 token 保留 | 完成 | mTLS 下的两 runner 端到端测试（全部检查，加上明文、无证书、他人 CA 证书被拒，公共端口不提供内部接口）；kind 测试默认开启 |
+
+不在范围内：Workers AI、Vectorize、Hyperdrive、Analytics Engine、Browser Rendering 等是 Cloudflare 自己运营的托管服务（模型推理、向量库、全球连接池等），不是 Workers 运行时和平台基础设施的一部分。Selvedge 不实现它们；用到这些绑定的上传会被明确拒绝，用户可以通过服务绑定或 `fetch()` 接入自建的同类服务。
 
 Spike 结论：
 

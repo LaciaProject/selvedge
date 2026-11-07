@@ -167,7 +167,7 @@ impl QueueDispatcher {
             db,
             gateway_url: gateway_url.trim_end_matches('/').to_owned(),
             internal_token,
-            http: reqwest::Client::builder()
+            http: crate::tls::reqwest(reqwest::Client::builder())
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(LEASE - Duration::from_secs(60))
                 .build()

@@ -118,3 +118,65 @@ enableServiceLinks: false
       app.kubernetes.io/instance: {{ .root.Release.Name }}
       app.kubernetes.io/component: {{ .component }}
 {{- end -}}
+
+{{- /* mTLS between components (tls.enabled). */}}
+{{- define "selvedge.tlsEnv" -}}
+{{- if .Values.tls.enabled }}
+- name: SELVEDGE_TLS_CERT
+  value: /etc/selvedge/tls/tls.crt
+- name: SELVEDGE_TLS_KEY
+  value: /etc/selvedge/tls/tls.key
+- name: SELVEDGE_TLS_CA
+  value: /etc/selvedge/tls/ca.crt
+{{- end }}
+{{- end -}}
+
+{{- define "selvedge.tlsMount" -}}
+{{- if .Values.tls.enabled }}
+- { name: tls, mountPath: /etc/selvedge/tls, readOnly: true }
+{{- end }}
+{{- end -}}
+
+{{- define "selvedge.tlsVolume" -}}
+{{- if .Values.tls.enabled }}
+- name: tls
+  secret: { secretName: {{ include "selvedge.name" . }}-tls, defaultMode: 0444 }
+{{- end }}
+{{- end -}}
+
+{{- /* The API's internal endpoints, as agents and gateways reach them. */}}
+{{- define "selvedge.apiInternalUrl" -}}
+{{- if .Values.tls.enabled -}}
+https://{{ include "selvedge.name" . }}-api-internal:8786
+{{- else -}}
+http://{{ include "selvedge.name" . }}-api:{{ .Values.api.service.port }}
+{{- end -}}
+{{- end -}}
+
+{{- /* The gateway, as the API and data service reach it for internal routing. */}}
+{{- define "selvedge.gatewayInternalUrl" -}}
+{{- if .Values.tls.enabled -}}
+https://{{ include "selvedge.name" . }}-gateway-internal:8779
+{{- else -}}
+http://{{ include "selvedge.name" . }}-gateway:{{ .Values.gateway.service.port }}
+{{- end -}}
+{{- end -}}
+
+{{- /* Probes for a listener that requires mTLS: the kubelet cannot present
+a client certificate, so curl does, with the component's own. */}}
+{{- define "selvedge.probes" -}}
+{{- $p := .port -}}
+{{- if .root.Values.tls.enabled }}
+readinessProbe:
+  exec: { command: [curl, -sf, --max-time, "2", --cacert, /etc/selvedge/tls/ca.crt, --cert, /etc/selvedge/tls/tls.crt, --key, /etc/selvedge/tls/tls.key, --resolve, "selvedge.internal:{{ $p }}:127.0.0.1", "https://selvedge.internal:{{ $p }}/healthz"] }
+  periodSeconds: 2
+  failureThreshold: {{ .failureThreshold | default 3 }}
+livenessProbe:
+  exec: { command: [curl, -sf, --max-time, "2", --cacert, /etc/selvedge/tls/ca.crt, --cert, /etc/selvedge/tls/tls.crt, --key, /etc/selvedge/tls/tls.key, --resolve, "selvedge.internal:{{ $p }}:127.0.0.1", "https://selvedge.internal:{{ $p }}/healthz"] }
+  periodSeconds: 10
+  failureThreshold: 6
+{{- else }}
+readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: {{ .failureThreshold | default 3 }} }
+livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+{{- end }}
+{{- end -}}

@@ -35,6 +35,10 @@ pub enum Runners {
 #[derive(Clone, Debug)]
 pub struct GatewayConfig {
     pub listen: SocketAddr,
+    /// For platform components (the API, the data service): requests naming
+    /// an account and script directly. With mTLS this is the only listener
+    /// that honors them, and it requires a platform certificate.
+    pub internal_listen: Option<SocketAddr>,
     pub api_url: String,
     pub internal_token: String,
     pub runners: Runners,
@@ -56,7 +60,7 @@ struct Shared {
 pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
     let cfg = Arc::new(cfg);
     let shared = Arc::new(Shared::default());
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
+    let http = crate::tls::reqwest(reqwest::Client::builder()).timeout(Duration::from_secs(5)).build()?;
 
     // Load routes once before serving, but do not fail if the API is down:
     // a restarted gateway should come up and serve once the API is back.
@@ -65,7 +69,7 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
         tracing::warn!(error = %format!("{e:#}"), "initial route load failed");
     }
     check_runners(&http, &cfg, &shared).await;
-    let tasks = vec![
+    let mut tasks = vec![
         tokio::spawn({
             let (http, cfg, shared) = (http.clone(), cfg.clone(), shared.clone());
             async move {
@@ -88,6 +92,30 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
         }),
     ];
 
+    if let Some(addr) = cfg.internal_listen {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!(%addr, "gateway internal listener");
+        let (cfg, shared) = (cfg.clone(), shared.clone());
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let Ok((stream, peer)) = listener.accept().await else { continue };
+                let (cfg, shared) = (cfg.clone(), shared.clone());
+                tokio::spawn(async move {
+                    let stream =
+                        match tokio::time::timeout(Duration::from_secs(10), crate::tls::accept(stream)).await
+                        {
+                            Ok(Ok(s)) => s,
+                            _ => return,
+                        };
+                    let handler = Arc::new(move |req| {
+                        let (cfg, shared) = (cfg.clone(), shared.clone());
+                        async move { handle(&cfg, &shared, peer, req, true).await }
+                    });
+                    proxy::serve_connection(stream, handler);
+                });
+            }
+        }));
+    }
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     tracing::info!(addr = %cfg.listen, "gateway listening");
     tokio::pin!(shutdown);
@@ -99,7 +127,7 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
                     let (cfg, shared) = (cfg.clone(), shared.clone());
                     let handler = Arc::new(move |req| {
                         let (cfg, shared) = (cfg.clone(), shared.clone());
-                        async move { handle(&cfg, &shared, peer, req).await }
+                        async move { handle(&cfg, &shared, peer, req, false).await }
                     });
                     proxy::serve_connection(stream, handler);
                 }
@@ -163,7 +191,7 @@ async fn check_runners(http: &reqwest::Client, cfg: &GatewayConfig, shared: &Sha
         let http = http.clone();
         async move {
             let ok = http
-                .get(format!("http://{addr}/healthz"))
+                .get(format!("{}://{addr}/healthz", crate::tls::scheme()))
                 .timeout(Duration::from_secs(1))
                 .send()
                 .await
@@ -212,14 +240,18 @@ async fn handle(
     shared: &Shared,
     peer: SocketAddr,
     mut req: Request<Incoming>,
+    internal_listener: bool,
 ) -> Response<Body> {
     if req.uri().path() == "/__selvedge/healthz" {
         return proxy::full(StatusCode::OK, "ok");
     }
     // Platform components (the API) may name the account and script directly.
     let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let internal = header(TOKEN_HEADER)
-        .is_some_and(|t| crate::constant_time_eq(t.as_bytes(), cfg.internal_token.as_bytes()));
+    // With mTLS, direct routing needs the internal listener (and so a
+    // platform certificate) as well as the token.
+    let internal = (internal_listener || crate::tls::get().is_none())
+        && header(TOKEN_HEADER)
+            .is_some_and(|t| crate::constant_time_eq(t.as_bytes(), cfg.internal_token.as_bytes()));
     let direct = match (internal, header(ACCOUNT_HEADER), header(SCRIPT_HEADER)) {
         (true, Some(account), Some(service)) => {
             account.parse().ok().map(|account_id| Route { hostname: String::new(), account_id, service })

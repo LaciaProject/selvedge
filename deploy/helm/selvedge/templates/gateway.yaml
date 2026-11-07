@@ -25,7 +25,12 @@ spec:
             - name: SELVEDGE_GATEWAY_LISTEN
               value: 0.0.0.0:8080
             - name: SELVEDGE_API_URL
-              value: http://{{ $name }}-api:{{ .Values.api.service.port }}
+              value: {{ include "selvedge.apiInternalUrl" . }}
+            {{- if .Values.tls.enabled }}
+            - name: SELVEDGE_GATEWAY_INTERNAL_LISTEN
+              value: 0.0.0.0:8779
+            {{- end }}
+            {{- include "selvedge.tlsEnv" . | nindent 12 }}
             - name: SELVEDGE_RUNNER_DNS
               value: {{ $name }}-runner-headless.{{ .Release.Namespace }}.svc
             - name: SELVEDGE_RUNNER_PORT
@@ -36,11 +41,21 @@ spec:
             - name: SELVEDGE_TRUST_FORWARDED
               value: "true"
             {{- end }}
-          ports: [{ name: http, containerPort: 8080 }]
+          ports:
+            - { name: http, containerPort: 8080 }
+            {{- if .Values.tls.enabled }}
+            - { name: internal, containerPort: 8779 }
+            {{- end }}
           readinessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 2 }
           livenessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes: {{- include "selvedge.tlsVolume" . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -54,3 +69,15 @@ spec:
   type: {{ .Values.gateway.service.type }}
   selector: {{- include "selvedge.selector" $c | nindent 4 }}
   ports: [{ name: http, port: {{ .Values.gateway.service.port }}, targetPort: http }]
+{{- if .Values.tls.enabled }}
+---
+# Internal routing for the API and data service (mTLS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-gateway-internal
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: internal, port: 8779, targetPort: internal }]
+{{- end }}

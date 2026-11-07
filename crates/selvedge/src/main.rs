@@ -69,6 +69,10 @@ struct ApiArgs {
     internal: InternalArgs,
     #[arg(long, env = "SELVEDGE_API_LISTEN", default_value = "0.0.0.0:8787")]
     listen: SocketAddr,
+    /// The internal endpoints for agents and gateways, with mTLS. With mTLS
+    /// on, the public listener does not serve them.
+    #[arg(long, env = "SELVEDGE_API_INTERNAL_LISTEN")]
+    internal_listen: Option<SocketAddr>,
     /// Where module bytes live: s3://bucket/prefix, file:///dir or memory://.
     #[arg(long, env = "SELVEDGE_BLOB_URL")]
     blob_url: String,
@@ -171,6 +175,10 @@ struct GatewayArgs {
     internal: InternalArgs,
     #[arg(long, env = "SELVEDGE_GATEWAY_LISTEN", default_value = "0.0.0.0:8080")]
     listen: SocketAddr,
+    /// For the API and data service's requests into account processes, with
+    /// mTLS. With mTLS on, the public listener does not route those.
+    #[arg(long, env = "SELVEDGE_GATEWAY_INTERNAL_LISTEN")]
+    internal_listen: Option<SocketAddr>,
     #[arg(long, env = "SELVEDGE_API_URL", default_value = "http://127.0.0.1:8787")]
     api_url: String,
     /// Runner agents, host:port, comma separated.
@@ -286,7 +294,7 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         internal_token: args.internal.internal_token.clone(),
         workers_dev_zone: args.workers_dev_zone.clone(),
         gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
-        http: reqwest::Client::builder()
+        http: selvedge_server::tls::reqwest(reqwest::Client::builder())
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(60))
             .build()?,
@@ -303,6 +311,34 @@ async fn serve_axum(
     tracing::info!(addr = %listen, "listening");
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
     Ok(())
+}
+
+/// Serves an internal-only listener: with mTLS, every client needs a
+/// platform certificate.
+async fn serve_axum_internal(
+    listen: SocketAddr,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    if selvedge_server::tls::get().is_none() {
+        return serve_axum(listen, app, shutdown).await;
+    }
+    let listener =
+        tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+    tracing::info!(addr = %listen, "listening (mTLS)");
+    axum::serve(selvedge_server::tls::Listener::new(listener)?, app).with_graceful_shutdown(shutdown).await?;
+    Ok(())
+}
+
+/// With mTLS, the API's public listener refuses the internal endpoints.
+async fn refuse_internal(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.uri().path().starts_with("/internal/") {
+        return axum::response::IntoResponse::into_response((axum::http::StatusCode::NOT_FOUND, "not found"));
+    }
+    next.run(req).await
 }
 
 fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
@@ -342,6 +378,12 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_json);
+    selvedge_server::tls::init_from_env()?;
+    if matches!(cli.command, Command::All(_)) && selvedge_server::tls::get().is_some() {
+        anyhow::bail!(
+            "`selvedge all` runs every component in one process; mTLS (SELVEDGE_TLS_*) is for separate ones"
+        );
+    }
     match cli.command {
         Command::Migrate(db) => {
             open_db(&db).await?;
@@ -359,7 +401,23 @@ async fn main() -> Result<()> {
         }
         Command::Api(args) => {
             let state = api_state(&args).await?;
-            serve_axum(args.listen, selvedge_server::api::router(state), shutdown_signal()).await?;
+            let router = selvedge_server::api::router(state);
+            if selvedge_server::tls::get().is_some() {
+                let addr = args
+                    .internal_listen
+                    .context("mTLS needs --internal-listen for the API's internal endpoints")?;
+                let internal = router.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_axum_internal(addr, internal, shutdown_signal()).await {
+                        tracing::error!(error = %format!("{e:#}"), "API internal listener failed");
+                    }
+                });
+                // The public listener: everything but the internal endpoints.
+                let public = router.layer(axum::middleware::from_fn(refuse_internal));
+                serve_axum(args.listen, public, shutdown_signal()).await?;
+            } else {
+                serve_axum(args.listen, router, shutdown_signal()).await?;
+            }
         }
         Command::Data(args) => {
             let db = open_db(&args.db).await?;
@@ -402,7 +460,7 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
+            serve_axum_internal(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
         Command::Agent(args) => {
             selvedge_server::agent::run(agent_config(&args)?, shutdown_signal()).await?;
@@ -415,6 +473,7 @@ async fn main() -> Result<()> {
             selvedge_server::gateway::run(
                 GatewayConfig {
                     listen: args.listen,
+                    internal_listen: args.internal_listen,
                     api_url: args.api_url.trim_end_matches('/').to_owned(),
                     internal_token: args.internal.internal_token,
                     runners,
@@ -535,6 +594,7 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     tasks.spawn(selvedge_server::gateway::run(
         GatewayConfig {
             listen: args.gateway_listen,
+            internal_listen: None,
             api_url,
             internal_token: token,
             runners: Runners::Static(vec![loopback(args.agent_listen).to_string()]),

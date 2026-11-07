@@ -1798,6 +1798,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -1950,6 +1951,8 @@ dependencies = [
  "rand 0.9.5",
  "reqwest",
  "rustix",
+ "rustls",
+ "rustls-pki-types",
  "selvedge-core",
  "selvedge-store",
  "selvedge-workerd",
@@ -1960,6 +1963,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]

@@ -61,6 +61,11 @@ objectStore:
   nodeSelector: {}
   tolerations: []
 
+# mTLS between components: the chart generates a platform CA and a
+# certificate (kept across upgrades); every internal hop requires it.
+tls:
+  enabled: true
+
 api:
   resources:
     requests: { cpu: 100m, memory: 128Mi }

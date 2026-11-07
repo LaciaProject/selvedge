@@ -2,6 +2,7 @@
 # Durable Objects on two runners in workerd cluster mode, and failover when one
 # runner dies. Needs SELVEDGE_DATABASE_URL, SELVEDGE_WORKERD and an S3 bucket
 # with conditional writes at DO_S3_ENDPOINT (bucket DO_S3_BUCKET).
+# SELVEDGE_E2E_TLS=1 runs every internal hop with mTLS.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -15,9 +16,26 @@ export SELVEDGE_MASTER_KEY=$(openssl rand -hex 32)
 export SELVEDGE_INTERNAL_TOKEN=$(openssl rand -hex 16)
 export SELVEDGE_ADMIN_TOKEN=admin-$(openssl rand -hex 8)
 export SELVEDGE_WORKERS_DEV_ZONE=workers.test
-export SELVEDGE_API_LISTEN=127.0.0.1:$((P + 87)) SELVEDGE_API_URL=http://127.0.0.1:$((P + 87))
+PUBLIC_API=http://127.0.0.1:$((P + 87))
+export SELVEDGE_API_LISTEN=127.0.0.1:$((P + 87)) SELVEDGE_API_URL=$PUBLIC_API
 export SELVEDGE_DATA_LISTEN=127.0.0.1:$((P + 88)) SELVEDGE_DATA_ADDR=127.0.0.1:$((P + 88))
 export SELVEDGE_GATEWAY_URL=http://127.0.0.1:$((P + 80))
+if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
+  # A platform CA and one component certificate for selvedge.internal.
+  T="$WORK/tls"; mkdir -p "$T"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/ca.key" -out "$T/ca.pem" \
+    -days 2 -subj /CN=selvedge-e2e-ca 2>/dev/null
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/c.key" -out "$T/c.csr" -subj /CN=selvedge 2>/dev/null
+  printf 'subjectAltName=DNS:selvedge.internal\nextendedKeyUsage=serverAuth,clientAuth\n' > "$T/ext"
+  openssl x509 -req -in "$T/c.csr" -CA "$T/ca.pem" -CAkey "$T/ca.key" -CAcreateserial -out "$T/c.pem" -days 2 \
+    -extfile "$T/ext" 2>/dev/null
+  # A certificate from another CA, which the platform must refuse.
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/rogue.key" -out "$T/rogue.pem" \
+    -days 2 -subj /CN=rogue -addext subjectAltName=DNS:selvedge.internal 2>/dev/null
+  export SELVEDGE_TLS_CERT="$T/c.pem" SELVEDGE_TLS_KEY="$T/c.key" SELVEDGE_TLS_CA="$T/ca.pem"
+  export SELVEDGE_API_INTERNAL_LISTEN=127.0.0.1:$((P + 86)) SELVEDGE_API_URL=https://127.0.0.1:$((P + 86))
+  export SELVEDGE_GATEWAY_INTERNAL_LISTEN=127.0.0.1:$((P + 79)) SELVEDGE_GATEWAY_URL=https://127.0.0.1:$((P + 79))
+fi
 BUCKET=${DO_S3_BUCKET:-selvedge-do}
 export SELVEDGE_DO_BUCKET="s3://$BUCKET/cluster-$$"
 export SELVEDGE_DO_BUCKET_OPTIONS="aws_endpoint=${DO_S3_ENDPOINT:-http://127.0.0.1:29000},aws_region=us-east-1,aws_access_key_id=${DO_S3_KEY:-any},aws_secret_access_key=${DO_S3_SECRET:-any}"
@@ -46,19 +64,32 @@ trap cleanup EXIT
 
 start api "$BIN" api
 start data "$BIN" data
-for _ in $(seq 1 50); do curl -sf "$SELVEDGE_API_URL/healthz" >/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 50); do curl -sf "$PUBLIC_API/healthz" >/dev/null && break; sleep 0.2; done
 agent a1 $((P + 91))
 agent a2 $((P + 92))
 SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$((P + 80)) SELVEDGE_RUNNERS=127.0.0.1:$((P + 91)),127.0.0.1:$((P + 92)) \
   start gw "$BIN" gateway
 sleep 3
 
-API=$SELVEDGE_API_URL/client/v4
+API=$PUBLIC_API/client/v4
 json() { python3 -c "import sys, json; print(json.load(sys.stdin)$1)"; }
 admin() { curl -sf -H "Authorization: Bearer $SELVEDGE_ADMIN_TOKEN" -H 'content-type: application/json' "$@"; }
 check() {
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$2], got [$3]"; FAILED=1; exit 1; fi
 }
+if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
+  AGENT=127.0.0.1:$((P + 91))
+  code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$@" || true; }
+  check "an agent refuses plain HTTP" "000" "$(code "http://$AGENT/healthz")"
+  check "an agent refuses a client without a certificate" "000" "$(code -k "https://$AGENT/healthz")"
+  check "an agent refuses a certificate from another CA" "000" \
+    "$(code -k --cert "$T/rogue.pem" --key "$T/rogue.key" "https://$AGENT/healthz")"
+  check "an agent accepts a platform certificate" "200" \
+    "$(code --cacert "$T/ca.pem" --cert "$T/c.pem" --key "$T/c.key" --resolve "selvedge.internal:$((P + 91)):127.0.0.1" \
+      "https://selvedge.internal:$((P + 91))/healthz")"
+  check "the public API port does not serve internal endpoints" "404" \
+    "$(code -H "Authorization: Bearer $SELVEDGE_INTERNAL_TOKEN" "$PUBLIC_API/internal/v1/routes")"
+fi
 ACCOUNT=$(admin -X POST "$API/accounts" -d '{"name":"cluster"}' | json '["result"]["id"]')
 TOKEN=$(admin -X POST "$API/accounts/$ACCOUNT/selvedge/tokens" -d '{"name":"t"}' | json '["result"]["value"]')
 SUBDOMAIN=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/workers/subdomain" | json '["result"]["subdomain"]')
@@ -83,6 +114,11 @@ seq_out=""
 for i in $(seq 1 10); do seq_out="$seq_out $(get /)"; done
 check "one owner across runners" " 1 2 3 4 5 6 7 8 9 10" "$seq_out"
 check "JS RPC with SQLite storage" "1" "$(get /rpc)"
+if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
+  check "the public gateway port ignores internal routing, even with the token" "404" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H "x-selvedge-token: $SELVEDGE_INTERNAL_TOKEN" \
+      -H "x-selvedge-account: $ACCOUNT" -H 'x-selvedge-script: counter' -H 'Host: nowhere.test' "http://127.0.0.1:$((P + 80))/")"
+fi
 
 # Durable Object storage goes through the agent's S3 proxy: workerd holds a
 # key for its own account only, which reaches only that account's prefix.

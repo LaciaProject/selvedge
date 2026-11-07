@@ -18,6 +18,7 @@ pub mod r2;
 pub mod r2s3;
 pub mod sigv4;
 pub mod tail;
+pub mod tls;
 
 /// Compares secrets without leaking where they differ through timing.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

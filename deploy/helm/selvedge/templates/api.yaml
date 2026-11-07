@@ -29,18 +29,33 @@ spec:
             - name: SELVEDGE_BLOB_URL
               value: s3://{{ .Values.objectStore.bucket }}/blobs
             - name: SELVEDGE_GATEWAY_URL
-              value: http://{{ $name }}-gateway:{{ .Values.gateway.service.port }}
+              value: {{ include "selvedge.gatewayInternalUrl" . }}
+            {{- if .Values.tls.enabled }}
+            - name: SELVEDGE_API_INTERNAL_LISTEN
+              value: 0.0.0.0:8786
+            {{- end }}
+            {{- include "selvedge.tlsEnv" . | nindent 12 }}
             - name: SELVEDGE_WORKERS_DEV_ZONE
               value: {{ .Values.workersDevZone | quote }}
             - name: SELVEDGE_MASTER_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: master-key } }
             - name: SELVEDGE_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: admin-token } }
-          ports: [{ name: http, containerPort: 8787 }]
+          ports:
+            - { name: http, containerPort: 8787 }
+            {{- if .Values.tls.enabled }}
+            - { name: internal, containerPort: 8786 }
+            {{- end }}
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes: {{- include "selvedge.tlsVolume" . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -51,3 +66,15 @@ spec:
   type: {{ .Values.api.service.type }}
   selector: {{- include "selvedge.selector" $c | nindent 4 }}
   ports: [{ name: http, port: {{ .Values.api.service.port }}, targetPort: http }]
+{{- if .Values.tls.enabled }}
+---
+# The API's internal endpoints, for agents and gateways (mTLS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-api-internal
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: internal, port: 8786, targetPort: internal }]
+{{- end }}

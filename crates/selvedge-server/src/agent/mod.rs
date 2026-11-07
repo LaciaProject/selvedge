@@ -201,7 +201,15 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     let accept = |accepted: std::io::Result<(tokio::net::TcpStream, SocketAddr)>| match accepted {
         Ok((stream, _)) => {
             let _ = stream.set_nodelay(true);
-            proxy::serve_connection(stream, handler.clone());
+            let handler = handler.clone();
+            // With mTLS, only gateways (holding a platform certificate) get in.
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(10), crate::tls::accept(stream)).await {
+                    Ok(Ok(stream)) => proxy::serve_connection(stream, handler),
+                    Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
+                    Err(_) => tracing::debug!("TLS handshake timed out"),
+                }
+            });
         }
         Err(e) => tracing::warn!(error = %e, "accept failed"),
     };

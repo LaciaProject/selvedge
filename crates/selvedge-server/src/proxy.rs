@@ -87,6 +87,10 @@ pub async fn connect(target: Target<'_>) -> Result<Sender, String> {
                 .map_err(|_| format!("connect {addr}: timed out"))?
                 .map_err(|e| format!("connect {addr}: {e}"))?;
             let _ = stream.set_nodelay(true);
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, crate::tls::connect(stream))
+                .await
+                .map_err(|_| format!("TLS to {addr}: timed out"))?
+                .map_err(|e| format!("TLS to {addr}: {e}"))?;
             let (s, c) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
                 .await
                 .map_err(|e| e.to_string())?;

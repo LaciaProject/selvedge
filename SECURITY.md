@@ -41,6 +41,13 @@ workerd process per account, started with an empty environment; tenant outbound 
 public addresses by workerd and by a NetworkPolicy; no database or platform credentials in runner
 processes; binding calls stamped with the account identity by the agent, outside tenant reach.
 
+Components talk to each other over mTLS (Helm `tls.enabled`, on by default; `SELVEDGE_TLS_CERT`,
+`SELVEDGE_TLS_KEY`, `SELVEDGE_TLS_CA`). The chart generates a platform CA and a certificate for
+`selvedge.internal`, which every component presents and checks, along with the shared internal
+token. The agent and data listeners require the certificate. The API and the gateway serve their
+internal endpoints and routing only on separate mTLS listeners, and their public ports refuse
+them. Every component holds the same certificate, so the CA identifies the platform, not the role.
+
 Each account process has CPU, memory and process limits (`--account-memory-mb`, `--account-cpus`,
 `--account-pids`; Helm `runner.accountLimits`).
 
@@ -72,4 +79,3 @@ Known gaps, tracked for the next releases:
   still press on the pod's memory limit. With a writable cgroup v2 tree (bare metal, a delegated
   systemd unit, a privileged pod), the kernel enforces `memory.max`, `cpu.max` and `pids.max` per
   account instead.
-- Platform components authenticate each other with a shared token; mTLS is planned.

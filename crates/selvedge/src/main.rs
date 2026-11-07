@@ -587,6 +587,17 @@ async fn collect_garbage(db: Db, blobs: Blobs) {
             }
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "collecting static asset files failed"),
         }
+        // D1 import and export files whose URLs expired unused.
+        match db.take_expired_d1_transfers().await {
+            Ok(paths) => {
+                for p in &paths {
+                    if let Err(e) = blobs.delete(p).await {
+                        tracing::warn!(error = %format!("{e:#}"), path = %p, "deleting a D1 transfer file failed");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "collecting D1 transfer files failed"),
+        }
     }
 }
 

@@ -46,7 +46,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | R2 | 全部绑定操作、条件请求、分片上传、`wrangler r2`；公开访问 URL（`pub-<id>.<zone>`，相当于 r2.dev）和自定义域名；对象变更通知到队列 | 元数据存 PostgreSQL，数据存 S3；公开读取由 data 服务的 S3 端口提供 |
 | R2 S3 API | 常用的桶、对象、分片操作，SigV4（含预签名 URL），`aws-chunked` 请求体 | 与绑定共享同一批对象，已用 AWS SDK 测试 |
 | Durable Objects | fetch、RPC、WebSocket 休眠、SQLite 与 KV 存储、alarms | workerd 集群模式，存储写入 S3 后才确认 |
-| D1 | `prepare/bind/first/all/run/raw/batch/exec`，以及 `wrangler d1` 的常用命令和迁移 | 每个数据库是一个 SQLite Durable Object |
+| D1 | `prepare/bind/first/all/run/raw/batch/exec`，以及 `wrangler d1` 的常用命令、迁移、导出和文件导入 | 每个数据库是一个 SQLite Durable Object |
 | Queues | 生产者、Worker 消费者和 HTTP pull 消费者、HTTP 推送、重试、延迟、死信队列、暂停投递、清空、保留期，至少投递一次 | 消息存在 PostgreSQL，投递时加租约 |
 | Cron Triggers | 每个脚本最多 5 个，支持 `L`、`W`、`#` | 数据服务的多个副本抢同一次触发，每次只执行一次 |
 | Static Assets | `html_handling`、SPA 和 404 页、`run_worker_first`、`_headers`、`_redirects`，只上传有变化的文件，自动回收不再用的文件 | 未修改的 Cloudflare asset worker 和 router worker |
@@ -91,7 +91,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |
 | R2 | 没有生命周期规则。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
-| D1 | 没有读副本、Time Travel 和 `d1 export`，不支持导入大文件 |
+| D1 | 没有读副本和 Time Travel；导入文件最大 64 MB，导入导出都在 Durable Object 内存中完成 |
 | Queues | 不支持 `v8` 内容类型；`queue.metrics()` 只有积压数 |
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |

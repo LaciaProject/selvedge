@@ -130,14 +130,21 @@ writer, durable commits and failover exactly like Durable Objects.
 Supported: `prepare`/`bind` (numbers, strings, null, booleans, blobs), `first`, `all`, `run`, `raw`
 (with `columnNames`), `batch` (one transaction: a failing statement rolls the whole batch back) and
 `exec`. The REST API serves `wrangler d1 create`, `list`, `info`, `delete`, `execute --remote
---command` and `migrations apply --remote`.
+--command`, `execute --remote --file`, `export --remote` and `migrations apply --remote`.
+
+`d1 export` writes the schema and rows as SQL in SQLite's dump format (with `--no-schema`,
+`--no-data` and `--table`), and `execute --file` runs a file in one transaction, so a failing
+statement leaves the database as it was. Files move through URLs on the API itself that carry a
+random token and expire after an hour.
 
 Differences:
 
 - SQL runs on Durable Object SQLite, so the same statements are refused as in a Durable Object
   (for example `BEGIN`/`COMMIT` and most `PRAGMA`s; D1 refuses these too).
 - Not available yet: read replication and sessions (`withSession` works but always reads from the
-  primary), Time Travel, `wrangler d1 export`, and `execute --file` for large imports.
+  primary) and Time Travel.
+- Imports and exports are held in memory by the database's Durable Object; an import file may be at
+  most 64 MB (the API's upload limit).
 - `meta.rows_read` and `meta.rows_written` count what SQLite reports, which can differ from D1's
   billing counters.
 

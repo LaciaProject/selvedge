@@ -148,6 +148,23 @@ check "D1 binding: prepare, bind, run, first, blobs, batch, all, raw, rollback, 
   '{"insert":[true,1,true],"first":"ada","blob":[1,2,3],"batch":3,"all":["ada","grace","linus"],"raw":[["id","name"],[1,"ada"]],"rollback":true,"error":true}' \
   "$(curl -s -H "Host: d1test.$SUBDOMAIN.workers.test" "http://127.0.0.1:$GATEWAY_PORT/run")"
 
+# D1 export and import through wrangler: a dump of one database restores into
+# another, rows and blobs alike, and a failing import changes nothing.
+d1q() { curl -sf -H "Authorization: Bearer $TOKEN" -X POST "$API/accounts/$ACCOUNT/d1/database/$1/query" -d "{\"sql\":\"$2\"}"; }
+wrangler d1 export e2e-db --remote --output "$WORK/dump.sql" > "$WORK/export.log" 2>&1 || cat "$WORK/export.log"
+check "wrangler d1 export writes the schema and the rows" "1 1" \
+  "$(grep -c '^CREATE TABLE posts' "$WORK/dump.sql") $(grep -c '^INSERT INTO "posts"' "$WORK/dump.sql")"
+wrangler d1 create e2e-copy > /dev/null 2>&1
+COPY=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/d1/database?name=e2e-copy" | json '["result"][0]["uuid"]')
+wrangler d1 execute e2e-copy --remote --file "$WORK/dump.sql" > "$WORK/import.log" 2>&1 || cat "$WORK/import.log"
+check "wrangler d1 execute --file reports the queries it ran" "1" "$(grep -c 'Executed [0-9]* queries' "$WORK/import.log")"
+wrangler d1 export e2e-copy --remote --output "$WORK/copy.sql" > /dev/null 2>&1
+check "the imported copy exports the same dump" "same" "$(cmp -s "$WORK/dump.sql" "$WORK/copy.sql" && echo same || diff "$WORK/dump.sql" "$WORK/copy.sql" | head -5)"
+printf "INSERT INTO posts (title) VALUES ('half');\nINSERT INTO missing_table VALUES (1);\n" > "$WORK/bad.sql"
+wrangler d1 execute e2e-copy --remote --file "$WORK/bad.sql" > "$WORK/bad.log" 2>&1 || true
+check "a failing import rolls back as a whole" "1 1" \
+  "$(grep -ci 'missing_table' "$WORK/bad.log" | head -c1) $(d1q "$COPY" 'SELECT count(*) AS n FROM posts' | json '["result"][0]["results"][0]["n"]')"
+
 # Queues: a queue through wrangler, one Worker producing and consuming it.
 wrangler queues create e2e-jobs > /dev/null 2>&1
 QAPP="$WORK/queue-app"

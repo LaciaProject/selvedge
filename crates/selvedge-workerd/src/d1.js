@@ -14,7 +14,94 @@ import { DurableObject } from "cloudflare:workers";
 const toSql = (v) => (Array.isArray(v) ? new Uint8Array(v).buffer : v);
 const fromSql = (v) => (v instanceof ArrayBuffer ? Array.from(new Uint8Array(v)) : v);
 
+// A SQL literal for a stored value, as SQLite's `.dump` writes it.
+function literal(v) {
+  if (v === null || v === undefined) return "NULL";
+  if (v instanceof ArrayBuffer) {
+    return "X'" + [...new Uint8Array(v)].map((b) => b.toString(16).padStart(2, "0")).join("") + "'";
+  }
+  if (typeof v === "number" || typeof v === "bigint") return Number.isFinite(Number(v)) ? String(v) : "NULL";
+  return "'" + String(v).replaceAll("'", "''") + "'";
+}
+
+const ident = (name) => '"' + name.replaceAll('"', '""') + '"';
+
+// How many statements a SQL text holds: semicolons outside quotes and
+// comments, plus a trailing statement without one.
+function countStatements(sql) {
+  let n = 0, pending = false, i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"' || c === "`" || c === "[") {
+      const end = c === "[" ? "]" : c;
+      i++;
+      while (i < sql.length && !(sql[i] === end && sql[i + 1] !== end)) i += sql[i] === end ? 2 : 1;
+      i++;
+      pending = true;
+    } else if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+    } else if (c === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      i = end < 0 ? sql.length : end + 2;
+    } else {
+      if (c === ";") {
+        if (pending) n++;
+        pending = false;
+      } else if (!/\s/.test(c)) {
+        pending = true;
+      }
+      i++;
+    }
+  }
+  return n + (pending ? 1 : 0);
+}
+
 export class D1Database extends DurableObject {
+  // `wrangler d1 export`: the schema and rows as SQL, in SQLite's dump format.
+  dump({ no_schema, no_data, tables } = {}) {
+    const sql = this.ctx.storage.sql;
+    const wanted = Array.isArray(tables) && tables.length ? new Set(tables) : null;
+    const objects = sql
+      .exec(
+        `SELECT type, name, tbl_name, sql FROM sqlite_master
+         WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'
+         ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'view' THEN 2 ELSE 1 END, rowid`,
+      )
+      .toArray()
+      .filter((o) => !wanted || wanted.has(o.tbl_name));
+    const out = ["PRAGMA defer_foreign_keys=TRUE;"];
+    for (const o of objects.filter((o) => o.type === "table")) {
+      if (!no_schema) out.push(o.sql + ";");
+      if (no_data) continue;
+      for (const row of sql.exec(`SELECT * FROM ${ident(o.name)}`).raw()) {
+        out.push(`INSERT INTO ${ident(o.name)} VALUES(${row.map(literal).join(",")});`);
+      }
+    }
+    if (!no_schema) for (const o of objects.filter((o) => o.type !== "table")) out.push(o.sql + ";");
+    return out.join("\n") + "\n";
+  }
+
+  // `wrangler d1 execute --file`: a whole SQL file in one transaction, so a
+  // failure leaves the database as it was.
+  import(text) {
+    const started = Date.now();
+    const sql = this.ctx.storage.sql;
+    // workerd refuses PRAGMAs a dump starts with; foreign keys are checked
+    // at commit regardless.
+    const body = text.replace(/^\s*PRAGMA\s+defer_foreign_keys\s*=\s*\w+\s*;/gim, "");
+    let read = 0, written = 0;
+    this.ctx.storage.transactionSync(() => {
+      const cursor = sql.exec(body);
+      cursor.toArray();
+      read = cursor.rowsRead;
+      written = cursor.rowsWritten;
+    });
+    return {
+      num_queries: countStatements(body),
+      meta: { duration: Date.now() - started, rows_read: read, rows_written: written, size_after: sql.databaseSize },
+    };
+  }
+
   run(sql, params, format) {
     const started = Date.now();
     const cursor = this.ctx.storage.sql.exec(sql, ...(params ?? []).map(toSql));
@@ -76,6 +163,8 @@ export class D1Database extends DurableObject {
         const result = this.ctx.storage.transactionSync(() => this.run(body.sql, body.params, "ARRAY_OF_OBJECTS"));
         return Response.json([result]);
       }
+      if (url.pathname === "/export") return Response.json({ success: true, sql: this.dump(body) });
+      if (url.pathname === "/import") return Response.json({ success: true, ...this.import(body.sql ?? "") });
       // Database deletion: drop all of its storage.
       if (url.pathname === "/destroy") {
         await this.ctx.storage.deleteAll();

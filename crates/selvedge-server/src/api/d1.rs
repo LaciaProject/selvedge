@@ -4,8 +4,10 @@
 
 use axum::Router;
 use axum::extract::{Path, Query, State as AxState};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use md5::{Digest, Md5};
+use rand::RngCore as _;
 use selvedge_core::AccountId;
 use selvedge_store::D1Info;
 use serde::Deserialize;
@@ -22,6 +24,10 @@ pub fn routes() -> Router<State> {
         .route(&format!("{base}/{{db}}"), get(get_db).delete(delete_db))
         .route(&format!("{base}/{{db}}/query"), post(query))
         .route(&format!("{base}/{{db}}/raw"), post(raw))
+        .route(&format!("{base}/{{db}}/import"), post(import))
+        .route(&format!("{base}/{{db}}/export"), post(export))
+        // The URLs `import` and `export` hand out; the token is the credential.
+        .route("/d1/v1/transfers/{token}", get(download).put(upload))
 }
 
 fn db_json(d: &D1Info) -> Value {
@@ -201,6 +207,186 @@ async fn raw(
         return Err(e);
     }
     Ok(ok(json!([{ "results": out["results"], "success": true, "meta": out["meta"] }])))
+}
+
+// ---- import and export, as `wrangler d1 execute --file` and `d1 export` use them ----
+
+fn transfer_path(token_sha: &str) -> String {
+    format!("d1-transfers/{token_sha}")
+}
+
+fn new_transfer_token() -> (String, String) {
+    let mut raw = [0u8; 32];
+    rand::rng().fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+    let sha = selvedge_core::sha256_hex(token.as_bytes());
+    (token, sha)
+}
+
+/// The API's own URL for a transfer, as the client reached the API.
+fn transfer_url(headers: &http::HeaderMap, token: &str) -> ApiResult<String> {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("missing Host header"))?;
+    let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
+    Ok(format!("{}://{host}/d1/v1/transfers/{token}", if secure { "https" } else { "http" }))
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    action: String,
+    etag: Option<String>,
+    filename: Option<String>,
+}
+
+/// A polling response that is already done.
+fn complete(result: Value) -> Value {
+    json!({ "success": true, "status": "complete", "at_bookmark": "", "messages": [], "result": result })
+}
+
+async fn import(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, db)): Path<(String, String)>,
+    headers: http::HeaderMap,
+    JsonBody(body): JsonBody<ImportBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let d = state.db.d1_database(&id, &db).await?.ok_or_else(not_found)?;
+    match body.action.as_str() {
+        "init" => {
+            let etag = body.etag.filter(|e| e.len() == 32 && e.bytes().all(|b| b.is_ascii_hexdigit()));
+            let etag = etag.ok_or_else(|| ApiError::bad_request("`init` needs the file's MD5 as `etag`"))?;
+            let (token, sha) = new_transfer_token();
+            state
+                .db
+                .create_d1_transfer(&sha, &id, &d.id, "import", Some(&etag.to_ascii_lowercase()), None)
+                .await?;
+            Ok(ok(
+                json!({ "success": true, "upload_url": transfer_url(&headers, &token)?, "filename": token }),
+            ))
+        }
+        "ingest" => {
+            let token = body.filename.ok_or_else(|| ApiError::bad_request("`ingest` needs `filename`"))?;
+            let sha = selvedge_core::sha256_hex(token.as_bytes());
+            let t = state
+                .db
+                .d1_transfer(&sha)
+                .await?
+                .filter(|t| t.kind == "import" && t.account == id && t.database_id == d.id)
+                .ok_or_else(|| ApiError::bad_request("the import is unknown or has expired; start again"))?;
+            let path = t.blob_path.ok_or_else(|| ApiError::bad_request("the file has not been uploaded"))?;
+            if body.etag.map(|e| e.to_ascii_lowercase()) != t.etag {
+                return Err(ApiError::bad_request("`etag` does not match the uploaded file"));
+            }
+            let mut stream = state
+                .blobs
+                .stream_at(&path)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("the uploaded file is gone"))?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+                bytes.extend_from_slice(&chunk.map_err(anyhow::Error::from)?);
+            }
+            let sql =
+                String::from_utf8(bytes).map_err(|_| ApiError::bad_request("the file is not UTF-8 text"))?;
+            let out = call(&state, &id, &d.id, "/import", &json!({ "sql": sql })).await;
+            // One upload, one ingest: the file goes either way.
+            if let Some(p) = state.db.take_d1_transfer(&sha).await? {
+                state.blobs.delete(&p).await?;
+            }
+            let out = out?;
+            if out.get("success") != Some(&json!(true)) {
+                let error = out["error"].as_str().unwrap_or("the import failed").to_owned();
+                return Ok(ok(json!({
+                    "success": true, "status": "error", "at_bookmark": "", "messages": [],
+                    "errors": [error.clone()], "error": error,
+                })));
+            }
+            Ok(ok(complete(json!({
+                "success": true,
+                "type": "done",
+                "num_queries": out["num_queries"],
+                "final_bookmark": "",
+                "meta": out["meta"],
+            }))))
+        }
+        "poll" => {
+            Err(ApiError::bad_request("imports finish when they are ingested; there is nothing to poll"))
+        }
+        other => Err(ApiError::bad_request(format!("unknown import action `{other}`"))),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ExportBody {
+    #[serde(default)]
+    dump_options: Value,
+}
+
+async fn export(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, db)): Path<(String, String)>,
+    headers: http::HeaderMap,
+    JsonBody(body): JsonBody<ExportBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let d = state.db.d1_database(&id, &db).await?.ok_or_else(not_found)?;
+    let opts = if body.dump_options.is_object() { body.dump_options } else { json!({}) };
+    let out = call(&state, &id, &d.id, "/export", &opts).await?;
+    let Some(sql) = out["sql"].as_str() else {
+        let error = out["error"].as_str().unwrap_or("the export failed").to_owned();
+        return Ok(ok(
+            json!({ "success": true, "status": "error", "at_bookmark": "", "messages": [], "error": error }),
+        ));
+    };
+    let (token, sha) = new_transfer_token();
+    let path = transfer_path(&sha);
+    state.blobs.put_at(&path, bytes::Bytes::from(sql.to_owned())).await?;
+    state.db.create_d1_transfer(&sha, &id, &d.id, "export", None, Some(&path)).await?;
+    Ok(ok(complete(json!({
+        "filename": format!("{}.sql", d.name),
+        "signed_url": transfer_url(&headers, &token)?,
+    }))))
+}
+
+/// Uploads an import's file. Answers its MD5 as the ETag, which wrangler checks.
+async fn upload(
+    AxState(state): AxState<State>,
+    Path(token): Path<String>,
+    body: bytes::Bytes,
+) -> ApiResult<Response> {
+    let sha = selvedge_core::sha256_hex(token.as_bytes());
+    let t = state
+        .db
+        .d1_transfer(&sha)
+        .await?
+        .filter(|t| t.kind == "import" && t.blob_path.is_none())
+        .ok_or_else(|| ApiError::not_found("no such upload"))?;
+    let md5 = hex::encode(Md5::digest(&body));
+    if t.etag.as_deref() != Some(md5.as_str()) {
+        return Err(ApiError::bad_request("the file's MD5 does not match the one announced"));
+    }
+    let path = transfer_path(&sha);
+    state.blobs.put_at(&path, body).await?;
+    if !state.db.set_d1_transfer_blob(&sha, &path).await? {
+        state.blobs.delete(&path).await?;
+        return Err(ApiError::not_found("no such upload"));
+    }
+    Ok((http::StatusCode::OK, [(http::header::ETAG, format!("\"{md5}\""))]).into_response())
+}
+
+/// Downloads an export. The URL stays valid for an hour, as on Cloudflare.
+async fn download(AxState(state): AxState<State>, Path(token): Path<String>) -> ApiResult<Response> {
+    let sha = selvedge_core::sha256_hex(token.as_bytes());
+    let t = state.db.d1_transfer(&sha).await?.filter(|t| t.kind == "export");
+    let path = t.and_then(|t| t.blob_path).ok_or_else(|| ApiError::not_found("no such export"))?;
+    let stream = state.blobs.stream_at(&path).await?.ok_or_else(|| ApiError::not_found("no such export"))?;
+    Ok(([(http::header::CONTENT_TYPE, "application/sql")], axum::body::Body::from_stream(stream))
+        .into_response())
 }
 
 #[cfg(test)]

@@ -46,6 +46,7 @@ BUCKET=${DO_S3_BUCKET:-selvedge-do}
 export SELVEDGE_DO_BUCKET="s3://$BUCKET/cluster-$$"
 export SELVEDGE_DO_BUCKET_OPTIONS="aws_endpoint=${DO_S3_ENDPOINT:-http://127.0.0.1:29000},aws_region=us-east-1,aws_access_key_id=${DO_S3_KEY:-any},aws_secret_access_key=${DO_S3_SECRET:-any}"
 export SELVEDGE_CLUSTER_SECRET=$(openssl rand -hex 32)
+export SELVEDGE_ACCOUNT_MEMORY_MB=512
 
 PIDS=()
 start() { # name, args...
@@ -136,6 +137,31 @@ seq_out=""
 for i in $(seq 1 10); do seq_out="$seq_out $(get /)"; done
 check "one owner across runners" " 1 2 3 4 5 6 7 8 9 10" "$seq_out"
 check "JS RPC with SQLite storage" "1" "$(get /rpc)"
+
+# A process over its memory limit drains when it is restarted, so its Durable
+# Objects move at once instead of after the cluster lease (20 seconds).
+direct() { # agent port, path: a request straight to one runner, as the gateway sends it
+  local h=(-H "x-selvedge-token: $SELVEDGE_INTERNAL_TOKEN" -H "x-selvedge-account: $ACCOUNT" -H 'x-selvedge-script: counter')
+  if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
+    curl -s -m 10 "${h[@]}" --cacert "$T/ca.pem" --cert "$T/gateway.pem" --key "$T/gateway.key" \
+      --resolve "runner.selvedge.internal:$1:127.0.0.1" "https://runner.selvedge.internal:$1$2"
+  else
+    curl -s -m 10 "${h[@]}" "http://127.0.0.1:$1$2"
+  fi
+}
+for port in $((P + 91)) $((P + 92)); do
+  last=0 restarted=no
+  for _ in $(seq 1 40); do
+    n=$(direct "$port" /grow)
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -le "$last" ]; then restarted=yes; break; fi
+    [[ "$n" =~ ^[0-9]+$ ]] && last=$n
+    sleep 0.3
+  done
+  check "runner $port restarts its account process over the memory limit" "yes" "$restarted"
+done
+t0=$(date +%s)
+check "Durable Objects answer at once after limit restarts, with their state" "11" "$(get /)"
+check "...within 8 seconds" "yes" "$([ $(( $(date +%s) - t0 )) -le 8 ] && echo yes || echo no)"
 if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
   check "the public gateway port ignores internal routing, even with the token" "404" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "x-selvedge-token: $SELVEDGE_INTERNAL_TOKEN" \
@@ -199,7 +225,7 @@ for n in a b c d e f g h; do
   check "object $n survives a runner crash" "2" "$(retry_get "/?name=$n")"
 done
 echo "     every object was back within $(( $(date +%s) - start_ts ))s (workerd's cluster lease is 20s)"
-check "the first object kept its count" "11" "$(retry_get /)"
+check "the first object kept its count" "12" "$(retry_get /)"
 d1_value() {
   local deadline=$(( $(date +%s) + 45 )) out
   while :; do

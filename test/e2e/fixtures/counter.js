@@ -14,9 +14,16 @@ export class Counter extends DurableObject {
   }
 }
 
+// Memory kept by this process, to push it over its limit.
+const kept = [];
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    if (url.pathname === "/grow") {
+      kept.push(new Uint8Array(64 << 20).fill(1));
+      return new Response(String(kept.length));
+    }
     const stub = env.COUNTER.get(env.COUNTER.idFromName(url.searchParams.get("name") ?? "global"));
     if (url.pathname === "/rpc") return new Response(String(await stub.add(1)));
     return stub.fetch(req);

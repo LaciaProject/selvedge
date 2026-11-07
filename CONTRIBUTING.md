@@ -35,6 +35,13 @@ This adds a `Signed-off-by: Your Name <you@example.com>` line. There is no CLA.
 4. Large tests (multi-node Kubernetes, chaos, upgrades) run on GitHub Actions only. Push a branch
    named `ci/<topic>` or run the `kubernetes` workflow by hand.
 
+## Releases
+
+Set `version` and `appVersion` in `deploy/helm/selvedge/Chart.yaml`, merge, then push a tag
+`v<version>` on `main`. The `release` workflow checks that the tag matches the chart, pushes the
+image (`ghcr.io/laciaproject/selvedge:<version>`, linux/amd64 and linux/arm64) and the chart
+(`oci://ghcr.io/laciaproject/charts/selvedge`), and creates the GitHub release.
+
 ## Layout
 
 | Path | What |

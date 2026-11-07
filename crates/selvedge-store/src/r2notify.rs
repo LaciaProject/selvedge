@@ -56,7 +56,7 @@ pub(crate) async fn notify_in<C: tokio_postgres::GenericClient>(
     let (size, etag) = object.map_or((None, None), |(s, e)| (Some(s), Some(e)));
     let (src_bucket, src_key) = event.copy_source.map_or((None, None), |(b, k)| (Some(b), Some(k)));
     tx.execute(
-        "INSERT INTO queue_messages (id, queue_id, body, content_type)
+        "INSERT INTO queue_messages (id, queue_id, body, content_type, visible_at)
          SELECT replace(gen_random_uuid()::text, '-', ''), q.queue_id,
                 convert_to((jsonb_build_object(
                     'account', b.account_id,
@@ -68,10 +68,12 @@ pub(crate) async fn notify_in<C: tokio_postgres::GenericClient>(
                   || CASE WHEN $6::text IS NULL THEN '{}'::jsonb
                           ELSE jsonb_build_object('copySource', jsonb_build_object('bucket', $6::text, 'object', $7::text)) END
                 )::text, 'UTF8'),
-                'json'
+                'json',
+                now() + make_interval(secs => qq.delivery_delay_secs)
          FROM (SELECT DISTINCT r.queue_id FROM r2_notification_rules r
                WHERE r.bucket_id = $1 AND $2::text = ANY(r.actions)
                  AND starts_with($3::text, r.prefix) AND right($3::text, length(r.suffix)) = r.suffix) q
+         JOIN queues qq ON qq.id = q.queue_id
          JOIN r2_buckets b ON b.id = $1",
         &[&bucket, &event.action, &key, &size, &etag, &src_bucket, &src_key],
     )

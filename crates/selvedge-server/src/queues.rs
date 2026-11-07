@@ -50,12 +50,14 @@ fn format_of(raw: Option<&str>) -> Result<String, Response> {
     Ok(f)
 }
 
-fn delay(raw: Option<u64>) -> Result<u32, Response> {
-    let d = raw.unwrap_or(0);
-    if d > u64::from(MAX_DELAY_SECS) {
-        return Err(error(StatusCode::BAD_REQUEST, format!("delaySeconds must be at most {MAX_DELAY_SECS}")));
+/// A message's own delay; `None` leaves the queue's delivery delay.
+fn delay(raw: Option<u64>) -> Result<Option<u32>, Response> {
+    match raw {
+        Some(d) if d > u64::from(MAX_DELAY_SECS) => {
+            Err(error(StatusCode::BAD_REQUEST, format!("delaySeconds must be at most {MAX_DELAY_SECS}")))
+        }
+        d => Ok(d.map(|d| d as u32)),
     }
-    Ok(d as u32)
 }
 
 async fn backlog_response(db: &Db, queue_id: &str) -> Response {

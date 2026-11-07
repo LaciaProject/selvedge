@@ -202,6 +202,31 @@ check "a message out of retries is dropped when its lease runs out" " 0" \
 wrangler queues consumer http remove e2e-pull > /dev/null 2>&1
 check "without an HTTP pull consumer, pulls are refused" "400" "$(qapi /messages/pull -X POST -d '{}' -o /dev/null -w '%{http_code}')"
 
+# Queue settings: pausing delivery, a queue-wide delivery delay, purging.
+wrangler queues create e2e-ctl > /dev/null 2>&1
+wrangler queues consumer http add e2e-ctl > /dev/null 2>&1
+QID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/queues?name=e2e-ctl" | json '["result"][0]["queue_id"]')
+count_pulled() { # pulls, acks what came, prints "<pulled> <backlog after>"
+  local r; r=$(qapi /messages/pull -X POST -d '{"batch_size":10}')
+  echo "$r" | python3 -c 'import sys, json; r = json.load(sys.stdin)["result"]; print(json.dumps({"acks": [{"lease_id": m["lease_id"]} for m in r["messages"]]}))' > "$WORK/acks.json"
+  qapi /messages/ack -X POST -d @"$WORK/acks.json" > /dev/null
+  echo "$(echo "$r" | python3 -c 'import sys, json; print(len(json.load(sys.stdin)["result"]["messages"]))') $(qapi '' | json '["result"]["settings"]["delivery_paused"]')"
+}
+wrangler queues pause-delivery e2e-ctl > /dev/null 2>&1
+qapi /messages -X POST -d '{"body":"held"}' > /dev/null
+check "a paused queue delivers nothing" "0 True" "$(count_pulled)"
+wrangler queues resume-delivery e2e-ctl > /dev/null 2>&1
+check "a resumed queue delivers what waited" "1 False" "$(count_pulled)"
+wrangler queues update e2e-ctl --delivery-delay-secs 3 > /dev/null 2>&1
+qapi /messages -X POST -d '{"body":"later"}' > /dev/null
+check "the queue's delivery delay holds a message back" "0 False" "$(count_pulled)"
+sleep 4
+check "...and then delivers it" "1 False" "$(count_pulled)"
+qapi /messages/batch -X POST -d '{"messages":[{"body":1,"delay_seconds":0},{"body":2,"delay_seconds":0}]}' > /dev/null
+wrangler queues purge e2e-ctl --force > /dev/null 2>&1
+check "purging empties the queue" "0 0" \
+  "$(qapi /messages/pull -X POST -d '{}' | python3 -c 'import sys, json; r = json.load(sys.stdin)["result"]; print(len(r["messages"]), r["message_backlog_count"])')"
+
 # R2 event notifications: object changes under a prefix go to a queue, which
 # the queue app consumes alongside its own.
 wrangler queues create e2e-events > /dev/null 2>&1

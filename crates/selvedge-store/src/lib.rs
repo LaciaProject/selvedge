@@ -6,6 +6,7 @@
 pub mod assets;
 pub mod blobs;
 pub mod cron;
+pub mod d1transfer;
 pub mod db;
 pub mod queues;
 pub mod r2;

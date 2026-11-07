@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-全部开发已完成。代码分 7 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+v0.1.0 是第一个发布版本：镜像 `ghcr.io/laciaproject/selvedge:0.1.0`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。代码分 20 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |
@@ -25,6 +25,19 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 | [#5](https://github.com/LaciaProject/selvedge/pull/5) | Workflows |
 | [#6](https://github.com/LaciaProject/selvedge/pull/6) | R2 的 S3 兼容 API |
 | [#7](https://github.com/LaciaProject/selvedge/pull/7) | 组件间 mTLS、按账号资源限制、灰度发布、zone 路由、静态资源回收、修复连接池死锁 |
+| [#8](https://github.com/LaciaProject/selvedge/pull/8) | 本文档 |
+| [#9](https://github.com/LaciaProject/selvedge/pull/9) | mTLS 按组件角色签发证书，两端都核对角色 |
+| [#10](https://github.com/LaciaProject/selvedge/pull/10) | 超内存重启先注销租约，DO 不再停 20 秒 |
+| [#11](https://github.com/LaciaProject/selvedge/pull/11) | R2 公开访问 URL 和自定义域名 |
+| [#12](https://github.com/LaciaProject/selvedge/pull/12) | R2 事件通知；支持 `inherit` 绑定 |
+| [#13](https://github.com/LaciaProject/selvedge/pull/13) | 发布工作流：打标签后发布镜像和 Helm chart |
+| [#14](https://github.com/LaciaProject/selvedge/pull/14) | R2 事件通知与写入同一事务入队 |
+| [#15](https://github.com/LaciaProject/selvedge/pull/15) | `request.cf` 从负载均衡的请求头映射地理和网络字段 |
+| [#16](https://github.com/LaciaProject/selvedge/pull/16) | Queues HTTP pull 消费者和 HTTP 推送 |
+| [#17](https://github.com/LaciaProject/selvedge/pull/17) | Queues 暂停投递、默认延迟、保留期、清空、`max_batch_timeout` |
+| [#18](https://github.com/LaciaProject/selvedge/pull/18) | D1 导出和文件导入 |
+| [#19](https://github.com/LaciaProject/selvedge/pull/19) | R2 生命周期规则 |
+| [#20](https://github.com/LaciaProject/selvedge/pull/20) | R2 S3 接口的虚拟主机寻址 |
 
 CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请求：
 
@@ -101,4 +114,4 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 ## 下一步
 
-- 打 v0.1 版本标签，发布镜像和 Helm chart。
+按上面局限表的优先级继续，影响最大的是 Durable Object 崩溃后的故障转移时间（受 workerd 内部租约限制）。

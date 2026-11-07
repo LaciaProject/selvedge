@@ -58,7 +58,7 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | R2 (binding, multipart, conditional requests; `wrangler r2`; the S3-compatible API with presigned URLs; public bucket URLs and custom domains; event notifications to queues) | |
 | D1 (binding, batches, `wrangler d1 create/execute/migrations`) | D1 read replicas, Time Travel, import/export |
 | Cron Triggers (`triggers.crons`, including `L`, `W` and `#`) | |
-| Queues (producers, Worker consumers, retries, dead-letter queues; `wrangler queues`) | `v8` message format, HTTP pull consumers |
+| Queues (producers, Worker and HTTP pull consumers, retries, dead-letter queues, pushing over HTTP; `wrangler queues`) | `v8` message format |
 | Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush |
 | `wrangler tail` (logs, exceptions, filters) | |
 | workers.dev-style hostnames, custom domains and zone routes (`routes` in wrangler config) | |

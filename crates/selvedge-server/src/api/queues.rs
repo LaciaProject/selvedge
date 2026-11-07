@@ -1,9 +1,11 @@
-//! The Queues REST API: queues and their (one) Worker consumer.
+//! The Queues REST API: queues, their (one) consumer, a Worker or an HTTP
+//! pull consumer, and pushing, pulling and acking messages over HTTP.
 
 use axum::Router;
 use axum::extract::{Path, Query, State as AxState};
 use axum::response::Response;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
+use base64::Engine as _;
 use selvedge_core::AccountId;
 use selvedge_store::queues::{ConsumerSettings, QueueInfo};
 use serde::Deserialize;
@@ -22,7 +24,16 @@ pub fn routes() -> Router<State> {
             &format!("{base}/{{queue}}/consumers/{{consumer}}"),
             put(update_consumer).delete(delete_consumer).get(get_consumer),
         )
+        .route(&format!("{base}/{{queue}}/messages"), post(push))
+        .route(&format!("{base}/{{queue}}/messages/batch"), post(push_batch))
+        .route(&format!("{base}/{{queue}}/messages/pull"), post(pull))
+        .route(&format!("{base}/{{queue}}/messages/ack"), post(ack))
 }
+
+/// Largest message, as on Cloudflare.
+const MAX_MESSAGE_BYTES: usize = 128 * 1024;
+const MAX_BATCH: usize = 100;
+const MAX_DELAY_SECS: u32 = 43_200;
 
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -36,6 +47,22 @@ fn not_found() -> ApiError {
 }
 
 fn consumer_json(q: &QueueInfo, c: &ConsumerSettings) -> Value {
+    if c.is_http_pull() {
+        return json!({
+            "consumer_id": q.id,
+            "queue_id": q.id,
+            "queue_name": q.name,
+            "type": "http_pull",
+            "created_on": q.created_on,
+            "settings": {
+                "batch_size": c.batch_size,
+                "max_retries": c.max_retries,
+                "visibility_timeout_ms": c.visibility_timeout_ms,
+                "retry_delay": c.retry_delay_secs,
+            },
+            "dead_letter_queue": c.dead_letter_queue,
+        });
+    }
     json!({
         "consumer_id": q.id,
         "queue_id": q.id,
@@ -169,6 +196,7 @@ struct ConsumerSettingsBody {
     max_retries: Option<i32>,
     max_wait_time_ms: Option<i32>,
     retry_delay: Option<i32>,
+    visibility_timeout_ms: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -183,18 +211,25 @@ struct ConsumerBody {
 }
 
 async fn upsert(state: &State, account: &AccountId, q: &QueueInfo, body: ConsumerBody) -> ApiResult<Value> {
-    if body.ty.as_deref().is_some_and(|t| t != "worker") {
-        return Err(ApiError::bad_request(
-            "only Worker consumers are supported; HTTP pull consumers are not",
-        ));
-    }
-    let script = body
-        .script_name
-        .or(body.script)
-        .ok_or_else(|| ApiError::bad_request("a consumer needs `script_name`"))?;
-    if state.db.script(account, &script).await?.is_none() {
-        return Err(ApiError::bad_request(format!("Worker `{script}` does not exist")));
-    }
+    let kind = body.ty.clone().unwrap_or_else(|| "worker".into());
+    let script = match kind.as_str() {
+        "worker" => {
+            let script = body
+                .script_name
+                .or(body.script)
+                .ok_or_else(|| ApiError::bad_request("a consumer needs `script_name`"))?;
+            if state.db.script(account, &script).await?.is_none() {
+                return Err(ApiError::bad_request(format!("Worker `{script}` does not exist")));
+            }
+            script
+        }
+        "http_pull" => String::new(),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "consumer type `{other}` is not supported; use `worker` or `http_pull`"
+            )));
+        }
+    };
     if let Some(dlq) = &body.dead_letter_queue {
         if state.db.queue(account, dlq).await?.is_none() {
             return Err(ApiError::bad_request(format!("dead letter queue `{dlq}` does not exist")));
@@ -202,6 +237,8 @@ async fn upsert(state: &State, account: &AccountId, q: &QueueInfo, body: Consume
     }
     let s = &body.settings;
     let settings = ConsumerSettings {
+        kind,
+        visibility_timeout_ms: s.visibility_timeout_ms.unwrap_or(30_000).clamp(1, 12 * 3600 * 1000),
         script,
         batch_size: s.batch_size.unwrap_or(10).clamp(1, 100),
         max_wait_ms: s.max_wait_time_ms.unwrap_or(5000).clamp(0, 60_000),
@@ -222,11 +259,16 @@ async fn add_consumer(
     let (id, q) = queue_access(&state, &caller, &account, &queue).await?;
     if let Some(existing) = state.db.consumer(&q.id).await? {
         let named = body.script_name.as_ref().or(body.script.as_ref());
-        if named.is_some_and(|s| *s != existing.script) {
+        let other_kind = body.ty.as_deref().unwrap_or("worker") != existing.kind;
+        if other_kind || named.is_some_and(|s| *s != existing.script) {
             return Err(ApiError::new(
                 http::StatusCode::CONFLICT,
                 11004,
-                format!("Queue `{}` already has a consumer (`{}`)", q.name, existing.script),
+                format!(
+                    "Queue `{}` already has a consumer (`{}`)",
+                    q.name,
+                    if existing.is_http_pull() { "http_pull" } else { &existing.script }
+                ),
             ));
         }
     }
@@ -251,4 +293,172 @@ async fn delete_consumer(
     let (_, q) = queue_access(&state, &caller, &account, &queue).await?;
     state.db.delete_consumer(&q.id).await?;
     Ok(ok(Value::Null))
+}
+
+// ---- messages over HTTP ----
+
+#[derive(Deserialize)]
+struct PushMessage {
+    body: Value,
+    content_type: Option<String>,
+    delay_seconds: Option<u32>,
+}
+
+/// A pushed message, encoded as the binding encodes it: `json` holds JSON
+/// text, `text` the string.
+fn new_message(m: PushMessage, batch_delay: Option<u32>) -> ApiResult<selvedge_store::queues::NewMessage> {
+    let content_type = m.content_type.unwrap_or_else(|| "json".into());
+    let body = match content_type.as_str() {
+        "json" => m.body.to_string().into_bytes(),
+        "text" => match m.body {
+            Value::String(s) => s.into_bytes(),
+            _ => return Err(ApiError::bad_request("a `text` message needs a string body")),
+        },
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "content_type `{other}` is not supported; use `json` or `text`"
+            )));
+        }
+    };
+    if body.len() > MAX_MESSAGE_BYTES {
+        return Err(ApiError::bad_request("a message may be at most 128 KB"));
+    }
+    let delay_secs = m.delay_seconds.or(batch_delay).unwrap_or(0);
+    if delay_secs > MAX_DELAY_SECS {
+        return Err(ApiError::bad_request("delay_seconds may be at most 43200"));
+    }
+    Ok(selvedge_store::queues::NewMessage { body, content_type, delay_secs })
+}
+
+async fn push(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+    JsonBody(body): JsonBody<PushMessage>,
+) -> ApiResult<Response> {
+    let (_, q) = queue_access(&state, &caller, &account, &queue).await?;
+    state.db.enqueue(&q.id, &[new_message(body, None)?]).await?;
+    Ok(ok(Value::Null))
+}
+
+#[derive(Deserialize)]
+struct PushBatch {
+    messages: Vec<PushMessage>,
+    delay_seconds: Option<u32>,
+}
+
+async fn push_batch(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+    JsonBody(body): JsonBody<PushBatch>,
+) -> ApiResult<Response> {
+    let (_, q) = queue_access(&state, &caller, &account, &queue).await?;
+    if body.messages.len() > MAX_BATCH {
+        return Err(ApiError::bad_request("a batch may hold at most 100 messages"));
+    }
+    let messages = body
+        .messages
+        .into_iter()
+        .map(|m| new_message(m, body.delay_seconds))
+        .collect::<ApiResult<Vec<_>>>()?;
+    state.db.enqueue(&q.id, &messages).await?;
+    Ok(ok(Value::Null))
+}
+
+/// The queue's HTTP pull consumer, or 400.
+async fn pull_consumer(state: &State, q: &QueueInfo) -> ApiResult<ConsumerSettings> {
+    state.db.consumer(&q.id).await?.filter(ConsumerSettings::is_http_pull).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "Queue `{}` has no HTTP pull consumer; add one with `wrangler queues consumer http add`",
+            q.name
+        ))
+    })
+}
+
+#[derive(Deserialize, Default)]
+struct PullBody {
+    batch_size: Option<i64>,
+    visibility_timeout_ms: Option<i64>,
+}
+
+async fn pull(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let (id, q) = queue_access(&state, &caller, &account, &queue).await?;
+    let c = pull_consumer(&state, &q).await?;
+    let req: PullBody = if body.is_empty() {
+        PullBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let limit = req.batch_size.unwrap_or(i64::from(c.batch_size)).clamp(1, MAX_BATCH as i64);
+    let visibility =
+        req.visibility_timeout_ms.unwrap_or(i64::from(c.visibility_timeout_ms)).clamp(1, 12 * 3600 * 1000);
+    state.db.expire_pulled(&id, &q.id, &c).await?;
+    let messages =
+        state.db.lease_batch(&q.id, limit, std::time::Duration::from_millis(visibility as u64)).await?;
+    let (backlog, _) = state.db.backlog(&q.id).await?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let out: Vec<Value> = messages
+        .iter()
+        .map(|m| {
+            let body = match m.content_type.as_str() {
+                "bytes" => b64.encode(&m.body),
+                _ => String::from_utf8_lossy(&m.body).into_owned(),
+            };
+            json!({
+                "id": m.id,
+                "body": body,
+                "timestamp_ms": m.timestamp_ms,
+                "attempts": m.attempts,
+                "lease_id": selvedge_store::queues::lease_id(m),
+                "metadata": { "CF-sourceMessageSource": "api", "CF-Content-Type": m.content_type },
+            })
+        })
+        .collect();
+    Ok(ok(json!({ "messages": out, "message_backlog_count": backlog })))
+}
+
+#[derive(Deserialize)]
+struct LeaseRef {
+    lease_id: String,
+    delay_seconds: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct AckBody {
+    #[serde(default)]
+    acks: Vec<LeaseRef>,
+    #[serde(default)]
+    retries: Vec<LeaseRef>,
+}
+
+async fn ack(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+    JsonBody(body): JsonBody<AckBody>,
+) -> ApiResult<Response> {
+    let (id, q) = queue_access(&state, &caller, &account, &queue).await?;
+    let c = pull_consumer(&state, &q).await?;
+    let acks: Vec<String> = body.acks.into_iter().map(|a| a.lease_id).collect();
+    let retries: Vec<(String, u32)> = body
+        .retries
+        .into_iter()
+        .map(|r| {
+            (r.lease_id, r.delay_seconds.unwrap_or(c.retry_delay_secs.max(0) as u32).min(MAX_DELAY_SECS))
+        })
+        .collect();
+    let (acked, retried) = state.db.settle_pulled(&id, &q.id, &c, &acks, &retries).await?;
+    let stale = (acks.len() + retries.len()) as u64 - acked - retried;
+    let warnings: Vec<String> = if stale > 0 {
+        vec![format!("{stale} lease(s) had expired or were unknown and were skipped")]
+    } else {
+        vec![]
+    };
+    Ok(ok(json!({ "ackCount": acked, "retryCount": retried, "warnings": warnings })))
 }

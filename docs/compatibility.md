@@ -196,6 +196,14 @@ Delivery is at least once: a batch is leased in the database while it is deliver
 replicas never deliver a message twice at the same time, and a lease left by a crashed replica
 expires and the batch is delivered again.
 
+HTTP pull consumers work as on Cloudflare: `wrangler queues consumer http add|remove` (with
+`--batch-size`, `--message-retries`, `--visibility-timeout-secs`, `--retry-delay-secs`,
+`--dead-letter-queue`), then `POST .../queues/:id/messages/pull` leases a batch and
+`POST .../messages/ack` acks or retries it by `lease_id`. A lease past its visibility timeout no
+longer settles; the message is pulled again, and once out of retries it moves to the dead-letter
+queue or is dropped. Producers can push over HTTP too: `POST .../messages` and `.../messages/batch`
+(`json` or `text`, with `delay_seconds`). A queue has one consumer, a Worker or HTTP pull.
+
 Differences:
 
 - The `v8` content type (structured clone of arbitrary values) is refused by `send`. Decoding it for
@@ -203,8 +211,7 @@ Differences:
   Selvedge does not enable for tenants. Use `json` (the default), `text` or `bytes`.
 - Batches are delivered as soon as messages are ready; `max_batch_timeout` is stored but does not
   hold messages back to fill a batch.
-- HTTP pull consumers, `queue.metrics()` details beyond the backlog, and pausing delivery are not
-  available yet.
+- `queue.metrics()` details beyond the backlog, and pausing delivery, are not available yet.
 
 ## Static Assets
 

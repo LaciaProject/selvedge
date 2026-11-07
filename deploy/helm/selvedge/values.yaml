@@ -97,6 +97,11 @@ gateway:
   accountReplicas: 2
   # Trust X-Forwarded-For/-Proto from the load balancer in front.
   trustForwarded: false
+  # request.cf fields from headers the load balancer sets (needs
+  # trustForwarded), e.g. { country: x-geo-country, city: x-geo-city, asn: x-geo-asn }.
+  cfHeaders: {}
+  # request.cf.colo: a name for this site.
+  colo: ""
   service:
     type: LoadBalancer
     port: 80

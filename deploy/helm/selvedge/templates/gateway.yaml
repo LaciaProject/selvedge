@@ -37,6 +37,14 @@ spec:
               value: "8789"
             - name: SELVEDGE_REPLICAS
               value: {{ .Values.gateway.accountReplicas | quote }}
+            {{- with .Values.gateway.cfHeaders }}
+            - name: SELVEDGE_CF_HEADERS
+              value: {{ $parts := list }}{{ range $field, $header := . }}{{ $parts = append $parts (printf "%s=%s" $field $header) }}{{ end }}{{ join "," $parts | quote }}
+            {{- end }}
+            {{- with .Values.gateway.colo }}
+            - name: SELVEDGE_COLO
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.gateway.trustForwarded }}
             - name: SELVEDGE_TRUST_FORWARDED
               value: "true"

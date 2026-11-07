@@ -86,7 +86,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | --- | --- |
 | DO 故障转移 | 所属进程崩溃或节点宕机后，对该对象的调用最多失败约 20 秒。这是 workerd 内部固定的租约时长，不改 workerd 就缩短不了。滚动升级和超内存重启会先注销租约，不用等。存储写入的延迟取决于 S3。S3 必须支持条件写（已测 SeaweedFS 4.50） |
 | CPU 和内存限制 | 限制针对整个账号进程，不针对单个请求。一个请求失控会让进程重启，同账号其他正在处理的请求也会失败。cgroup 不可写时（K8s 里常见）由 agent 自己监控：内存超限约 2 秒内重启进程（先给 3 秒退出，DO 立即转移），CPU 超限只降低优先级，不会被硬性封顶 |
-| `request.cf` | 只有 `httpProtocol`，没有地理位置和网络信息 |
+| `request.cf` | 地理和网络字段来自前面负载均衡注入的请求头（`--cf-header` 映射），Selvedge 自己没有 GeoIP 数据库；没有 `botManagement` 等 Cloudflare 专有字段 |
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |
 | mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |

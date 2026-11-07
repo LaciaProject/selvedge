@@ -75,6 +75,7 @@ for _ in $(seq 1 50); do curl -sf "$PUBLIC_API/healthz" >/dev/null && break; sle
 agent a1 $((P + 91))
 agent a2 $((P + 92))
 SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$((P + 80)) SELVEDGE_RUNNERS=127.0.0.1:$((P + 91)),127.0.0.1:$((P + 92)) \
+  SELVEDGE_TRUST_FORWARDED=true SELVEDGE_CF_HEADERS=country=x-geo-country,asn=x-geo-asn SELVEDGE_COLO=e2e \
   start gw env $(role gateway) "$BIN" gateway
 sleep 3
 
@@ -137,6 +138,9 @@ seq_out=""
 for i in $(seq 1 10); do seq_out="$seq_out $(get /)"; done
 check "one owner across runners" " 1 2 3 4 5 6 7 8 9 10" "$seq_out"
 check "JS RPC with SQLite storage" "1" "$(get /rpc)"
+check "request.cf carries the load balancer's geo headers and the colo" \
+  '{"asn":1136,"colo":"e2e","country":"NL","httpProtocol":"HTTP/1.1","isEUCountry":"1"}' \
+  "$(curl -s -H "Host: $HOST" -H 'x-geo-country: NL' -H 'x-geo-asn: 1136' "http://127.0.0.1:$((P + 80))/cf")"
 
 # A process over its memory limit drains when it is restarted, so its Durable
 # Objects move at once instead of after the cluster lease (20 seconds).

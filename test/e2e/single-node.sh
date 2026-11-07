@@ -449,6 +449,36 @@ check "a custom domain in another account's zone is refused" "404" \
 wrangler r2 bucket domain remove e2e-files --domain "$FILES" -y > /dev/null 2>&1
 check "a removed custom domain serves nothing" "403" "$(code_as "$FILES" /seed.txt)"
 
+# R2 lifecycle rules: wrangler sets them, the data service applies them.
+r2code() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/r2/buckets/e2e-files/objects/$1"; }
+check "a bucket starts with Cloudflare's default multipart rule" "Default Multipart Abort Rule" \
+  "$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/r2/buckets/e2e-files/lifecycle" | json '["result"]["rules"][0]["id"]')"
+echo -n "aging" > "$WORK/aging.txt"
+wrangler r2 object put e2e-files/old/a.txt --file "$WORK/aging.txt" --remote > /dev/null 2>&1
+wrangler r2 object put e2e-files/young/b.txt --file "$WORK/aging.txt" --remote > /dev/null 2>&1
+UPLOAD=$(cd "$E2E" && node -e '
+const { S3Client, CreateMultipartUploadCommand } = require("@aws-sdk/client-s3");
+const [endpoint, accessKeyId, secretAccessKey] = process.argv.slice(1);
+new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } })
+  .send(new CreateMultipartUploadCommand({ Bucket: "e2e-files", Key: "tmp/big.bin" })).then((r) => console.log(r.UploadId));' \
+  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET")
+wrangler r2 bucket lifecycle add e2e-files expire-old old/ --expire-date 2020-01-01 -y > "$WORK/lc.log" 2>&1 || cat "$WORK/lc.log"
+wrangler r2 bucket lifecycle add e2e-files abort-tmp tmp/ --abort-multipart-days 0 -y > "$WORK/lc.log" 2>&1 || cat "$WORK/lc.log"
+check "wrangler lists the lifecycle rules" "2" \
+  "$(wrangler r2 bucket lifecycle list e2e-files 2>&1 | grep -cE 'expire-old|abort-tmp')"
+for _ in $(seq 1 20); do [ "$(r2code old/a.txt)" = 404 ] && break; sleep 0.5; done
+check "lifecycle deletes objects past their date" "404" "$(r2code old/a.txt)"
+check "...and keeps the others" "200" "$(r2code young/b.txt)"
+check "lifecycle aborts stale multipart uploads" "NoSuchUpload" "$(cd "$E2E" && node -e '
+const { S3Client, ListPartsCommand } = require("@aws-sdk/client-s3");
+const [endpoint, accessKeyId, secretAccessKey, UploadId] = process.argv.slice(1);
+new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } })
+  .send(new ListPartsCommand({ Bucket: "e2e-files", Key: "tmp/big.bin", UploadId })).then(() => console.log("still there"), (e) => console.log(e.name));' \
+  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET" "$UPLOAD")"
+wrangler r2 bucket lifecycle remove e2e-files --name expire-old > /dev/null 2>&1
+check "wrangler removes a lifecycle rule" "Default Multipart Abort Rule,abort-tmp" \
+  "$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/r2/buckets/e2e-files/lifecycle" | python3 -c 'import sys, json; print(",".join(r["id"] for r in json.load(sys.stdin)["result"]["rules"]))')"
+
 # Gradual deployments: two versions share the requests.
 SPLIT="$WORK/split-app"
 cp -r "$E2E/fixtures/split-app" "$SPLIT"

@@ -15,6 +15,31 @@ pub struct QueueInfo {
     pub id: String,
     pub name: String,
     pub created_on: String,
+    pub delivery_paused: bool,
+    pub delivery_delay_secs: i32,
+    pub retention_secs: i32,
+}
+
+const QUEUE_COLUMNS: &str = "id, name, created_at, delivery_paused, delivery_delay_secs, retention_secs";
+
+fn queue_info(r: &tokio_postgres::Row) -> QueueInfo {
+    QueueInfo {
+        id: r.get(0),
+        name: r.get(1),
+        created_on: crate::repo::rfc3339(r.get(2)),
+        delivery_paused: r.get(3),
+        delivery_delay_secs: r.get(4),
+        retention_secs: r.get(5),
+    }
+}
+
+/// Changes to a queue's settings; `None` leaves one as it is.
+#[derive(Debug, Default)]
+pub struct QueueUpdate {
+    pub name: Option<String>,
+    pub delivery_paused: Option<bool>,
+    pub delivery_delay_secs: Option<i32>,
+    pub retention_secs: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -80,7 +105,8 @@ pub struct Message {
 pub struct NewMessage {
     pub body: Vec<u8>,
     pub content_type: String,
-    pub delay_secs: u32,
+    /// `None`: the queue's delivery delay.
+    pub delay_secs: Option<u32>,
 }
 
 /// What happens to one delivered message.
@@ -100,16 +126,14 @@ impl Db {
             .client()
             .await?
             .query_one(
-                "INSERT INTO queues (id, account_id, name) VALUES ($1, $2, $3) RETURNING created_at",
+                &format!(
+                    "INSERT INTO queues (id, account_id, name) VALUES ($1, $2, $3) RETURNING {QUEUE_COLUMNS}"
+                ),
                 &[&id, &account.as_str(), &name],
             )
             .await;
         match r {
-            Ok(row) => Ok(Some(QueueInfo {
-                id,
-                name: name.to_owned(),
-                created_on: crate::repo::rfc3339(row.get(0)),
-            })),
+            Ok(row) => Ok(Some(queue_info(&row))),
             Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -120,14 +144,11 @@ impl Db {
             .client()
             .await?
             .query(
-                "SELECT id, name, created_at FROM queues WHERE account_id = $1 ORDER BY name",
+                &format!("SELECT {QUEUE_COLUMNS} FROM queues WHERE account_id = $1 ORDER BY name"),
                 &[&account.as_str()],
             )
             .await?;
-        Ok(rows
-            .iter()
-            .map(|r| QueueInfo { id: r.get(0), name: r.get(1), created_on: crate::repo::rfc3339(r.get(2)) })
-            .collect())
+        Ok(rows.iter().map(queue_info).collect())
     }
 
     /// A queue by id or name.
@@ -136,15 +157,63 @@ impl Db {
             .client()
             .await?
             .query_opt(
-                "SELECT id, name, created_at FROM queues WHERE account_id = $1 AND (id = $2 OR name = $2)",
+                &format!(
+                    "SELECT {QUEUE_COLUMNS} FROM queues WHERE account_id = $1 AND (id = $2 OR name = $2)"
+                ),
                 &[&account.as_str(), &id_or_name],
             )
             .await?;
-        Ok(row.map(|r| QueueInfo {
-            id: r.get(0),
-            name: r.get(1),
-            created_on: crate::repo::rfc3339(r.get(2)),
-        }))
+        Ok(row.as_ref().map(queue_info))
+    }
+
+    /// Updates a queue's settings; `None` if the queue is gone, `Err` on a
+    /// name another queue of the account has.
+    pub async fn update_queue(
+        &self,
+        account: &AccountId,
+        id: &str,
+        u: &QueueUpdate,
+    ) -> Result<Option<QueueInfo>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                &format!(
+                    "UPDATE queues SET name = COALESCE($3, name),
+                       delivery_paused = COALESCE($4, delivery_paused),
+                       delivery_delay_secs = COALESCE($5, delivery_delay_secs),
+                       retention_secs = COALESCE($6, retention_secs)
+                     WHERE account_id = $1 AND id = $2 RETURNING {QUEUE_COLUMNS}"
+                ),
+                &[
+                    &account.as_str(),
+                    &id,
+                    &u.name,
+                    &u.delivery_paused,
+                    &u.delivery_delay_secs,
+                    &u.retention_secs,
+                ],
+            )
+            .await?;
+        Ok(row.as_ref().map(queue_info))
+    }
+
+    /// Deletes every message of a queue; returns how many.
+    pub async fn purge_queue(&self, id: &str) -> Result<u64> {
+        Ok(self.client().await?.execute("DELETE FROM queue_messages WHERE queue_id = $1", &[&id]).await?)
+    }
+
+    /// Drops messages older than their queue's retention period.
+    pub async fn purge_retained_messages(&self) -> Result<u64> {
+        Ok(self
+            .client()
+            .await?
+            .execute(
+                "DELETE FROM queue_messages m USING queues q
+                 WHERE m.queue_id = q.id AND m.created_at < now() - make_interval(secs => q.retention_secs)",
+                &[],
+            )
+            .await?)
     }
 
     pub async fn delete_queue(&self, account: &AccountId, id: &str) -> Result<bool> {
@@ -227,10 +296,11 @@ impl Db {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         for m in messages {
-            let delay = f64::from(m.delay_secs);
+            let delay = m.delay_secs.map(f64::from);
             tx.execute(
                 "INSERT INTO queue_messages (id, queue_id, body, content_type, visible_at)
-                 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))",
+                 SELECT $1, q.id, $3, $4, now() + make_interval(secs => COALESCE($5::float8, q.delivery_delay_secs))
+                 FROM queues q WHERE q.id = $2",
                 &[&selvedge_core::new_version_id(), &queue_id, &m.body, &m.content_type, &delay],
             )
             .await?;
@@ -252,7 +322,9 @@ impl Db {
         Ok((r.get(0), r.get(1)))
     }
 
-    /// Queues that have a Worker consumer and visible messages.
+    /// Queues that have a Worker consumer, are not paused, and have a batch
+    /// ready: `batch_size` visible messages, or one that has waited
+    /// `max_wait_ms` (`max_batch_timeout`).
     pub async fn ready_consumers(&self) -> Result<Vec<Consumer>> {
         let rows = self
             .client()
@@ -261,7 +333,12 @@ impl Db {
                 "SELECT q.id, q.name, c.account_id, c.script_name, c.batch_size, c.max_wait_ms, c.max_retries,
                         c.retry_delay_secs, c.dead_letter_queue
                  FROM queue_consumers c JOIN queues q ON q.id = c.queue_id
-                 WHERE c.kind = 'worker' AND EXISTS (SELECT 1 FROM queue_messages m WHERE m.queue_id = q.id AND m.visible_at <= now())",
+                 WHERE c.kind = 'worker' AND NOT q.delivery_paused
+                   AND (EXISTS (SELECT 1 FROM queue_messages m WHERE m.queue_id = q.id
+                                  AND m.visible_at <= now() - make_interval(secs => c.max_wait_ms / 1000.0))
+                        OR (SELECT count(*) FROM (SELECT 1 FROM queue_messages m
+                                                  WHERE m.queue_id = q.id AND m.visible_at <= now()
+                                                  LIMIT c.batch_size) b) >= c.batch_size)",
                 &[],
             )
             .await?;

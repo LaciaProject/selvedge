@@ -551,6 +551,11 @@ async fn purge_expired(db: Db) {
             Ok(n) => tracing::debug!(n, "purged expired KV entries"),
             Err(e) => tracing::warn!(error = %e, "purging expired KV entries failed"),
         }
+        match db.purge_retained_messages().await {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(n, "dropped queue messages past their retention period"),
+            Err(e) => tracing::warn!(error = %e, "dropping old queue messages failed"),
+        }
     }
 }
 

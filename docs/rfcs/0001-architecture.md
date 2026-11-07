@@ -309,6 +309,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | R2 事件通知：规则按前缀、后缀和动作（`PutObject`、`CopyObject`、`CompleteMultipartUpload`、`DeleteObject`）把对象变更发到账号的队列，消息格式同 Cloudflare；绑定、S3 接口、`wrangler r2` 的写入都会触发；`wrangler r2 bucket notification` 子命令 | 完成（消息与对象写入在同一事务中入队，至少一次投递） | 端到端测试：PUT、复制、删除送达队列消费者，不匹配前缀的不发，删除规则后不再发 |
 | `request.cf`：`httpProtocol`、运营方配置的 `colo`，以及从负载均衡注入的请求头映射来的地理和网络字段（`--cf-header 字段=请求头`，要求 `--trust-forwarded`），`isEUCountry` 由国家推出 | 完成（没有自带 GeoIP 数据库） | 单元测试；集群端到端测试中 Worker 读到映射后的 `request.cf` |
 | Queues HTTP pull 消费者和 HTTP 推送：`wrangler queues consumer http add/remove`；`messages/pull` 按可见性超时租出一批，`messages/ack` 按 `lease_id` 确认或重试；过期或旧的租约无效；超过重试次数进死信队列或丢弃；`messages` 和 `messages/batch` 推送 | 完成 | 端到端测试：推送、拉取、确认、重试后再拉到、超时租约被拒、超过重试被丢弃、删除消费者后拒绝拉取 |
+| Queues 设置：暂停/恢复投递（Worker 和 HTTP pull 都停）、队列级投递延迟、保留期（超期消息由 data 服务定时删除）、清空；Worker 消费者按 `max_batch_size` 或 `max_batch_timeout` 凑批 | 完成 | 端到端测试：暂停时拉不到、恢复后拉到、延迟期间拉不到、到期后拉到、清空后积压为 0 |
 | 每账户资源限制：cgroup v2 可写时由内核按账户执行 `memory.max`/`cpu.max`/`pids.max`；Kubernetes 里 cgroup 只读，由 agent 每 2 秒检查：超内存重启进程，超 CPU 份额降低优先级 | 完成 | 端到端测试：超内存的进程被重启，超 CPU 的进程 nice 为 10 |
 | 灰度部署：两个版本按百分比分流（`Cloudflare-Workers-Version-Key` 保持同一版本、`Cloudflare-Workers-Version-Overrides` 指定版本），另一个版本作为同一账户进程里的独立 worker 服务 | 完成 | `wrangler versions deploy a@50% b@50%` 的端到端测试 |
 | Zone 路由：zone 由运营方（admin token）分配给账户，账户用 wrangler 的 `routes` 或 zone 路由接口添加路由；gateway 先查自定义域名和 workers.dev，再按最具体的模式匹配 | 完成 | wrangler 部署带 `routes` 的端到端测试（精确、通配主机、未匹配路径、租户不能认领 zone） |

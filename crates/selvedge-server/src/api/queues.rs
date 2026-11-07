@@ -7,7 +7,7 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use base64::Engine as _;
 use selvedge_core::AccountId;
-use selvedge_store::queues::{ConsumerSettings, QueueInfo};
+use selvedge_store::queues::{ConsumerSettings, QueueInfo, QueueUpdate};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -18,7 +18,11 @@ pub fn routes() -> Router<State> {
     let base = "/client/v4/accounts/{account}/queues";
     Router::new()
         .route(base, get(list).post(create))
-        .route(&format!("{base}/{{queue}}"), get(get_queue).delete(delete_queue))
+        .route(
+            &format!("{base}/{{queue}}"),
+            get(get_queue).delete(delete_queue).patch(update_queue).put(update_queue),
+        )
+        .route(&format!("{base}/{{queue}}/purge"), post(purge))
         .route(&format!("{base}/{{queue}}/consumers"), get(list_consumers).post(add_consumer))
         .route(
             &format!("{base}/{{queue}}/consumers/{{consumer}}"),
@@ -94,7 +98,11 @@ async fn queue_json(state: &State, q: &QueueInfo) -> ApiResult<Value> {
         "producers_total_count": 0,
         "consumers": consumers,
         "consumers_total_count": consumers.len(),
-        "settings": { "delivery_delay": 0, "message_retention_period": 345600 },
+        "settings": {
+            "delivery_delay": q.delivery_delay_secs,
+            "delivery_paused": q.delivery_paused,
+            "message_retention_period": q.retention_secs,
+        },
     }))
 }
 
@@ -323,8 +331,8 @@ fn new_message(m: PushMessage, batch_delay: Option<u32>) -> ApiResult<selvedge_s
     if body.len() > MAX_MESSAGE_BYTES {
         return Err(ApiError::bad_request("a message may be at most 128 KB"));
     }
-    let delay_secs = m.delay_seconds.or(batch_delay).unwrap_or(0);
-    if delay_secs > MAX_DELAY_SECS {
+    let delay_secs = m.delay_seconds.or(batch_delay);
+    if delay_secs.is_some_and(|d| d > MAX_DELAY_SECS) {
         return Err(ApiError::bad_request("delay_seconds may be at most 43200"));
     }
     Ok(selvedge_store::queues::NewMessage { body, content_type, delay_secs })
@@ -395,6 +403,10 @@ async fn pull(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
+    if q.delivery_paused {
+        let (backlog, _) = state.db.backlog(&q.id).await?;
+        return Ok(ok(json!({ "messages": [], "message_backlog_count": backlog })));
+    }
     let limit = req.batch_size.unwrap_or(i64::from(c.batch_size)).clamp(1, MAX_BATCH as i64);
     let visibility =
         req.visibility_timeout_ms.unwrap_or(i64::from(c.visibility_timeout_ms)).clamp(1, 12 * 3600 * 1000);
@@ -461,4 +473,70 @@ async fn ack(
         vec![]
     };
     Ok(ok(json!({ "ackCount": acked, "retryCount": retried, "warnings": warnings })))
+}
+
+// ---- queue settings ----
+
+#[derive(Deserialize, Default)]
+struct SettingsBody {
+    delivery_paused: Option<bool>,
+    delivery_delay: Option<i32>,
+    message_retention_period: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    queue_name: Option<String>,
+    #[serde(default)]
+    settings: SettingsBody,
+}
+
+/// `wrangler queues update`, `pause-delivery` and `resume-delivery`.
+async fn update_queue(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+    JsonBody(body): JsonBody<UpdateBody>,
+) -> ApiResult<Response> {
+    let (id, q) = queue_access(&state, &caller, &account, &queue).await?;
+    let s = body.settings;
+    if s.delivery_delay.is_some_and(|d| !(0..=MAX_DELAY_SECS as i32).contains(&d)) {
+        return Err(ApiError::bad_request("delivery_delay must be between 0 and 43200 seconds"));
+    }
+    // Cloudflare allows 60 seconds to 14 days.
+    if s.message_retention_period.is_some_and(|r| !(60..=14 * 86_400).contains(&r)) {
+        return Err(ApiError::bad_request("message_retention_period must be between 60 and 1209600 seconds"));
+    }
+    let name = body.queue_name.filter(|n| *n != q.name);
+    if let Some(n) = &name {
+        if !valid_name(n) {
+            return Err(ApiError::bad_request(format!("`{n}` is not a valid queue name")));
+        }
+        if state.db.queue(&id, n).await?.is_some() {
+            return Err(ApiError::new(
+                http::StatusCode::CONFLICT,
+                11009,
+                format!("Queue `{n}` already exists"),
+            ));
+        }
+    }
+    let update = QueueUpdate {
+        name,
+        delivery_paused: s.delivery_paused,
+        delivery_delay_secs: s.delivery_delay,
+        retention_secs: s.message_retention_period,
+    };
+    let q = state.db.update_queue(&id, &q.id, &update).await?.ok_or_else(not_found)?;
+    Ok(ok(queue_json(&state, &q).await?))
+}
+
+/// `wrangler queues purge`: deletes every message.
+async fn purge(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, queue)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let (_, q) = queue_access(&state, &caller, &account, &queue).await?;
+    state.db.purge_queue(&q.id).await?;
+    Ok(ok(json!({ "started_on": selvedge_store::repo::rfc3339(std::time::SystemTime::now()) })))
 }

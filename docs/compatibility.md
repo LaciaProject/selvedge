@@ -204,14 +204,18 @@ longer settles; the message is pulled again, and once out of retries it moves to
 queue or is dropped. Producers can push over HTTP too: `POST .../messages` and `.../messages/batch`
 (`json` or `text`, with `delay_seconds`). A queue has one consumer, a Worker or HTTP pull.
 
+A Worker consumer gets a batch once `max_batch_size` messages are ready or the oldest has waited
+`max_batch_timeout`. `wrangler queues pause-delivery|resume-delivery` stop and restart delivery to
+either kind of consumer while producers keep sending; `wrangler queues update` sets a delivery delay
+for messages sent without their own and the retention period (messages older than it are dropped);
+`wrangler queues purge` deletes every message.
+
 Differences:
 
 - The `v8` content type (structured clone of arbitrary values) is refused by `send`. Decoding it for
   the consumer would need workerd's experimental `service_binding_extra_handlers` flag, which
   Selvedge does not enable for tenants. Use `json` (the default), `text` or `bytes`.
-- Batches are delivered as soon as messages are ready; `max_batch_timeout` is stored but does not
-  hold messages back to fill a batch.
-- `queue.metrics()` details beyond the backlog, and pausing delivery, are not available yet.
+- `queue.metrics()` details beyond the backlog are not available yet.
 
 ## Static Assets
 

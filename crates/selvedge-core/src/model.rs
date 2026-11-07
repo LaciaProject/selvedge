@@ -96,6 +96,10 @@ pub enum Binding {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jurisdiction: Option<String>,
     },
+    /// The script's own static assets (`env.ASSETS.fetch`).
+    Assets {
+        name: String,
+    },
 }
 
 /// Binding types Selvedge knows about but does not implement yet. An upload that
@@ -114,7 +118,6 @@ const NOT_YET: &[&str] = &[
     "pipelines",
     "secrets_store_secret",
     "images",
-    "assets",
 ];
 
 impl Binding {
@@ -128,7 +131,8 @@ impl Binding {
             | Self::DurableObjectNamespace { name, .. }
             | Self::R2Bucket { name, .. }
             | Self::D1 { name, .. }
-            | Self::Queue { name, .. } => name,
+            | Self::Queue { name, .. }
+            | Self::Assets { name } => name,
         }
     }
 
@@ -158,6 +162,18 @@ pub struct ScriptMetadata {
     pub bindings: Vec<Value>,
     #[serde(default)]
     pub keep_bindings: Vec<String>,
+    /// Static assets: the upload session's completion token and their config.
+    pub assets: Option<MetadataAssets>,
+    /// Keep the current version's assets.
+    #[serde(default)]
+    pub keep_assets: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MetadataAssets {
+    pub jwt: Option<String>,
+    #[serde(default)]
+    pub config: crate::assets::UploadConfig,
 }
 
 /// Everything an agent needs to run one account: every script's active version.
@@ -180,8 +196,11 @@ pub struct BundleScript {
     pub main_module: String,
     pub compatibility_date: String,
     pub compatibility_flags: Vec<String>,
+    /// Empty for a Worker that only serves static assets.
     pub modules: Vec<Module>,
     pub bindings: Vec<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<crate::assets::ScriptAssets>,
 }
 
 #[cfg(test)]

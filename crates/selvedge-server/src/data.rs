@@ -57,6 +57,52 @@ impl DataState {
     }
 }
 
+/// Reads one static asset for the asset worker, as a KV `get` of its hash:
+/// the bytes, with the content type in `CF-KV-Metadata`.
+async fn asset_get(state: &DataState, req: axum::extract::Request) -> Response {
+    if req.method() != Method::GET {
+        return error(StatusCode::METHOD_NOT_ALLOWED, "assets are read-only");
+    }
+    let Some(account) = req
+        .headers()
+        .get(ACCOUNT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<AccountId>().ok())
+    else {
+        return error(StatusCode::BAD_REQUEST, "missing account");
+    };
+    let hash = req.uri().path().trim_start_matches('/').to_owned();
+    if !selvedge_core::assets::valid_hash(&hash) {
+        return error(StatusCode::NOT_FOUND, "not found");
+    }
+    let file = match state.db.asset_file(&account, &hash).await {
+        Ok(Some(f)) => f,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "not found"),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "asset lookup failed");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+    let stream = match state.blobs.stream_at(&selvedge_store::assets::asset_path(&account, &hash)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "not found"),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "asset read failed");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    resp.headers_mut().insert(http::header::CONTENT_LENGTH, file.size.into());
+    let meta = match &file.content_type {
+        Some(ct) => json!({ "contentType": ct }),
+        None => json!({}),
+    };
+    if let Ok(v) = http::HeaderValue::from_str(&meta.to_string()) {
+        resp.headers_mut().insert("cf-kv-metadata", v);
+    }
+    resp
+}
+
 const OWNERSHIP_TTL: Duration = Duration::from_secs(60);
 
 pub fn router(state: Arc<DataState>) -> Router {
@@ -82,6 +128,9 @@ async fn dispatch(AxState(state): AxState<Arc<DataState>>, req: axum::extract::R
     }
     if req.headers().contains_key(crate::r2::BUCKET_HEADER) {
         return r2_dispatch(&state, req).await;
+    }
+    if req.headers().contains_key(selvedge_workerd::render::ASSETS_HEADER) {
+        return asset_get(&state, req).await;
     }
     if let Some(queue) = req
         .headers()

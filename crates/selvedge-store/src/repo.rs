@@ -48,6 +48,9 @@ pub struct NewVersion {
     pub keep_bindings: Vec<String>,
     /// `secret_text` bindings uploaded with the script: (name, text).
     pub secrets: Vec<(String, String)>,
+    pub assets: Option<selvedge_core::assets::ScriptAssets>,
+    /// Carry over the current version's assets when `assets` is `None`.
+    pub keep_assets: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +263,18 @@ impl Db {
             &[&account.as_str(), &script],
         )
         .await?;
+        if v.keep_assets && v.assets.is_none() {
+            let current = tx
+                .query_opt(
+                    "SELECT v.assets FROM scripts s JOIN script_versions v ON v.id = s.current_version_id
+                     WHERE s.account_id = $1 AND s.name = $2",
+                    &[&account.as_str(), &script],
+                )
+                .await?;
+            if let Some(Some(a)) = current.map(|r| r.get::<_, Option<serde_json::Value>>(0)) {
+                v.assets = Some(serde_json::from_value(a)?);
+            }
+        }
         if !v.keep_bindings.is_empty() {
             let current = tx
                 .query_opt(
@@ -290,8 +305,9 @@ impl Db {
         let id = selvedge_core::new_version_id();
         tx.execute(
             "INSERT INTO script_versions
-               (id, account_id, script_name, main_module, compatibility_date, compatibility_flags, modules, bindings)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+               (id, account_id, script_name, main_module, compatibility_date, compatibility_flags, modules, bindings,
+                assets)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[
                 &id,
                 &account.as_str(),
@@ -301,6 +317,7 @@ impl Db {
                 &serde_json::to_value(&v.compatibility_flags)?,
                 &serde_json::to_value(&v.modules)?,
                 &serde_json::to_value(&v.bindings)?,
+                &v.assets.as_ref().map(serde_json::to_value).transpose()?,
             ],
         )
         .await?;
@@ -465,6 +482,8 @@ impl Db {
                 bindings,
                 keep_bindings: vec![],
                 secrets: vec![(name.to_owned(), text.to_owned())],
+                assets: None,
+                keep_assets: true,
             },
             true,
         )
@@ -515,6 +534,8 @@ impl Db {
                 bindings,
                 keep_bindings: vec![],
                 secrets: vec![],
+                assets: None,
+                keep_assets: true,
             },
             true,
         )
@@ -589,7 +610,8 @@ impl Db {
         };
         let rows = tx
             .query(
-                "SELECT s.name, v.id, v.main_module, v.compatibility_date, v.compatibility_flags, v.modules, v.bindings
+                "SELECT s.name, v.id, v.main_module, v.compatibility_date, v.compatibility_flags, v.modules, v.bindings,
+                        v.assets
                  FROM scripts s JOIN script_versions v ON v.id = s.current_version_id
                  WHERE s.account_id = $1 ORDER BY s.name",
                 &[&account.as_str()],
@@ -624,6 +646,7 @@ impl Db {
                 compatibility_flags: serde_json::from_value(r.get(4))?,
                 modules: serde_json::from_value(r.get(5))?,
                 bindings,
+                assets: r.get::<_, Option<serde_json::Value>>(7).map(serde_json::from_value).transpose()?,
                 name,
             });
         }
@@ -974,6 +997,7 @@ fn binding_type(b: &Binding) -> &'static str {
         Binding::R2Bucket { .. } => "r2_bucket",
         Binding::D1 { .. } => "d1",
         Binding::Queue { .. } => "queue",
+        Binding::Assets { .. } => "assets",
     }
 }
 

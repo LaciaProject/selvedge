@@ -1,0 +1,5 @@
+{
+  "name": "static-site",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "site", "not_found_handling": "single-page-application" }
+}

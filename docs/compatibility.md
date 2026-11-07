@@ -29,7 +29,9 @@ compatibility date later than that release supports is lowered to the newest one
 | Durable Objects | Supported | See below |
 | R2 | Supported | See below |
 | D1 | Supported | See below |
-| Queues, Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
+| Queues (producers) | Supported | See below |
+| Static assets (`assets`) | Supported | See below |
+| Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
 
 ## KV
 
@@ -145,6 +147,29 @@ Differences:
   hold messages back to fill a batch.
 - HTTP pull consumers, `queue.metrics()` details beyond the backlog, and pausing delivery are not
   available yet.
+
+## Static Assets
+
+`wrangler deploy` with an `assets` directory works, for a Worker with code and for a Worker that only
+has assets. Assets are served by Cloudflare's own asset and router Workers (from workers-sdk, run
+unmodified on workerd), so `html_handling`, `not_found_handling` (`single-page-application`,
+`404-page`), `run_worker_first` (a boolean or a list of rules), `_headers`, `_redirects`, ETags and
+conditional requests behave as on Cloudflare. Selvedge parses `_headers`, `_redirects` and
+`run_worker_first` rules at deploy time, as Cloudflare's API does, and skips invalid lines the same
+way. The `ASSETS` binding (`env.ASSETS.fetch`) reads the Worker's own assets.
+
+Uploads skip files the account already has, so a redeploy sends only what changed. The limits match
+Cloudflare's: 25 MiB per file, 100,000 files per version.
+
+Asset bytes live in the blob store; each runner keeps the ones it has served on local disk (1 GiB by
+default, `--asset-cache-mb`), so a runner keeps serving them while the data service is unavailable.
+
+Differences:
+
+- A service binding to a Worker that has code calls that code directly, which named entrypoints and
+  RPC need. A service binding to a Worker with only assets reaches its assets.
+- Uploaded files are not deleted when no version uses them any more.
+- `assets.base_path` is ignored. Uploads use wrangler's bulk mode (several files per request).
 
 ## Deployments and the API
 

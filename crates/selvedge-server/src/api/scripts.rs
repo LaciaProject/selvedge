@@ -236,11 +236,20 @@ pub(super) async fn create_version(
             "service-worker syntax is not supported; use ES modules (`export default { fetch }`)",
         ));
     }
-    let main_module =
-        meta.main_module.clone().ok_or_else(|| ApiError::bad_request("metadata is missing `main_module`"))?;
-    if !parts.iter().any(|(n, _, _)| *n == main_module) {
+    // A Worker with only static assets has no modules at all.
+    let assets_only = meta.main_module.is_none() && parts.is_empty() && meta.assets.is_some();
+    let main_module = if assets_only {
+        String::new()
+    } else {
+        meta.main_module.clone().ok_or_else(|| ApiError::bad_request("metadata is missing `main_module`"))?
+    };
+    if !assets_only && !parts.iter().any(|(n, _, _)| *n == main_module) {
         return Err(ApiError::bad_request(format!("main module `{main_module}` was not uploaded")));
     }
+    let assets = match &meta.assets {
+        Some(a) => Some(super::assets::resolve(state, &id, a).await?),
+        None => None,
+    };
     let compatibility_date = meta.compatibility_date.clone().unwrap_or_else(|| "2024-01-01".to_owned());
     if !is_date(&compatibility_date) {
         return Err(ApiError::bad_request("compatibility_date must be YYYY-MM-DD"));
@@ -282,6 +291,14 @@ pub(super) async fn create_version(
                     return Err(ApiError::bad_request(format!("R2 bucket `{bucket_name}` not found")));
                 }
             }
+            Binding::Assets { .. } => {
+                if assets.is_none() && !meta.keep_assets {
+                    return Err(ApiError::bad_request("an `assets` binding needs assets in the upload"));
+                }
+                if bindings.iter().any(|x: &Binding| matches!(x, Binding::Assets { .. })) {
+                    return Err(ApiError::bad_request("a Worker can have only one `assets` binding"));
+                }
+            }
             _ => {}
         }
         bindings.push(b);
@@ -306,6 +323,8 @@ pub(super) async fn create_version(
                 bindings,
                 keep_bindings: meta.keep_bindings.clone(),
                 secrets,
+                assets,
+                keep_assets: meta.keep_assets,
             },
             make_current,
         )

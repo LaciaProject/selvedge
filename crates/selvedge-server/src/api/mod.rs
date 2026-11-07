@@ -2,6 +2,7 @@
 //! internal endpoints for agents and gateways.
 
 mod accounts;
+mod assets;
 mod d1;
 mod domains;
 mod internal;
@@ -43,6 +44,7 @@ pub fn router(state: State) -> Router {
     Router::new()
         .merge(accounts::routes())
         .merge(scripts::routes())
+        .merge(assets::routes())
         .merge(kv::routes())
         .merge(domains::routes())
         .merge(versions::routes())

@@ -3,6 +3,7 @@
 //! PostgreSQL holds all metadata and KV data; module bytes are content-addressed
 //! blobs in an S3-compatible bucket. Migrations are append-only.
 
+pub mod assets;
 pub mod blobs;
 pub mod cron;
 pub mod db;

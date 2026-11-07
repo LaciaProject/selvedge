@@ -3,6 +3,7 @@
 //! Everything here is plain data: identifiers, the worker and binding model that
 //! the API accepts and the agent renders, and the `/client/v4` response envelope.
 
+pub mod assets;
 pub mod envelope;
 pub mod ids;
 pub mod model;

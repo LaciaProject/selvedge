@@ -161,6 +161,34 @@ for _ in $(seq 1 70); do
 done
 check "a Cron Trigger runs the scheduled handler" "* * * * *|number" "$cron_out"
 
+# Static Assets: a Worker with assets and run_worker_first rules, then a site
+# with only assets.
+ASSETS_APP="$WORK/assets-app"
+cp -r "$E2E/fixtures/assets-app" "$ASSETS_APP"
+awrangler() { (cd "$ASSETS_APP" && "$E2E/node_modules/.bin/wrangler" "$@"); }
+awrangler deploy > "$WORK/assets.log" 2>&1 || { cat "$WORK/assets.log"; exit 1; }
+check "wrangler uploads the assets" "Uploaded 3 files" "$(grep -o 'Uploaded [0-9]* files' "$WORK/assets.log" || cat "$WORK/assets.log")"
+settle
+AHOST="assets-app.$SUBDOMAIN.workers.test"
+aget() { curl -s -H "Host: $AHOST" "http://127.0.0.1:$GATEWAY_PORT$1"; }
+ahead() { curl -s -o /dev/null -w "$2" -H "Host: $AHOST" "http://127.0.0.1:$GATEWAY_PORT$1"; }
+check "an asset is served before the Worker" "<h1>home</h1>" "$(aget /)"
+check "assets get their content type" "text/css" "$(ahead /style.css '%{content_type}' | cut -d';' -f1)"
+check "_headers applies" "assets" "$(curl -s -D - -o /dev/null -H "Host: $AHOST" "http://127.0.0.1:$GATEWAY_PORT/style.css" | tr -d '\r' | sed -n 's/^x-e2e: //Ip')"
+check "html_handling adds the trailing slash" "307 /about/" "$(ahead /about '%{http_code} %{redirect_url}' | sed 's|http://[^/]*||')"
+check "_redirects applies" "301" "$(ahead /old '%{http_code}')"
+check "run_worker_first sends /api/* to the Worker" "worker:/api/hello" "$(aget /api/hello)"
+check "the ASSETS binding fetches an asset" "asset:200:body { color: teal; }" "$(aget /api/asset)"
+check "a path with no asset falls through to the Worker" "worker:/nothing" "$(aget /nothing)"
+awrangler deploy > "$WORK/assets2.log" 2>&1 || { cat "$WORK/assets2.log"; exit 1; }
+check "a redeploy uploads nothing new" "No updated asset files" "$(grep -o 'No updated asset files' "$WORK/assets2.log" || cat "$WORK/assets2.log")"
+awrangler deploy -c site.jsonc > "$WORK/site.log" 2>&1 || { cat "$WORK/site.log"; exit 1; }
+settle
+SHOST="static-site.$SUBDOMAIN.workers.test"
+check "a Worker with only assets serves them" "<h1>spa</h1>" "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/")"
+check "single-page-application serves index.html for unknown paths" "<h1>spa</h1>" \
+  "$(curl -s -H "Host: $SHOST" "http://127.0.0.1:$GATEWAY_PORT/deep/link")"
+
 wrangler delete > /dev/null 2>&1
 settle
 check "delete unroutes the hostname" "404" "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$GATEWAY_PORT/")"

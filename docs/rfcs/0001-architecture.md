@@ -298,7 +298,8 @@ Selvedge 只需要做配置生成、凭据和测试。
 | D1：官方 `d1-api` 绑定 + 系统 worker（每个数据库一个 SQLite DO，自动获得 cluster 模式的高可用）、REST API（create / execute / migrations） | 完成 | 绑定和 wrangler 的端到端测试；runner 崩溃后数据仍在 |
 | Cron：`triggers.crons`、`L/W/#` 语法，data 副本用 SKIP LOCKED 认领到期触发（每次触发只执行一次，不需要选主），经系统 worker `selvedge-events` 投递 | 完成 | wrangler 部署 + 真实定时触发的端到端测试 |
 | Queues：官方 Queue 生产者绑定；消息存 Postgres，data 副本按租约认领批次（至少一次投递），经 `selvedge-events` 以 `MessageBatch` 形状的对象投递；重试、死信队列 | 完成（不支持 `v8` 格式：解码需要实验性标志） | wrangler 部署 + 生产、消费、重试的端到端测试 |
-| Workflows、Static Assets | 未开始 | |
+| Static Assets：wrangler 的上传会话协议（只传账户里还没有的文件）、纯静态 Worker、`ASSETS` 绑定；由官方 workers-sdk 的 asset worker 和 router worker（未修改）在 workerd 里提供服务，`_headers`、`_redirects`、`run_worker_first` 在部署时解析；runner 本地磁盘缓存 | 完成 | 官方 workerd 渲染测试；wrangler 部署的端到端测试；两 runner 测试中 data 服务停掉后已缓存的资源照常返回 |
+| Workflows | 未开始 | |
 | 每账户 UID / cgroup / seccomp、每账户对象存储凭据、组件间 mTLS | 未开始 | 见 `SECURITY.md` 的已知缺口 |
 
 Spike 结论：

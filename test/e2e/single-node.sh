@@ -171,6 +171,37 @@ done
 check "queue consumer receives, acks and retries" \
   'e2e-jobs:{"n":1}#1;e2e-jobs:{"n":2}#1;e2e-jobs:"three"#1;e2e-jobs:{"flaky":true}#2;' "$q_out"
 
+# HTTP pull consumers: messages pushed, pulled, acked and retried over the API.
+wrangler queues create e2e-pull > /dev/null 2>&1
+wrangler queues consumer http add e2e-pull --batch-size 5 --message-retries 1 --visibility-timeout-secs 2 \
+  > "$WORK/pull.log" 2>&1 || cat "$WORK/pull.log"
+QID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/queues?name=e2e-pull" | json '["result"][0]["queue_id"]')
+qapi() { local path=$1; shift; curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$API/accounts/$ACCOUNT/queues/$QID$path" "$@"; }
+pulled() { python3 -c 'import sys, json; r = json.load(sys.stdin)["result"]; print("|".join(sorted(m["body"] + "#" + str(m["attempts"]) for m in r["messages"])))'; }
+check "wrangler lists the HTTP pull consumer" "1" "$(wrangler queues consumer list e2e-pull 2>&1 | grep -c 'HTTP pull consumers')"
+qapi /messages -X POST -d '{"body":{"n":1}}' > /dev/null
+qapi /messages/batch -X POST -d '{"messages":[{"body":"two","content_type":"text"},{"body":{"n":3}}]}' > /dev/null
+P1=$(qapi /messages/pull -X POST -d '{"batch_size":10}')
+check "pull returns the pushed messages" 'two#1|{"n":1}#1|{"n":3}#1' "$(echo "$P1" | pulled)"
+# Ack the JSON messages, retry the text one.
+SETTLE=$(echo "$P1" | python3 -c '
+import sys, json
+m = json.load(sys.stdin)["result"]["messages"]
+print(json.dumps({"acks": [{"lease_id": x["lease_id"]} for x in m if x["body"] != "two"],
+                  "retries": [{"lease_id": x["lease_id"], "delay_seconds": 0} for x in m if x["body"] == "two"]}))')
+check "acks and retries settle by lease id" "2 1" \
+  "$(qapi /messages/ack -X POST -d "$SETTLE" | python3 -c 'import sys, json; r = json.load(sys.stdin)["result"]; print(r["ackCount"], r["retryCount"])')"
+P2=$(qapi /messages/pull -X POST -d '{}')
+check "a retried message comes back on the next pull" "two#2" "$(echo "$P2" | pulled)"
+sleep 3
+check "a lease past its visibility timeout no longer settles" "0" \
+  "$(qapi /messages/ack -X POST -d "$(echo "$P2" | python3 -c 'import sys, json; print(json.dumps({"acks": [{"lease_id": m["lease_id"]} for m in json.load(sys.stdin)["result"]["messages"]]}))')" \
+     | python3 -c 'import sys, json; print(json.load(sys.stdin)["result"]["ackCount"])')"
+check "a message out of retries is dropped when its lease runs out" " 0" \
+  "$(qapi /messages/pull -X POST -d '{}' | python3 -c 'import sys, json; r = json.load(sys.stdin)["result"]; print("|".join(m["body"] for m in r["messages"]), r["message_backlog_count"])')"
+wrangler queues consumer http remove e2e-pull > /dev/null 2>&1
+check "without an HTTP pull consumer, pulls are refused" "400" "$(qapi /messages/pull -X POST -d '{}' -o /dev/null -w '%{http_code}')"
+
 # R2 event notifications: object changes under a prefix go to a queue, which
 # the queue app consumes alongside its own.
 wrangler queues create e2e-events > /dev/null 2>&1

@@ -21,6 +21,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (13, include_str!("../migrations/0013_zones.sql")),
     (14, include_str!("../migrations/0014_r2_public.sql")),
     (15, include_str!("../migrations/0015_r2_notifications.sql")),
+    (16, include_str!("../migrations/0016_queue_http_pull.sql")),
 ];
 
 /// An arbitrary constant identifying Selvedge's migration lock.

@@ -19,12 +19,45 @@ pub struct QueueInfo {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ConsumerSettings {
+    /// `worker` (delivered to `script`) or `http_pull` (pulled over the API;
+    /// `script` is empty).
+    #[serde(default = "worker_kind")]
+    pub kind: String,
     pub script: String,
     pub batch_size: i32,
     pub max_wait_ms: i32,
     pub max_retries: i32,
     pub retry_delay_secs: i32,
     pub dead_letter_queue: Option<String>,
+    /// HTTP pull: how long a pulled message stays leased.
+    #[serde(default = "default_visibility_ms")]
+    pub visibility_timeout_ms: i32,
+}
+
+fn worker_kind() -> String {
+    "worker".into()
+}
+
+fn default_visibility_ms() -> i32 {
+    30_000
+}
+
+impl ConsumerSettings {
+    pub fn is_http_pull(&self) -> bool {
+        self.kind == "http_pull"
+    }
+}
+
+/// A pulled message's lease: the message and the attempt it was leased for.
+/// A lease from an earlier attempt (the message timed out and was pulled
+/// again) no longer settles it.
+pub fn lease_id(m: &Message) -> String {
+    format!("{}.{}", m.id, m.attempts)
+}
+
+fn parse_lease(lease: &str) -> Option<(&str, i32)> {
+    let (id, attempts) = lease.rsplit_once('.')?;
+    Some((id, attempts.parse().ok()?))
 }
 
 #[derive(Debug, Clone)]
@@ -133,21 +166,25 @@ impl Db {
             .await?
             .execute(
                 "INSERT INTO queue_consumers (queue_id, account_id, script_name, batch_size, max_wait_ms,
-                                              max_retries, retry_delay_secs, dead_letter_queue)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                              max_retries, retry_delay_secs, dead_letter_queue, kind,
+                                              visibility_timeout_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT (queue_id) DO UPDATE SET script_name = excluded.script_name,
                    batch_size = excluded.batch_size, max_wait_ms = excluded.max_wait_ms,
                    max_retries = excluded.max_retries, retry_delay_secs = excluded.retry_delay_secs,
-                   dead_letter_queue = excluded.dead_letter_queue",
+                   dead_letter_queue = excluded.dead_letter_queue, kind = excluded.kind,
+                   visibility_timeout_ms = excluded.visibility_timeout_ms",
                 &[
                     &queue_id,
                     &account.as_str(),
-                    &s.script,
+                    &(!s.is_http_pull()).then_some(s.script.as_str()),
                     &s.batch_size,
                     &s.max_wait_ms,
                     &s.max_retries,
                     &s.retry_delay_secs,
                     &s.dead_letter_queue,
+                    &s.kind,
+                    &s.visibility_timeout_ms,
                 ],
             )
             .await?;
@@ -159,18 +196,21 @@ impl Db {
             .client()
             .await?
             .query_opt(
-                "SELECT script_name, batch_size, max_wait_ms, max_retries, retry_delay_secs, dead_letter_queue
+                "SELECT script_name, batch_size, max_wait_ms, max_retries, retry_delay_secs, dead_letter_queue,
+                        kind, visibility_timeout_ms
                  FROM queue_consumers WHERE queue_id = $1",
                 &[&queue_id],
             )
             .await?;
         Ok(row.map(|r| ConsumerSettings {
-            script: r.get(0),
+            script: r.get::<_, Option<String>>(0).unwrap_or_default(),
             batch_size: r.get(1),
             max_wait_ms: r.get(2),
             max_retries: r.get(3),
             retry_delay_secs: r.get(4),
             dead_letter_queue: r.get(5),
+            kind: r.get(6),
+            visibility_timeout_ms: r.get(7),
         }))
     }
 
@@ -212,7 +252,7 @@ impl Db {
         Ok((r.get(0), r.get(1)))
     }
 
-    /// Queues that have a consumer and visible messages.
+    /// Queues that have a Worker consumer and visible messages.
     pub async fn ready_consumers(&self) -> Result<Vec<Consumer>> {
         let rows = self
             .client()
@@ -221,7 +261,7 @@ impl Db {
                 "SELECT q.id, q.name, c.account_id, c.script_name, c.batch_size, c.max_wait_ms, c.max_retries,
                         c.retry_delay_secs, c.dead_letter_queue
                  FROM queue_consumers c JOIN queues q ON q.id = c.queue_id
-                 WHERE EXISTS (SELECT 1 FROM queue_messages m WHERE m.queue_id = q.id AND m.visible_at <= now())",
+                 WHERE c.kind = 'worker' AND EXISTS (SELECT 1 FROM queue_messages m WHERE m.queue_id = q.id AND m.visible_at <= now())",
                 &[],
             )
             .await?;
@@ -238,6 +278,8 @@ impl Db {
                         max_retries: r.get(6),
                         retry_delay_secs: r.get(7),
                         dead_letter_queue: r.get(8),
+                        kind: "worker".into(),
+                        visibility_timeout_ms: default_visibility_ms(),
                     },
                 })
             })
@@ -314,5 +356,102 @@ impl Db {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// HTTP pull: messages whose lease ran out after their last allowed
+    /// attempt move to the dead-letter queue (or are dropped), as a retry
+    /// past `max_retries` does.
+    pub async fn expire_pulled(
+        &self,
+        account: &AccountId,
+        queue_id: &str,
+        c: &ConsumerSettings,
+    ) -> Result<()> {
+        let dlq = match &c.dead_letter_queue {
+            Some(name) => self.queue(account, name).await?.map(|q| q.id),
+            None => None,
+        };
+        let client = self.client().await?;
+        let exhausted = "queue_id = $1 AND visible_at <= now() AND attempts > $2";
+        match dlq {
+            Some(dlq) => {
+                client
+                    .execute(
+                        &format!("UPDATE queue_messages SET queue_id = $3, attempts = 0 WHERE {exhausted}"),
+                        &[&queue_id, &c.max_retries, &dlq],
+                    )
+                    .await?
+            }
+            None => {
+                client
+                    .execute(
+                        &format!("DELETE FROM queue_messages WHERE {exhausted}"),
+                        &[&queue_id, &c.max_retries],
+                    )
+                    .await?
+            }
+        };
+        Ok(())
+    }
+
+    /// HTTP pull: acks and retries by lease id. Returns how many of each
+    /// settled; leases that no longer hold (past their visibility timeout, or
+    /// from an earlier attempt) are skipped.
+    pub async fn settle_pulled(
+        &self,
+        account: &AccountId,
+        queue_id: &str,
+        c: &ConsumerSettings,
+        acks: &[String],
+        retries: &[(String, u32)],
+    ) -> Result<(u64, u64)> {
+        let dlq = match &c.dead_letter_queue {
+            Some(name) => self.queue(account, name).await?.map(|q| q.id),
+            None => None,
+        };
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let (mut acked, mut retried) = (0, 0);
+        for lease in acks {
+            let Some((id, attempts)) = parse_lease(lease) else { continue };
+            acked += tx
+                .execute(
+                    "DELETE FROM queue_messages WHERE id = $1 AND queue_id = $2 AND attempts = $3 AND visible_at > now()",
+                    &[&id, &queue_id, &attempts],
+                )
+                .await?;
+        }
+        for (lease, delay) in retries {
+            let Some((id, attempts)) = parse_lease(lease) else { continue };
+            let n = if attempts > c.max_retries {
+                match &dlq {
+                    Some(dlq) => {
+                        tx.execute(
+                            "UPDATE queue_messages SET queue_id = $4, attempts = 0, visible_at = now()
+                             WHERE id = $1 AND queue_id = $2 AND attempts = $3 AND visible_at > now()",
+                            &[&id, &queue_id, &attempts, dlq],
+                        )
+                        .await?
+                    }
+                    None => {
+                        tx.execute(
+                            "DELETE FROM queue_messages WHERE id = $1 AND queue_id = $2 AND attempts = $3 AND visible_at > now()",
+                            &[&id, &queue_id, &attempts],
+                        )
+                        .await?
+                    }
+                }
+            } else {
+                tx.execute(
+                    "UPDATE queue_messages SET visible_at = now() + make_interval(secs => $4)
+                     WHERE id = $1 AND queue_id = $2 AND attempts = $3 AND visible_at > now()",
+                    &[&id, &queue_id, &attempts, &f64::from(*delay)],
+                )
+                .await?
+            };
+            retried += n;
+        }
+        tx.commit().await?;
+        Ok((acked, retried))
     }
 }

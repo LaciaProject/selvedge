@@ -47,7 +47,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | R2 S3 API | 常用的桶、对象、分片操作，SigV4（含预签名 URL），`aws-chunked` 请求体 | 与绑定共享同一批对象，已用 AWS SDK 测试 |
 | Durable Objects | fetch、RPC、WebSocket 休眠、SQLite 与 KV 存储、alarms | workerd 集群模式，存储写入 S3 后才确认 |
 | D1 | `prepare/bind/first/all/run/raw/batch/exec`，以及 `wrangler d1` 的常用命令和迁移 | 每个数据库是一个 SQLite Durable Object |
-| Queues | 生产者、Worker 消费者、重试、延迟、死信队列，至少投递一次 | 消息存在 PostgreSQL，投递时加租约 |
+| Queues | 生产者、Worker 消费者和 HTTP pull 消费者、HTTP 推送、重试、延迟、死信队列，至少投递一次 | 消息存在 PostgreSQL，投递时加租约 |
 | Cron Triggers | 每个脚本最多 5 个，支持 `L`、`W`、`#` | 数据服务的多个副本抢同一次触发，每次只执行一次 |
 | Static Assets | `html_handling`、SPA 和 404 页、`run_worker_first`、`_headers`、`_redirects`，只上传有变化的文件，自动回收不再用的文件 | 未修改的 Cloudflare asset worker 和 router worker |
 | Workflows | `step.do`、`sleep`、`sleepUntil`、`waitForEvent`，实例管理，`wrangler workflows` 全部子命令 | 未修改的 Cloudflare Workflows 引擎，每个实例一个 Durable Object |
@@ -92,7 +92,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |
 | R2 | 没有生命周期规则。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
 | D1 | 没有读副本、Time Travel 和 `d1 export`，不支持导入大文件 |
-| Queues | 不支持 `v8` 内容类型、HTTP pull 消费者和暂停投递；`max_batch_timeout` 不生效 |
+| Queues | 不支持 `v8` 内容类型和暂停投递；`max_batch_timeout` 不生效 |
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |
 | 运行时与 API | 不支持 service-worker 语法和 Global API key |

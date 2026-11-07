@@ -1,0 +1,12 @@
+Selvedge
+Copyright 2026 The Selvedge Authors
+
+This product includes software developed by The Selvedge Authors, licensed
+under the Apache License, Version 2.0.
+
+Selvedge runs the official workerd runtime (https://github.com/cloudflare/workerd),
+Copyright Cloudflare, Inc., licensed under the Apache License, Version 2.0. The
+runtime image includes an unmodified workerd release binary.
+
+"Cloudflare" and "Workers" are trademarks of Cloudflare, Inc. Selvedge is not
+affiliated with or endorsed by Cloudflare.

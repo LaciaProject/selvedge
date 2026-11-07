@@ -1,0 +1,11 @@
+apiVersion: v2
+name: selvedge
+description: A highly available, Workers-compatible platform for Kubernetes, on the official workerd runtime
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+license: Apache-2.0
+home: https://github.com/LaciaProject/selvedge
+sources:
+  - https://github.com/LaciaProject/selvedge
+keywords: [workers, workerd, serverless, edge]

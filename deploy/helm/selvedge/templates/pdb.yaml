@@ -1,0 +1,15 @@
+{{- if eq .Values.profile "ha" }}
+{{- range $component := list "api" "data" "gateway" "runner" }}
+{{- $c := dict "root" $ "component" $component }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "selvedge.name" $ }}-{{ $component }}
+  labels: {{- include "selvedge.labels" $ | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+{{- end }}
+{{- end }}

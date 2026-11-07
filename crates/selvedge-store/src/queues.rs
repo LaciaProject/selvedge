@@ -1,0 +1,318 @@
+//! Queues: producers insert rows; dispatchers lease batches. A delivered
+//! message stays invisible for the lease; acking deletes it, retrying makes
+//! it visible again after the delay, and running out of retries moves it to
+//! the dead-letter queue (or drops it).
+
+use std::time::{Duration, SystemTime};
+
+use anyhow::Result;
+use selvedge_core::{AccountId, HexId};
+
+use crate::Db;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueueInfo {
+    pub id: String,
+    pub name: String,
+    pub created_on: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ConsumerSettings {
+    pub script: String,
+    pub batch_size: i32,
+    pub max_wait_ms: i32,
+    pub max_retries: i32,
+    pub retry_delay_secs: i32,
+    pub dead_letter_queue: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Consumer {
+    pub queue_id: String,
+    pub queue_name: String,
+    pub account: AccountId,
+    pub settings: ConsumerSettings,
+}
+
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub id: String,
+    pub body: Vec<u8>,
+    pub content_type: String,
+    pub attempts: i32,
+    pub timestamp_ms: i64,
+}
+
+pub struct NewMessage {
+    pub body: Vec<u8>,
+    pub content_type: String,
+    pub delay_secs: u32,
+}
+
+/// What happens to one delivered message.
+pub enum Outcome {
+    Ack,
+    Retry { delay_secs: u32 },
+}
+
+fn ms(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+impl Db {
+    pub async fn create_queue(&self, account: &AccountId, name: &str) -> Result<Option<QueueInfo>> {
+        let id = HexId::random().to_string();
+        let r = self
+            .client()
+            .await?
+            .query_one(
+                "INSERT INTO queues (id, account_id, name) VALUES ($1, $2, $3) RETURNING created_at",
+                &[&id, &account.as_str(), &name],
+            )
+            .await;
+        match r {
+            Ok(row) => Ok(Some(QueueInfo {
+                id,
+                name: name.to_owned(),
+                created_on: crate::repo::rfc3339(row.get(0)),
+            })),
+            Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub async fn queues(&self, account: &AccountId) -> Result<Vec<QueueInfo>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id, name, created_at FROM queues WHERE account_id = $1 ORDER BY name",
+                &[&account.as_str()],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| QueueInfo { id: r.get(0), name: r.get(1), created_on: crate::repo::rfc3339(r.get(2)) })
+            .collect())
+    }
+
+    /// A queue by id or name.
+    pub async fn queue(&self, account: &AccountId, id_or_name: &str) -> Result<Option<QueueInfo>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT id, name, created_at FROM queues WHERE account_id = $1 AND (id = $2 OR name = $2)",
+                &[&account.as_str(), &id_or_name],
+            )
+            .await?;
+        Ok(row.map(|r| QueueInfo {
+            id: r.get(0),
+            name: r.get(1),
+            created_on: crate::repo::rfc3339(r.get(2)),
+        }))
+    }
+
+    pub async fn delete_queue(&self, account: &AccountId, id: &str) -> Result<bool> {
+        let n = self
+            .client()
+            .await?
+            .execute("DELETE FROM queues WHERE account_id = $1 AND id = $2", &[&account.as_str(), &id])
+            .await?;
+        Ok(n == 1)
+    }
+
+    pub async fn set_consumer(
+        &self,
+        account: &AccountId,
+        queue_id: &str,
+        s: &ConsumerSettings,
+    ) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO queue_consumers (queue_id, account_id, script_name, batch_size, max_wait_ms,
+                                              max_retries, retry_delay_secs, dead_letter_queue)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (queue_id) DO UPDATE SET script_name = excluded.script_name,
+                   batch_size = excluded.batch_size, max_wait_ms = excluded.max_wait_ms,
+                   max_retries = excluded.max_retries, retry_delay_secs = excluded.retry_delay_secs,
+                   dead_letter_queue = excluded.dead_letter_queue",
+                &[
+                    &queue_id,
+                    &account.as_str(),
+                    &s.script,
+                    &s.batch_size,
+                    &s.max_wait_ms,
+                    &s.max_retries,
+                    &s.retry_delay_secs,
+                    &s.dead_letter_queue,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn consumer(&self, queue_id: &str) -> Result<Option<ConsumerSettings>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT script_name, batch_size, max_wait_ms, max_retries, retry_delay_secs, dead_letter_queue
+                 FROM queue_consumers WHERE queue_id = $1",
+                &[&queue_id],
+            )
+            .await?;
+        Ok(row.map(|r| ConsumerSettings {
+            script: r.get(0),
+            batch_size: r.get(1),
+            max_wait_ms: r.get(2),
+            max_retries: r.get(3),
+            retry_delay_secs: r.get(4),
+            dead_letter_queue: r.get(5),
+        }))
+    }
+
+    pub async fn delete_consumer(&self, queue_id: &str) -> Result<bool> {
+        Ok(self
+            .client()
+            .await?
+            .execute("DELETE FROM queue_consumers WHERE queue_id = $1", &[&queue_id])
+            .await?
+            == 1)
+    }
+
+    pub async fn enqueue(&self, queue_id: &str, messages: &[NewMessage]) -> Result<()> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        for m in messages {
+            let delay = f64::from(m.delay_secs);
+            tx.execute(
+                "INSERT INTO queue_messages (id, queue_id, body, content_type, visible_at)
+                 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))",
+                &[&selvedge_core::new_version_id(), &queue_id, &m.body, &m.content_type, &delay],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// `(messages, bytes)` waiting in a queue.
+    pub async fn backlog(&self, queue_id: &str) -> Result<(i64, i64)> {
+        let r = self
+            .client()
+            .await?
+            .query_one(
+                "SELECT count(*), coalesce(sum(length(body)), 0)::bigint FROM queue_messages WHERE queue_id = $1",
+                &[&queue_id],
+            )
+            .await?;
+        Ok((r.get(0), r.get(1)))
+    }
+
+    /// Queues that have a consumer and visible messages.
+    pub async fn ready_consumers(&self) -> Result<Vec<Consumer>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT q.id, q.name, c.account_id, c.script_name, c.batch_size, c.max_wait_ms, c.max_retries,
+                        c.retry_delay_secs, c.dead_letter_queue
+                 FROM queue_consumers c JOIN queues q ON q.id = c.queue_id
+                 WHERE EXISTS (SELECT 1 FROM queue_messages m WHERE m.queue_id = q.id AND m.visible_at <= now())",
+                &[],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Consumer {
+                    queue_id: r.get(0),
+                    queue_name: r.get(1),
+                    account: r.get::<_, String>(2).parse()?,
+                    settings: ConsumerSettings {
+                        script: r.get(3),
+                        batch_size: r.get(4),
+                        max_wait_ms: r.get(5),
+                        max_retries: r.get(6),
+                        retry_delay_secs: r.get(7),
+                        dead_letter_queue: r.get(8),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// Leases up to `limit` visible messages for `lease`, counting an attempt.
+    pub async fn lease_batch(&self, queue_id: &str, limit: i64, lease: Duration) -> Result<Vec<Message>> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let rows = tx
+            .query(
+                "UPDATE queue_messages SET attempts = attempts + 1, visible_at = now() + make_interval(secs => $3)
+                 WHERE id IN (SELECT id FROM queue_messages WHERE queue_id = $1 AND visible_at <= now()
+                              ORDER BY visible_at, created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+                 RETURNING id, body, content_type, attempts, created_at",
+                &[&queue_id, &limit, &lease.as_secs_f64()],
+            )
+            .await?;
+        tx.commit().await?;
+        let mut out: Vec<Message> = rows
+            .iter()
+            .map(|r| Message {
+                id: r.get(0),
+                body: r.get(1),
+                content_type: r.get(2),
+                attempts: r.get(3),
+                timestamp_ms: ms(r.get(4)),
+            })
+            .collect();
+        out.sort_by_key(|m| m.timestamp_ms);
+        Ok(out)
+    }
+
+    /// Applies a batch's outcome. Messages retried past `max_retries` go to the
+    /// dead-letter queue when there is one, else they are dropped.
+    pub async fn settle(
+        &self,
+        account: &AccountId,
+        consumer: &ConsumerSettings,
+        results: &[(Message, Outcome)],
+    ) -> Result<()> {
+        let dlq = match &consumer.dead_letter_queue {
+            Some(name) => self.queue(account, name).await?.map(|q| q.id),
+            None => None,
+        };
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        for (m, outcome) in results {
+            match outcome {
+                Outcome::Ack => {
+                    tx.execute("DELETE FROM queue_messages WHERE id = $1", &[&m.id]).await?;
+                }
+                Outcome::Retry { .. } if m.attempts > consumer.max_retries => match &dlq {
+                    Some(dlq) => {
+                        tx.execute(
+                            "UPDATE queue_messages SET queue_id = $2, attempts = 0, visible_at = now() WHERE id = $1",
+                            &[&m.id, dlq],
+                        )
+                        .await?;
+                    }
+                    None => {
+                        tx.execute("DELETE FROM queue_messages WHERE id = $1", &[&m.id]).await?;
+                    }
+                },
+                Outcome::Retry { delay_secs } => {
+                    tx.execute(
+                        "UPDATE queue_messages SET visible_at = now() + make_interval(secs => $2) WHERE id = $1",
+                        &[&m.id, &f64::from(*delay_secs)],
+                    )
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+}

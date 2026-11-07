@@ -1,0 +1,81 @@
+{{- if .Values.objectStore.bundled }}
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "seaweedfs" -}}
+# A single-node SeaweedFS for the minimal profile. It supports the conditional
+# writes workerd's cluster mode needs. For high availability, use a replicated
+# S3-compatible store and set objectStore.bundled=false.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-seaweedfs
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seaweedfs
+spec:
+  serviceName: {{ $name }}-seaweedfs
+  replicas: 1
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+    spec:
+      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      {{- with .Values.objectStore.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.objectStore.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: seaweedfs
+          image: {{ .Values.objectStore.image }}
+          args: [server, -s3, -dir=/data, -master.volumeSizeLimitMB=1024, -volume.max=0]
+          ports: [{ name: s3, containerPort: 8333 }]
+          readinessProbe: { tcpSocket: { port: s3 }, periodSeconds: 2 }
+          securityContext: { allowPrivilegeEscalation: false }
+          volumeMounts: [{ name: data, mountPath: /data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.objectStore.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.objectStore.storage }} } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-seaweedfs
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: s3, port: 8333, targetPort: s3 }]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-create-bucket
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" (dict "root" . "component" "setup") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: create-bucket
+          image: {{ include "selvedge.image" . }}
+          command: [sh, -c]
+          # SeaweedFS answers 200 for a new bucket and 409 for an existing one.
+          args:
+            - >-
+              until code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT http://{{ $name }}-seaweedfs:8333/{{ .Values.objectStore.bucket }});
+              [ "$code" = 200 ] || [ "$code" = 409 ]; do echo "waiting for SeaweedFS ($code)"; sleep 2; done
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+{{- end }}

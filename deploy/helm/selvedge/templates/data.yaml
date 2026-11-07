@@ -1,0 +1,46 @@
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "data" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-data
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data
+spec:
+  replicas: {{ include "selvedge.replicas" $c }}
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+    spec:
+      {{- include "selvedge.pod" $c | nindent 6 }}
+      containers:
+        - name: data
+          image: {{ include "selvedge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [data]
+          env:
+            {{- include "selvedge.commonEnv" . | nindent 12 }}
+            {{- include "selvedge.databaseEnv" . | nindent 12 }}
+            {{- include "selvedge.s3Env" . | nindent 12 }}
+            - name: SELVEDGE_DATA_LISTEN
+              value: 0.0.0.0:8788
+            - name: SELVEDGE_GATEWAY_URL
+              value: http://{{ $name }}-gateway:{{ .Values.gateway.service.port }}
+            - name: SELVEDGE_BLOB_URL
+              value: s3://{{ .Values.objectStore.bucket }}/blobs
+          ports: [{ name: http, containerPort: 8788 }]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          resources: {{- toYaml .Values.data.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-data
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: http, port: 8788, targetPort: http }]

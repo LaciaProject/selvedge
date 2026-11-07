@@ -1,0 +1,9 @@
+{
+  "name": "selvedge-e2e",
+  "private": true,
+  "description": "End-to-end tests: official clients against Selvedge",
+  "devDependencies": {
+    "workerd": "1.20261106.1",
+    "wrangler": "4.158.0"
+  }
+}

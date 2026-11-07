@@ -1,0 +1,16 @@
+# Values for the kind HA test: the ha profile, with the bundled single-instance
+# PostgreSQL and SeaweedFS pinned to the control-plane node, so that killing a
+# worker node tests Selvedge's own failover rather than those stand-ins.
+profile: ha
+image: { repository: selvedge, tag: ci, pullPolicy: Never }
+gateway: { service: { type: ClusterIP } }
+runner:
+  resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }
+api: { resources: { requests: { cpu: 50m, memory: 64Mi } } }
+data: { resources: { requests: { cpu: 50m, memory: 64Mi } } }
+postgres:
+  nodeSelector: { node-role.kubernetes.io/control-plane: "" }
+  tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]
+objectStore:
+  nodeSelector: { node-role.kubernetes.io/control-plane: "" }
+  tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]

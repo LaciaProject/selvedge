@@ -55,7 +55,7 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | Workflows (binding, `wrangler workflows` trigger/list/describe/events/pause/resume/terminate/delete) | Workflow schedules, per-instance retention |
 | Durable Objects: fetch, WebSockets, JS RPC, SQLite and KV storage, alarms | Workers AI, Hyperdrive, Analytics Engine |
 | Static assets (`assets` in wrangler config, `_headers`, `_redirects`, `run_worker_first`, the `ASSETS` binding; unused files are collected) | |
-| R2 (binding, multipart, conditional requests; `wrangler r2`; the S3-compatible API with presigned URLs; public bucket URLs and custom domains) | R2 event notifications |
+| R2 (binding, multipart, conditional requests; `wrangler r2`; the S3-compatible API with presigned URLs; public bucket URLs and custom domains; event notifications to queues) | |
 | D1 (binding, batches, `wrangler d1 create/execute/migrations`) | D1 read replicas, Time Travel, import/export |
 | Cron Triggers (`triggers.crons`, including `L`, `W` and `#`) | |
 | Queues (producers, Worker consumers, retries, dead-letter queues; `wrangler queues`) | `v8` message format, HTTP pull consumers |

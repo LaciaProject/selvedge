@@ -306,6 +306,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 只拿到按账户派生的密钥；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |
 | R2 的 S3 兼容接口：data 服务上单独的监听端口，路径式寻址；SigV4（请求头和预签名 URL）、`aws-chunked` 请求体；对象、分段上传、列举、复制、条件读写；凭据同 Cloudflare（token id + token 的 SHA-256） | 完成 | 官方 AWS SDK 的 13 项端到端检查；S3 写入的对象可由 `wrangler r2` 读出 |
 | R2 公开访问：`pub-<id>.<zone>` 公开 URL（运营方配置 zone，相当于 r2.dev）和自定义域名（须在分配给该账号的 zone 内）；在 S3 端口上按 Host 匿名提供 GET/HEAD（范围读取、条件请求），不列目录；`wrangler r2 bucket dev-url`、`domain` 子命令 | 完成 | 端到端测试：开启、读取、范围、304、拒绝写入、关闭后不可读；自定义域名的添加、列出、越 zone 被拒、删除 |
+| R2 事件通知：规则按前缀、后缀和动作（`PutObject`、`CopyObject`、`CompleteMultipartUpload`、`DeleteObject`）把对象变更发到账号的队列，消息格式同 Cloudflare；绑定、S3 接口、`wrangler r2` 的写入都会触发；`wrangler r2 bucket notification` 子命令 | 完成（写入提交后发出，入队失败时丢失并记日志） | 端到端测试：PUT、复制、删除送达队列消费者，不匹配前缀的不发，删除规则后不再发 |
 | 每账户资源限制：cgroup v2 可写时由内核按账户执行 `memory.max`/`cpu.max`/`pids.max`；Kubernetes 里 cgroup 只读，由 agent 每 2 秒检查：超内存重启进程，超 CPU 份额降低优先级 | 完成 | 端到端测试：超内存的进程被重启，超 CPU 的进程 nice 为 10 |
 | 灰度部署：两个版本按百分比分流（`Cloudflare-Workers-Version-Key` 保持同一版本、`Cloudflare-Workers-Version-Overrides` 指定版本），另一个版本作为同一账户进程里的独立 worker 服务 | 完成 | `wrangler versions deploy a@50% b@50%` 的端到端测试 |
 | Zone 路由：zone 由运营方（admin token）分配给账户，账户用 wrangler 的 `routes` 或 zone 路由接口添加路由；gateway 先查自定义域名和 workers.dev，再按最具体的模式匹配 | 完成 | wrangler 部署带 `routes` 的端到端测试（精确、通配主机、未匹配路径、租户不能认领 zone） |

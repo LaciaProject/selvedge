@@ -251,21 +251,24 @@ impl Db {
         Ok(PutOutcome::Stored)
     }
 
-    pub async fn r2_delete(&self, bucket: &str, keys: &[String]) -> Result<()> {
+    /// Deletes objects; returns the keys that existed.
+    pub async fn r2_delete(&self, bucket: &str, keys: &[String]) -> Result<Vec<String>> {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         let rows = tx
             .query(
-                "DELETE FROM r2_objects WHERE bucket_id = $1 AND key = ANY($2) RETURNING parts",
+                "DELETE FROM r2_objects WHERE bucket_id = $1 AND key = ANY($2) RETURNING parts, key",
                 &[&bucket, &keys],
             )
             .await?;
+        let mut deleted = Vec::new();
         for r in rows {
             let parts: Vec<R2Part> = serde_json::from_value(r.get(0))?;
             garbage(&*tx, &parts).await?;
+            deleted.push(r.get(1));
         }
         tx.commit().await?;
-        Ok(())
+        Ok(deleted)
     }
 
     /// Objects with `prefix`, after `after` (exclusive), in byte order.

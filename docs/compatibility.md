@@ -60,10 +60,25 @@ conditional write is one transaction.
 
 Differences:
 
-- Event notifications are not available yet.
+- Lifecycle rules are not available, so no `LifecycleDeletion` events are sent.
 - SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
 - Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
   the same size is not enforced.
+
+### Event notifications
+
+`wrangler r2 bucket notification create|list|delete` work: a rule sends a message to a queue in the
+account when an object whose key has the rule's prefix and suffix is created (`PutObject`,
+`CopyObject`, `CompleteMultipartUpload`) or deleted (`DeleteObject`). Messages have Cloudflare's
+shape (`account`, `action`, `bucket`, `object` with `key`, `size` and `eTag`, `eventTime`, and
+`copySource` for copies), and changes from the binding, the S3 API and `wrangler r2` all send them.
+
+Differences:
+
+- A message is enqueued right after the change commits. If enqueuing fails then (PostgreSQL went
+  away between the two statements), the event is lost and logged; Cloudflare delivers at least
+  once.
+- Deleting several objects at once sends one message per object that existed.
 
 ### Public buckets
 
@@ -276,6 +291,8 @@ against `/client/v4`. Set `CLOUDFLARE_API_BASE_URL` to Selvedge's API.
   and queue batches go to the version with the larger share. Workers that define Durable Objects or
   have static assets cannot be split.
 - Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported.
+- `inherit` bindings, which wrangler sends for resources the deployed version already binds, keep
+  the deployed version's binding of that name; an upload naming one it does not have is refused.
 - Hostnames: `<script>.<account subdomain>.<zone>` for scripts with workers.dev enabled, and custom
   domains (`/workers/domains`), and zone routes.
 - Zone routes: an operator assigns a zone to an account with an admin token (`POST /zones` with

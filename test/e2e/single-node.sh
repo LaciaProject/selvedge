@@ -180,6 +180,36 @@ check "_redirects applies" "301" "$(ahead /old '%{http_code}')"
 check "run_worker_first sends /api/* to the Worker" "worker:/api/hello" "$(aget /api/hello)"
 check "the ASSETS binding fetches an asset" "asset:200:body { color: teal; }" "$(aget /api/asset)"
 check "a path with no asset falls through to the Worker" "worker:/nothing" "$(aget /nothing)"
+# wrangler tail: console.log lines and exceptions of live requests.
+# Its own process group: wrangler's launcher runs the CLI in a child process.
+setsid bash -c 'cd "$1" && exec "$2" tail --format json' _ "$ASSETS_APP" "$E2E/node_modules/.bin/wrangler" \
+  > "$WORK/tail.json" 2> "$WORK/tail.err" &
+TAIL_PID=$!
+for _ in $(seq 1 40); do
+  aget /api/tailed > /dev/null; curl -s -o /dev/null -H "Host: $AHOST" "http://127.0.0.1:$GATEWAY_PORT/api/boom"
+  grep -q 'boom from the worker' "$WORK/tail.json" 2>/dev/null && grep -q '/api/tailed' "$WORK/tail.json" && break
+  sleep 0.5
+done
+kill -INT -- "-$TAIL_PID" 2>/dev/null || true
+for _ in $(seq 1 40); do kill -0 "$TAIL_PID" 2>/dev/null || break; sleep 0.25; done
+kill -KILL -- "-$TAIL_PID" 2>/dev/null || true
+tail_summary=$(python3 - "$WORK/tail.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+dec, i, logs, exc = json.JSONDecoder(), 0, False, False
+while i < len(text):
+    if text[i].isspace(): i += 1; continue
+    e, i = dec.raw_decode(text, i)
+    if e.get("scriptName") == "assets-app":
+        logs |= ["handled", "/api/tailed"] in [l["message"] for l in e["logs"]]
+        exc |= e["outcome"] == "exception" and any("boom from the worker" in x["message"] for x in e["exceptions"])
+print(f"logs={logs} exceptions={exc}")
+PY
+)
+[ "$tail_summary" = "logs=True exceptions=True" ] || { echo "== wrangler tail stderr"; cat "$WORK/tail.err"; echo "== stdout"; head -c 3000 "$WORK/tail.json"; }
+check "wrangler tail streams logs and exceptions" "logs=True exceptions=True" "$tail_summary"
+check "ending wrangler tail ends the session" "[]" \
+  "$(auth "$API/accounts/$ACCOUNT/workers/scripts/assets-app/tails" | json '["result"]')"
 awrangler deploy > "$WORK/assets2.log" 2>&1 || { cat "$WORK/assets2.log"; exit 1; }
 check "a redeploy uploads nothing new" "No updated asset files" "$(grep -o 'No updated asset files' "$WORK/assets2.log" || cat "$WORK/assets2.log")"
 awrangler deploy -c site.jsonc > "$WORK/site.log" 2>&1 || { cat "$WORK/site.log"; exit 1; }

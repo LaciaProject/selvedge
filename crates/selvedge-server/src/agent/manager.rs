@@ -84,6 +84,8 @@ pub struct Manager {
     max_date: String,
     accounts: StdMutex<HashMap<AccountId, Arc<AccountState>>>,
     last_used: StdMutex<HashMap<AccountId, Instant>>,
+    /// Scripts someone is tailing, from the change feed.
+    tails: super::bindings::Tailed,
 }
 
 pub enum Lookup {
@@ -109,6 +111,7 @@ impl Manager {
             max_date,
             accounts: StdMutex::new(HashMap::new()),
             last_used: StdMutex::new(HashMap::new()),
+            tails: super::bindings::Tailed::default(),
         })
     }
 
@@ -190,6 +193,15 @@ impl Manager {
             if let Some(c) = body["cursor"].as_i64() {
                 cursor = Some(c);
             }
+            if let Some(list) = body["tails"].as_array() {
+                let set = list
+                    .iter()
+                    .filter_map(|t| {
+                        Some((t[0].as_str()?.parse::<AccountId>().ok()?, t[1].as_str()?.to_owned()))
+                    })
+                    .collect();
+                *self.tails.0.write().expect("poisoned") = set;
+            }
         }
     }
 
@@ -244,7 +256,13 @@ impl Manager {
             let mut slot = state.slot.lock().await;
             if slot.binding_socket.is_none() {
                 let p = self.account_run_dir(account).join("b.sock");
-                super::bindings::serve(self.cfg.clone(), account.clone(), &p)?;
+                super::bindings::serve(
+                    self.cfg.clone(),
+                    account.clone(),
+                    &p,
+                    self.tails.clone(),
+                    self.http.clone(),
+                )?;
                 slot.binding_socket = Some(p);
             }
             slot.starts += 1;

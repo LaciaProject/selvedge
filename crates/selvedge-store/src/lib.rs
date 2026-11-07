@@ -11,6 +11,7 @@ pub mod queues;
 pub mod r2;
 pub mod repo;
 pub mod secrets;
+pub mod tails;
 
 pub use blobs::Blobs;
 pub use db::Db;

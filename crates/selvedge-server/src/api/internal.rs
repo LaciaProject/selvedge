@@ -67,13 +67,18 @@ async fn generations(
     axum::extract::Query(q): axum::extract::Query<After>,
 ) -> ApiResult<Response> {
     let Some(after) = q.after else {
-        return Ok(
-            Json(json!({ "changes": [], "cursor": state.db.generation_head().await? })).into_response()
-        );
+        return Ok(Json(json!({
+            "changes": [],
+            "cursor": state.db.generation_head().await?,
+            "tails": state.db.tailed_scripts().await?,
+        }))
+        .into_response());
     };
     let changes = state.db.generations_after(after, 1000).await?;
     let cursor = changes.last().map_or(after, |(_, g)| *g);
-    Ok(Json(json!({ "changes": changes, "cursor": cursor })).into_response())
+    // Scripts someone is tailing, so agents forward only their trace events.
+    let tails = state.db.tailed_scripts().await?;
+    Ok(Json(json!({ "changes": changes, "cursor": cursor, "tails": tails })).into_response())
 }
 
 async fn bundle(

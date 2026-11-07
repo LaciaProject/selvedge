@@ -15,15 +15,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/selvedge
-  CHART_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
-
 jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      # Registry paths must be lowercase; the owner's name may not be.
+      image: ${{ steps.v.outputs.image }}
+      chart_repo: ${{ steps.v.outputs.chart_repo }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -36,11 +35,18 @@ jobs:
           echo "tag $version, chart $chart, appVersion $app"
           [ "$version" = "$chart" ] && [ "$version" = "$app" ] || {
             echo "::error::tag v$version does not match Chart.yaml (version $chart, appVersion $app)"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "version=$version"
+            echo "image=ghcr.io/$owner/selvedge"
+            echo "chart_repo=oci://ghcr.io/$owner/charts"
+          } >> "$GITHUB_OUTPUT"
 
   image:
     needs: check
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
     permissions:
       contents: read
       packages: write
@@ -72,6 +78,9 @@ jobs:
   chart:
     needs: [check, image]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
+      CHART_REPO: ${{ needs.check.outputs.chart_repo }}
     permissions:
       contents: write
       packages: write

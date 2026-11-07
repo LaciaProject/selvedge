@@ -83,7 +83,7 @@ pub fn serve(
             );
             headers.insert(ACCOUNT_HEADER, account_header);
             headers.insert(http::header::AUTHORIZATION, auth);
-            let sent = match proxy::connect_retrying(&cfg.data_addr, 4).await {
+            let sent = match proxy::connect_retrying(&cfg.data_addr, crate::tls::Role::Data, 4).await {
                 Ok(sender) => proxy::send(sender, req).await,
                 Err(e) => Err(e),
             };

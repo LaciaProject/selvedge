@@ -202,10 +202,32 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         Ok((stream, _)) => {
             let _ = stream.set_nodelay(true);
             let handler = handler.clone();
-            // With mTLS, only gateways (holding a platform certificate) get in.
+            // With mTLS, only gateways get in (and this runner's own probes,
+            // to /healthz only).
             tokio::spawn(async move {
-                match tokio::time::timeout(Duration::from_secs(10), crate::tls::accept(stream)).await {
-                    Ok(Ok(stream)) => proxy::serve_connection(stream, handler),
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    crate::tls::accept(stream, crate::tls::AGENT_CLIENTS),
+                )
+                .await
+                {
+                    Ok(Ok(stream)) => {
+                        let health_only = stream.health_only();
+                        let gated = Arc::new(move |mut req: Request<Incoming>| {
+                            let handler = handler.clone();
+                            async move {
+                                if health_only {
+                                    if !crate::tls::health_path(req.uri().path()) {
+                                        return proxy::full(http::StatusCode::FORBIDDEN, "forbidden");
+                                    }
+                                    // A probe asks about this runner, never an account.
+                                    proxy::strip_internal(req.headers_mut());
+                                }
+                                handler(req).await
+                            }
+                        });
+                        proxy::serve_connection(stream, gated)
+                    }
                     Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
                     Err(_) => tracing::debug!("TLS handshake timed out"),
                 }

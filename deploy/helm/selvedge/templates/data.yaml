@@ -40,14 +40,14 @@ spec:
             {{- if .Values.data.r2S3.enabled }}
             - { name: r2-s3, containerPort: 8790 }
             {{- end }}
-          {{- include "selvedge.probes" (dict "root" . "port" 8788) | nindent 10 }}
+          {{- include "selvedge.probes" (dict "root" . "role" "data" "port" 8788) | nindent 10 }}
           resources: {{- toYaml .Values.data.resources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           {{- if .Values.tls.enabled }}
           volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
           {{- end }}
       {{- if .Values.tls.enabled }}
-      volumes: {{- include "selvedge.tlsVolume" . | nindent 8 }}
+      volumes: {{- include "selvedge.tlsVolume" (dict "root" . "role" "data") | nindent 8 }}
       {{- end }}
 ---
 apiVersion: v1

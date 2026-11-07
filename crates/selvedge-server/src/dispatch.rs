@@ -28,7 +28,7 @@ impl Dispatcher {
             db,
             gateway_url: gateway_url.trim_end_matches('/').to_owned(),
             internal_token,
-            http: crate::tls::reqwest(reqwest::Client::builder())
+            http: crate::tls::reqwest(reqwest::Client::builder(), &[crate::tls::Role::Gateway])
                 .connect_timeout(Duration::from_secs(2))
                 // A scheduled handler may run up to 15 minutes on Cloudflare.
                 .timeout(Duration::from_secs(15 * 60))

@@ -1953,6 +1953,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-pki-types",
+ "rustls-webpki",
  "selvedge-core",
  "selvedge-store",
  "selvedge-workerd",

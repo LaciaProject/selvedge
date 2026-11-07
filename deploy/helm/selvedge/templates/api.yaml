@@ -54,7 +54,7 @@ spec:
           volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
           {{- end }}
       {{- if .Values.tls.enabled }}
-      volumes: {{- include "selvedge.tlsVolume" . | nindent 8 }}
+      volumes: {{- include "selvedge.tlsVolume" (dict "root" . "role" "api") | nindent 8 }}
       {{- end }}
 ---
 apiVersion: v1

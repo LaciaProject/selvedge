@@ -865,7 +865,8 @@ async fn copy_object(
         r
     };
     let stream = read_object(&st.blobs, &o.parts, 0, o.size as u64).map_err(axum::Error::new);
-    let copied = bucket.put(key, &req, Box::pin(stream)).await?.ok_or_else(|| {
+    let change = crate::r2::Change::Copy { bucket: src_bucket, key: src_key };
+    let copied = bucket.put_as(key, &req, Box::pin(stream), change).await?.ok_or_else(|| {
         S3Error::new(StatusCode::PRECONDITION_FAILED, "PreconditionFailed", "precondition failed")
     })?;
     Ok(xml(

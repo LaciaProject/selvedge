@@ -40,7 +40,7 @@ pub fn valid_bucket_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn iso(t: std::time::SystemTime) -> String {
+pub(super) fn iso(t: std::time::SystemTime) -> String {
     let ms = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or_default();
     // Seconds precision is enough for clients; reuse the store's formatting.
     let secs = (ms / 1000) as i64;
@@ -70,7 +70,7 @@ fn no_bucket() -> ApiError {
     ApiError::new(http::StatusCode::NOT_FOUND, 10006, "The specified bucket does not exist.")
 }
 
-async fn bucket_id(state: &State, account: &AccountId, name: &str) -> ApiResult<String> {
+pub(super) async fn bucket_id(state: &State, account: &AccountId, name: &str) -> ApiResult<String> {
     Ok(state.db.r2_bucket(account, name).await?.ok_or_else(no_bucket)?.0)
 }
 

@@ -171,6 +171,47 @@ done
 check "queue consumer receives, acks and retries" \
   'e2e-jobs:{"n":1}#1;e2e-jobs:{"n":2}#1;e2e-jobs:"three"#1;e2e-jobs:{"flaky":true}#2;' "$q_out"
 
+# R2 event notifications: object changes under a prefix go to a queue, which
+# the queue app consumes alongside its own.
+wrangler queues create e2e-events > /dev/null 2>&1
+wrangler r2 bucket notification create e2e-files --event-type object-create object-delete \
+  --queue e2e-events --prefix notif/ > "$WORK/notif.log" 2>&1 || cat "$WORK/notif.log"
+check "wrangler lists the notification rule" "1" \
+  "$(wrangler r2 bucket notification list e2e-files 2>&1 | grep -c 'notif/')"
+sed -i 's/"consumers": \[/"consumers": [{ "queue": "e2e-events", "max_batch_size": 10 }, /' "$QAPP/wrangler.jsonc"
+(cd "$QAPP" && "$E2E/node_modules/.bin/wrangler" deploy > "$WORK/queue.log" 2>&1) || { cat "$WORK/queue.log"; exit 1; }
+settle
+echo -n "hello" > "$WORK/notif.txt"
+wrangler r2 object put e2e-files/notif/a.txt --file "$WORK/notif.txt" --remote > /dev/null 2>&1
+wrangler r2 object put e2e-files/elsewhere.txt --file "$WORK/notif.txt" --remote > /dev/null 2>&1
+(cd "$E2E" && node -e '
+const { S3Client, CopyObjectCommand } = require("@aws-sdk/client-s3");
+const [endpoint, accessKeyId, secretAccessKey] = process.argv.slice(1);
+new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } })
+  .send(new CopyObjectCommand({ Bucket: "e2e-files", Key: "notif/copy.txt", CopySource: "e2e-files/seed.txt" }));' \
+  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET")
+wrangler r2 object delete e2e-files/notif/a.txt --remote > /dev/null 2>&1
+events() { # the e2e-events messages the consumer logged, one summary per line, sorted
+  curl -s -H "Host: $QHOST" "http://127.0.0.1:$GATEWAY_PORT/" | python3 -c '
+import sys, json
+for entry in sys.stdin.read().split(";"):
+    if not entry.startswith("e2e-events:"): continue
+    m = json.loads(entry[len("e2e-events:"):].rsplit("#", 1)[0])
+    o = m["object"]
+    src = m.get("copySource")
+    print(m["action"], m["bucket"], o["key"], o.get("size", "-"), "etag" if o.get("eTag") else "-",
+          src["object"] if src else "-", "account" if m["account"] == sys.argv[1] else "?", "time" if m["eventTime"].endswith("Z") else "?")
+' "$ACCOUNT" | sort
+}
+for _ in $(seq 1 30); do [ "$(events | wc -l)" -ge 3 ] && break; sleep 1; done
+check "R2 notifications reach the queue, for matching keys only" \
+  "CopyObject e2e-files notif/copy.txt 13 etag seed.txt account time|DeleteObject e2e-files notif/a.txt - - - account time|PutObject e2e-files notif/a.txt 5 etag - account time" \
+  "$(events | paste -sd '|')"
+wrangler r2 bucket notification delete e2e-files --queue e2e-events > /dev/null 2>&1
+wrangler r2 object put e2e-files/notif/b.txt --file "$WORK/notif.txt" --remote > /dev/null 2>&1
+sleep 4
+check "a deleted notification rule sends nothing" "3" "$(events | wc -l)"
+
 # Cron Triggers: deployed by wrangler, fired on the next minute boundary.
 CRON="$WORK/cron-app"
 mkdir -p "$CRON" && cp "$E2E/fixtures/cron-app/index.js" "$CRON/"

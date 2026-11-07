@@ -262,7 +262,30 @@ pub(super) async fn create_version(
 
     let mut bindings = Vec::new();
     let mut secrets = Vec::new();
+    // The deployed version's bindings, for `inherit` (loaded on first use).
+    let mut deployed: Option<Vec<Binding>> = None;
     for raw in &meta.bindings {
+        // `{"type": "inherit", "name"}` keeps the deployed version's binding of
+        // that name; wrangler sends it for resources it finds already bound.
+        if raw.get("type").and_then(serde_json::Value::as_str) == Some("inherit") {
+            let name = raw
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ApiError::bad_request("an `inherit` binding needs `name`"))?;
+            if deployed.is_none() {
+                deployed = Some(state.db.current_bindings(&id, script).await?.unwrap_or_default());
+            }
+            let b = deployed.iter().flatten().find(|b| b.name() == name).cloned().ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "binding `{name}` cannot be inherited: the deployed version has no binding of that name"
+                ))
+            })?;
+            if bindings.iter().any(|x: &Binding| x.name() == name) {
+                return Err(ApiError::bad_request(format!("duplicate binding `{name}`")));
+            }
+            bindings.push(b);
+            continue;
+        }
         let mut b = Binding::parse(raw).map_err(ApiError::bad_request)?;
         if bindings.iter().any(|x: &Binding| x.name() == b.name()) {
             return Err(ApiError::bad_request(format!("duplicate binding `{}`", b.name())));

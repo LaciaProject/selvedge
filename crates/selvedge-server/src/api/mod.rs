@@ -7,6 +7,7 @@ mod d1;
 mod domains;
 mod internal;
 mod kv;
+mod notifications;
 mod queues;
 mod r2;
 
@@ -60,6 +61,7 @@ pub fn router(state: State) -> Router {
         .merge(domains::routes())
         .merge(versions::routes())
         .merge(r2::routes())
+        .merge(notifications::routes())
         .merge(d1::routes())
         .merge(queues::routes())
         .merge(internal::routes())

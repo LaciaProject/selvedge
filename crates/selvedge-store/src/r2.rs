@@ -213,11 +213,14 @@ impl Db {
     /// Stores `object` if `allowed(current)` holds, atomically. Blobs that end up
     /// unreferenced (the old object's, or the new one's on a failed condition)
     /// are queued for deletion.
+    /// Stores an object, if `allowed` holds for the current one, and in the
+    /// same transaction enqueues the event notifications `event` triggers.
     pub async fn r2_put(
         &self,
         bucket: &str,
         object: &R2Object,
         allowed: impl FnOnce(Option<&R2Object>) -> bool,
+        event: crate::r2notify::ObjectEvent<'_>,
     ) -> Result<PutOutcome> {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
@@ -247,6 +250,8 @@ impl Db {
         if let Some(old) = &current {
             garbage(&*tx, &old.parts).await?;
         }
+        crate::r2notify::notify_in(&*tx, bucket, &object.key, Some((object.size, &object.etag)), event)
+            .await?;
         tx.commit().await?;
         Ok(PutOutcome::Stored)
     }
@@ -265,7 +270,10 @@ impl Db {
         for r in rows {
             let parts: Vec<R2Part> = serde_json::from_value(r.get(0))?;
             garbage(&*tx, &parts).await?;
-            deleted.push(r.get(1));
+            let key: String = r.get(1);
+            let event = crate::r2notify::ObjectEvent { action: "DeleteObject", copy_source: None };
+            crate::r2notify::notify_in(&*tx, bucket, &key, None, event).await?;
+            deleted.push(key);
         }
         tx.commit().await?;
         Ok(deleted)
@@ -414,6 +422,9 @@ impl Db {
         let unused: Vec<R2Part> = unused.iter().map(|r| R2Part { path: r.get(0), size: r.get(1) }).collect();
         garbage(&*tx, &unused).await?;
         tx.execute("DELETE FROM r2_uploads WHERE id = $1", &[&upload]).await?;
+        let event = crate::r2notify::ObjectEvent { action: "CompleteMultipartUpload", copy_source: None };
+        crate::r2notify::notify_in(&*tx, bucket, &object.key, Some((object.size, &object.etag)), event)
+            .await?;
         tx.commit().await?;
         Ok(true)
     }

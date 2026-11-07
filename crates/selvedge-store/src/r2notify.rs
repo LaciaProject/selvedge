@@ -34,12 +34,49 @@ pub struct QueueRules {
     pub rules: Vec<Rule>,
 }
 
-/// What an object change needs to find its rules and describe itself.
-#[derive(Debug, Clone)]
-pub struct Targets {
-    pub account_id: String,
-    pub bucket_name: String,
-    pub queues: Vec<QueueRules>,
+/// An object change, as event notifications describe it.
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectEvent<'a> {
+    /// `PutObject`, `CopyObject`, `CompleteMultipartUpload` or `DeleteObject`.
+    pub action: &'a str,
+    /// For copies: the source bucket (by name) and key.
+    pub copy_source: Option<(&'a str, &'a str)>,
+}
+
+/// Enqueues the notifications an object change triggers, in the change's own
+/// transaction: a message to each queue with a matching rule. `object` is
+/// `(size, etag)` of the new object, `None` for a deletion.
+pub(crate) async fn notify_in<C: tokio_postgres::GenericClient>(
+    tx: &C,
+    bucket: &str,
+    key: &str,
+    object: Option<(i64, &str)>,
+    event: ObjectEvent<'_>,
+) -> Result<()> {
+    let (size, etag) = object.map_or((None, None), |(s, e)| (Some(s), Some(e)));
+    let (src_bucket, src_key) = event.copy_source.map_or((None, None), |(b, k)| (Some(b), Some(k)));
+    tx.execute(
+        "INSERT INTO queue_messages (id, queue_id, body, content_type)
+         SELECT replace(gen_random_uuid()::text, '-', ''), q.queue_id,
+                convert_to((jsonb_build_object(
+                    'account', b.account_id,
+                    'action', $2::text,
+                    'bucket', b.name,
+                    'object', CASE WHEN $4::bigint IS NULL THEN jsonb_build_object('key', $3::text)
+                                   ELSE jsonb_build_object('key', $3::text, 'size', $4::bigint, 'eTag', $5::text) END,
+                    'eventTime', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))
+                  || CASE WHEN $6::text IS NULL THEN '{}'::jsonb
+                          ELSE jsonb_build_object('copySource', jsonb_build_object('bucket', $6::text, 'object', $7::text)) END
+                )::text, 'UTF8'),
+                'json'
+         FROM (SELECT DISTINCT r.queue_id FROM r2_notification_rules r
+               WHERE r.bucket_id = $1 AND $2::text = ANY(r.actions)
+                 AND starts_with($3::text, r.prefix) AND right($3::text, length(r.suffix)) = r.suffix) q
+         JOIN r2_buckets b ON b.id = $1",
+        &[&bucket, &event.action, &key, &size, &etag, &src_bucket, &src_key],
+    )
+    .await?;
+    Ok(())
 }
 
 fn rule(r: &tokio_postgres::Row) -> Rule {
@@ -125,18 +162,6 @@ impl Db {
                 &[&bucket, &queue, &rule_ids],
             )
             .await?)
-    }
-
-    /// Everything an object change in the bucket needs to notify; `None`
-    /// when the bucket has no rules.
-    pub async fn r2_notification_targets(&self, bucket: &str) -> Result<Option<Targets>> {
-        let client = self.client().await?;
-        let rows = client.query(&format!("{RULE_QUERY} ORDER BY q.id, r.id"), &[&bucket]).await?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let b = client.query_one("SELECT account_id, name FROM r2_buckets WHERE id = $1", &[&bucket]).await?;
-        Ok(Some(Targets { account_id: b.get(0), bucket_name: b.get(1), queues: group(&rows) }))
     }
 }
 

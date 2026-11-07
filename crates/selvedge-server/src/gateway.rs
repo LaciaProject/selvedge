@@ -60,7 +60,11 @@ struct Shared {
 pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
     let cfg = Arc::new(cfg);
     let shared = Arc::new(Shared::default());
-    let http = crate::tls::reqwest(reqwest::Client::builder()).timeout(Duration::from_secs(5)).build()?;
+    use crate::tls::Role;
+    let http = crate::tls::reqwest(reqwest::Client::builder(), &[Role::Api])
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let probe = crate::tls::reqwest(reqwest::Client::builder(), &[Role::Runner]).build()?;
 
     // Load routes once before serving, but do not fail if the API is down:
     // a restarted gateway should come up and serve once the API is back.
@@ -68,7 +72,7 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
     if let Err(e) = refresh_routes(&http, &cfg, &shared, &mut etag).await {
         tracing::warn!(error = %format!("{e:#}"), "initial route load failed");
     }
-    check_runners(&http, &cfg, &shared).await;
+    check_runners(&probe, &cfg, &shared).await;
     let mut tasks = vec![
         tokio::spawn({
             let (http, cfg, shared) = (http.clone(), cfg.clone(), shared.clone());
@@ -82,11 +86,11 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
             }
         }),
         tokio::spawn({
-            let (http, cfg, shared) = (http.clone(), cfg.clone(), shared.clone());
+            let (probe, cfg, shared) = (probe.clone(), cfg.clone(), shared.clone());
             async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    check_runners(&http, &cfg, &shared).await;
+                    check_runners(&probe, &cfg, &shared).await;
                 }
             }
         }),
@@ -101,15 +105,24 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
                 let Ok((stream, peer)) = listener.accept().await else { continue };
                 let (cfg, shared) = (cfg.clone(), shared.clone());
                 tokio::spawn(async move {
-                    let stream =
-                        match tokio::time::timeout(Duration::from_secs(10), crate::tls::accept(stream)).await
-                        {
-                            Ok(Ok(s)) => s,
-                            _ => return,
-                        };
-                    let handler = Arc::new(move |req| {
+                    let stream = match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        crate::tls::accept(stream, crate::tls::GATEWAY_INTERNAL_CLIENTS),
+                    )
+                    .await
+                    {
+                        Ok(Ok(s)) => s,
+                        _ => return,
+                    };
+                    let health_only = stream.health_only();
+                    let handler = Arc::new(move |req: Request<Incoming>| {
                         let (cfg, shared) = (cfg.clone(), shared.clone());
-                        async move { handle(&cfg, &shared, peer, req, true).await }
+                        async move {
+                            if health_only && !crate::tls::health_path(req.uri().path()) {
+                                return proxy::full(StatusCode::FORBIDDEN, "forbidden");
+                            }
+                            handle(&cfg, &shared, peer, req, true).await
+                        }
                     });
                     proxy::serve_connection(stream, handler);
                 });
@@ -338,7 +351,7 @@ async fn handle(
     ranked[..set].rotate_left(first);
 
     for addr in &ranked {
-        match proxy::connect(Target::Tcp(addr)).await {
+        match proxy::connect(Target::Tcp(addr, crate::tls::Role::Runner)).await {
             Ok(sender) => {
                 return match proxy::send(sender, req).await {
                     Ok(r) => r,

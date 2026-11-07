@@ -42,11 +42,24 @@ public addresses by workerd and by a NetworkPolicy; no database or platform cred
 processes; binding calls stamped with the account identity by the agent, outside tenant reach.
 
 Components talk to each other over mTLS (Helm `tls.enabled`, on by default; `SELVEDGE_TLS_CERT`,
-`SELVEDGE_TLS_KEY`, `SELVEDGE_TLS_CA`). The chart generates a platform CA and a certificate for
-`selvedge.internal`, which every component presents and checks, along with the shared internal
-token. The agent and data listeners require the certificate. The API and the gateway serve their
-internal endpoints and routing only on separate mTLS listeners, and their public ports refuse
-them. Every component holds the same certificate, so the CA identifies the platform, not the role.
+`SELVEDGE_TLS_KEY`, `SELVEDGE_TLS_CA`). The chart generates a platform CA and one certificate per
+role, for `api.selvedge.internal`, `data.selvedge.internal`, `gateway.selvedge.internal` and
+`runner.selvedge.internal`; the shared internal token is checked as well. Every listener accepts
+only the roles that call it:
+
+| Listener | Accepts |
+| --- | --- |
+| agent (runner) | gateway |
+| data | runner |
+| API internal | runner, gateway |
+| gateway internal | API, data |
+
+Clients check the server's role in the same way. The API and the gateway serve their internal
+endpoints and routing only on these mTLS listeners, and their public ports refuse them. A listener
+also accepts its own role, for health probes run in the pod, but such a client reaches `/healthz`
+only. So a runner's certificate, the one that sits next to tenant code, reaches no other runner and
+cannot route requests into account processes. It still reaches the API's internal endpoints, which
+serve every account's configuration, because any account may be placed on any runner.
 
 Each account process has CPU, memory and process limits (`--account-memory-mb`, `--account-cpus`,
 `--account-pids`; Helm `runner.accountLimits`).

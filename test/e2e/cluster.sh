@@ -21,20 +21,26 @@ export SELVEDGE_API_LISTEN=127.0.0.1:$((P + 87)) SELVEDGE_API_URL=$PUBLIC_API
 export SELVEDGE_DATA_LISTEN=127.0.0.1:$((P + 88)) SELVEDGE_DATA_ADDR=127.0.0.1:$((P + 88))
 export SELVEDGE_GATEWAY_URL=http://127.0.0.1:$((P + 80))
 if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
-  # A platform CA and one component certificate for selvedge.internal.
+  # A platform CA and one certificate per role, <role>.selvedge.internal.
   T="$WORK/tls"; mkdir -p "$T"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/ca.key" -out "$T/ca.pem" \
     -days 2 -subj /CN=selvedge-e2e-ca 2>/dev/null
-  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/c.key" -out "$T/c.csr" -subj /CN=selvedge 2>/dev/null
-  printf 'subjectAltName=DNS:selvedge.internal\nextendedKeyUsage=serverAuth,clientAuth\n' > "$T/ext"
-  openssl x509 -req -in "$T/c.csr" -CA "$T/ca.pem" -CAkey "$T/ca.key" -CAcreateserial -out "$T/c.pem" -days 2 \
-    -extfile "$T/ext" 2>/dev/null
+  for role in api data gateway runner; do
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/$role.key" -out "$T/$role.csr" \
+      -subj "/CN=$role" 2>/dev/null
+    printf 'subjectAltName=DNS:%s.selvedge.internal\nextendedKeyUsage=serverAuth,clientAuth\n' "$role" > "$T/ext"
+    openssl x509 -req -in "$T/$role.csr" -CA "$T/ca.pem" -CAkey "$T/ca.key" -CAcreateserial -out "$T/$role.pem" \
+      -days 2 -extfile "$T/ext" 2>/dev/null
+  done
   # A certificate from another CA, which the platform must refuse.
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$T/rogue.key" -out "$T/rogue.pem" \
-    -days 2 -subj /CN=rogue -addext subjectAltName=DNS:selvedge.internal 2>/dev/null
-  export SELVEDGE_TLS_CERT="$T/c.pem" SELVEDGE_TLS_KEY="$T/c.key" SELVEDGE_TLS_CA="$T/ca.pem"
+    -days 2 -subj /CN=rogue -addext subjectAltName=DNS:gateway.selvedge.internal 2>/dev/null
+  export SELVEDGE_TLS_CA="$T/ca.pem"
+  role() { echo "SELVEDGE_TLS_CERT=$T/$1.pem SELVEDGE_TLS_KEY=$T/$1.key"; }
   export SELVEDGE_API_INTERNAL_LISTEN=127.0.0.1:$((P + 86)) SELVEDGE_API_URL=https://127.0.0.1:$((P + 86))
   export SELVEDGE_GATEWAY_INTERNAL_LISTEN=127.0.0.1:$((P + 79)) SELVEDGE_GATEWAY_URL=https://127.0.0.1:$((P + 79))
+else
+  role() { :; }
 fi
 BUCKET=${DO_S3_BUCKET:-selvedge-do}
 export SELVEDGE_DO_BUCKET="s3://$BUCKET/cluster-$$"
@@ -50,7 +56,7 @@ start() { # name, args...
 }
 agent() { # name, port
   SELVEDGE_AGENT_LISTEN=127.0.0.1:$2 SELVEDGE_STATE_DIR="$WORK/$1" SELVEDGE_RUN_DIR="$RUN/$1" \
-    start "$1" "$BIN" agent
+    start "$1" env $(role runner) "$BIN" agent
 }
 cleanup() {
   for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
@@ -62,13 +68,13 @@ cleanup() {
 trap 'FAILED=1' ERR
 trap cleanup EXIT
 
-start api "$BIN" api
-start data "$BIN" data
+start api env $(role api) "$BIN" api
+start data env $(role data) "$BIN" data
 for _ in $(seq 1 50); do curl -sf "$PUBLIC_API/healthz" >/dev/null && break; sleep 0.2; done
 agent a1 $((P + 91))
 agent a2 $((P + 92))
 SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$((P + 80)) SELVEDGE_RUNNERS=127.0.0.1:$((P + 91)),127.0.0.1:$((P + 92)) \
-  start gw "$BIN" gateway
+  start gw env $(role gateway) "$BIN" gateway
 sleep 3
 
 API=$PUBLIC_API/client/v4
@@ -84,9 +90,25 @@ if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
   check "an agent refuses a client without a certificate" "000" "$(code -k "https://$AGENT/healthz")"
   check "an agent refuses a certificate from another CA" "000" \
     "$(code -k --cert "$T/rogue.pem" --key "$T/rogue.key" "https://$AGENT/healthz")"
-  check "an agent accepts a platform certificate" "200" \
-    "$(code --cacert "$T/ca.pem" --cert "$T/c.pem" --key "$T/c.key" --resolve "selvedge.internal:$((P + 91)):127.0.0.1" \
-      "https://selvedge.internal:$((P + 91))/healthz")"
+  as() { # client role, server role, port, path: HTTPS with the client role's certificate
+    code --cacert "$T/ca.pem" --cert "$T/$1.pem" --key "$T/$1.key" -H "Authorization: Bearer $SELVEDGE_INTERNAL_TOKEN" \
+      --resolve "$2.selvedge.internal:$3:127.0.0.1" "https://$2.selvedge.internal:$3$4"
+  }
+  check "an agent accepts the gateway's certificate" "200" "$(as gateway runner $((P + 91)) /healthz)"
+  check "an agent refuses the data service's certificate" "000" "$(as data runner $((P + 91)) /healthz)"
+  check "an agent lets its own role reach /healthz (probes)" "200" "$(as runner runner $((P + 91)) /healthz)"
+  check "an agent lets its own role reach nothing else" "403" "$(as runner runner $((P + 92)) /anything)"
+  check "a runner cannot reach another runner's accounts through /healthz" "ok" \
+    "$(curl -s --max-time 5 --cacert "$T/ca.pem" --cert "$T/runner.pem" --key "$T/runner.key" \
+      -H "x-selvedge-account: 0123456789abcdef0123456789abcdef" -H "x-selvedge-script: counter" \
+      -H "x-selvedge-token: $SELVEDGE_INTERNAL_TOKEN" --resolve "runner.selvedge.internal:$((P + 92)):127.0.0.1" \
+      "https://runner.selvedge.internal:$((P + 92))/healthz")"
+  check "the gateway's internal port refuses a runner's certificate" "000" "$(as runner gateway $((P + 79)) /__selvedge/healthz)"
+  check "the gateway's internal port accepts the data service's certificate" "200" "$(as data gateway $((P + 79)) /__selvedge/healthz)"
+  check "the data service refuses the gateway's certificate" "000" "$(as gateway data $((P + 88)) /healthz)"
+  check "the data service accepts a runner's certificate" "200" "$(as runner data $((P + 88)) /healthz)"
+  check "the API's internal port refuses the data service's certificate" "000" "$(as data api $((P + 86)) /healthz)"
+  check "the API's internal port accepts a runner's certificate" "200" "$(as runner api $((P + 86)) /healthz)"
   check "the public API port does not serve internal endpoints" "404" \
     "$(code -H "Authorization: Bearer $SELVEDGE_INTERNAL_TOKEN" "$PUBLIC_API/internal/v1/routes")"
 fi

@@ -118,12 +118,12 @@ impl Manager {
             s3_proxy,
             cgroup_dir,
             cfg,
-            http: crate::tls::reqwest(reqwest::Client::builder())
+            http: crate::tls::reqwest(reqwest::Client::builder(), &[crate::tls::Role::Api])
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("HTTP client"),
-            control: crate::tls::reqwest(reqwest::Client::builder())
+            control: crate::tls::reqwest(reqwest::Client::builder(), &[crate::tls::Role::Api])
                 .connect_timeout(Duration::from_secs(1))
                 .timeout(Duration::from_secs(3))
                 .build()

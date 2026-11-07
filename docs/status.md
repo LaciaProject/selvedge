@@ -70,7 +70,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 **安全与隔离**
 
-- **组件间 mTLS**：Helm 默认开启，自动生成 CA 和证书。内部接口在单独的端口上监听，公共端口拒绝内部请求，NetworkPolicy 限制可访问的端口。
+- **组件间 mTLS**：Helm 默认开启，自动生成 CA，并为 API、data、gateway、runner 各签发一张证书。每个内部端口只接受调用它的角色，所以 runner 的证书连不上其他 runner，也不能把请求路由进账号进程。内部接口在单独的端口上监听，公共端口拒绝内部请求，NetworkPolicy 限制可访问的端口。
 - **按账号隔离进程**：每个账号一个 workerd 进程，用独立的 Linux 用户运行，账号之间互相访问不到对方的文件和 socket。
 - **不给 workerd 存储凭证**：workerd 只能通过 agent 的 S3 代理访问 DO 存储，用的是按账号派生的密钥，只能访问自己账号的那部分数据。
 - **资源限制**：按账号限制内存（默认 1024 MB）、CPU 和进程数。
@@ -88,7 +88,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | CPU 和内存限制 | 限制针对整个账号进程，不针对单个请求。一个请求失控会让进程重启，同账号其他正在处理的请求也会失败。cgroup 不可写时（K8s 里常见）由 agent 自己监控：内存超限约 2 秒内重启进程，CPU 超限只降低优先级，不会被硬性封顶 |
 | `request.cf` | 只有 `httpProtocol`，没有地理位置和网络信息 |
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |
-| mTLS | 所有组件共用一张证书，能证明请求来自平台内部，但分不出是哪个组件发的。`selvedge all` 单进程模式不支持 TLS |
+| mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |
 | R2 | 没有公开桶、桶的自定义域名和事件通知。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
 | D1 | 没有读副本、Time Travel 和 `d1 export`，不支持导入大文件 |
@@ -102,4 +102,4 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 ## 下一步
 
 - 打 v0.1 版本标签，发布镜像和 Helm chart。
-- 按局限表的优先级继续：按组件签发证书、缩短 DO 故障转移时间、R2 公开桶与事件通知。
+- 按局限表的优先级继续：缩短 DO 故障转移时间、R2 公开桶与事件通知。

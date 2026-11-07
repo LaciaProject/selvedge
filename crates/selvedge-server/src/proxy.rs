@@ -69,8 +69,9 @@ pub fn strip_internal_except(headers: &mut HeaderMap, keep: &[&str]) {
 }
 
 pub enum Target<'a> {
-    /// `host:port`, resolved on each connect.
-    Tcp(&'a str),
+    /// `host:port`, resolved on each connect, and the role its server must
+    /// prove with mTLS.
+    Tcp(&'a str, crate::tls::Role),
     Unix(&'a Path),
 }
 
@@ -80,14 +81,14 @@ pub type Sender = hyper::client::conn::http1::SendRequest<Incoming>;
 /// try another target with the same request.
 pub async fn connect(target: Target<'_>) -> Result<Sender, String> {
     match target {
-        Target::Tcp(addr) => {
+        Target::Tcp(addr, server) => {
             // A vanished pod can drop SYNs silently; fail over instead of hanging.
             let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
                 .await
                 .map_err(|_| format!("connect {addr}: timed out"))?
                 .map_err(|e| format!("connect {addr}: {e}"))?;
             let _ = stream.set_nodelay(true);
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, crate::tls::connect(stream))
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, crate::tls::connect(stream, server))
                 .await
                 .map_err(|_| format!("TLS to {addr}: timed out"))?
                 .map_err(|e| format!("TLS to {addr}: {e}"))?;
@@ -136,10 +137,14 @@ pub async fn send(mut sender: Sender, mut req: Request<Incoming>) -> Result<Resp
 /// Connects to a `host:port` Service, retrying failed connects. Each new
 /// connection may reach a different backend, so this rides out a dead pod
 /// that has not yet left the Service's endpoints.
-pub async fn connect_retrying(addr: &str, attempts: usize) -> Result<Sender, String> {
+pub async fn connect_retrying(
+    addr: &str,
+    server: crate::tls::Role,
+    attempts: usize,
+) -> Result<Sender, String> {
     let mut last = String::new();
     for attempt in 0..attempts.max(1) {
-        match connect(Target::Tcp(addr)).await {
+        match connect(Target::Tcp(addr, server)).await {
             Ok(s) => return Ok(s),
             Err(e) => {
                 tracing::debug!(%addr, attempt, error = %e, "connect failed; retrying");

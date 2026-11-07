@@ -294,10 +294,13 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         internal_token: args.internal.internal_token.clone(),
         workers_dev_zone: args.workers_dev_zone.clone(),
         gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
-        http: selvedge_server::tls::reqwest(reqwest::Client::builder())
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(60))
-            .build()?,
+        http: selvedge_server::tls::reqwest(
+            reqwest::Client::builder(),
+            &[selvedge_server::tls::Role::Gateway],
+        )
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(60))
+        .build()?,
     }))
 }
 
@@ -314,9 +317,10 @@ async fn serve_axum(
 }
 
 /// Serves an internal-only listener: with mTLS, every client needs a
-/// platform certificate.
+/// platform certificate of one of `clients`.
 async fn serve_axum_internal(
     listen: SocketAddr,
+    clients: &'static [selvedge_server::tls::Role],
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
@@ -326,7 +330,12 @@ async fn serve_axum_internal(
     let listener =
         tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
     tracing::info!(addr = %listen, "listening (mTLS)");
-    axum::serve(selvedge_server::tls::Listener::new(listener)?, app).with_graceful_shutdown(shutdown).await?;
+    let app = app
+        .layer(axum::middleware::from_fn(selvedge_server::tls::health_gate))
+        .into_make_service_with_connect_info::<selvedge_server::tls::Peer>();
+    axum::serve(selvedge_server::tls::Listener::new(listener, clients)?, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }
 
@@ -408,7 +417,14 @@ async fn main() -> Result<()> {
                     .context("mTLS needs --internal-listen for the API's internal endpoints")?;
                 let internal = router.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_axum_internal(addr, internal, shutdown_signal()).await {
+                    if let Err(e) = serve_axum_internal(
+                        addr,
+                        selvedge_server::tls::API_INTERNAL_CLIENTS,
+                        internal,
+                        shutdown_signal(),
+                    )
+                    .await
+                    {
                         tracing::error!(error = %format!("{e:#}"), "API internal listener failed");
                     }
                 });
@@ -460,7 +476,13 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            serve_axum_internal(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
+            serve_axum_internal(
+                args.listen,
+                selvedge_server::tls::DATA_CLIENTS,
+                selvedge_server::data::router(state),
+                shutdown_signal(),
+            )
+            .await?;
         }
         Command::Agent(args) => {
             selvedge_server::agent::run(agent_config(&args)?, shutdown_signal()).await?;

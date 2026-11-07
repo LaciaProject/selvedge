@@ -71,7 +71,7 @@ spec:
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: secret-access-key } }
           ports: [{ name: http, containerPort: 8789 }]
-          {{- include "selvedge.probes" (dict "root" . "port" 8789 "failureThreshold" 1) | nindent 10 }}
+          {{- include "selvedge.probes" (dict "root" . "role" "runner" "port" 8789 "failureThreshold" 1) | nindent 10 }}
           resources: {{- toYaml .Values.runner.resources | nindent 12 }}
           {{- if .Values.runner.accountUsers.enabled }}
           # The agent runs as root with only what it needs to start each
@@ -91,7 +91,7 @@ spec:
         - { name: state, emptyDir: {} }
         - { name: run, emptyDir: { medium: Memory, sizeLimit: 16Mi } }
         - { name: tmp, emptyDir: {} }
-        {{- include "selvedge.tlsVolume" . | nindent 8 }}
+        {{- include "selvedge.tlsVolume" (dict "root" . "role" "runner") | nindent 8 }}
 ---
 # Gateways discover ready runners through this headless Service.
 apiVersion: v1

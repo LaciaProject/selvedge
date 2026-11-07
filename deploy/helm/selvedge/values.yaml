@@ -61,8 +61,9 @@ objectStore:
   nodeSelector: {}
   tolerations: []
 
-# mTLS between components: the chart generates a platform CA and a
-# certificate (kept across upgrades); every internal hop requires it.
+# mTLS between components: the chart generates a platform CA and one
+# certificate per role (kept across upgrades); every internal hop requires
+# one, and each listener accepts only the roles that call it.
 tls:
   enabled: true
 

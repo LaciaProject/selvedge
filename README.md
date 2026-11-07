@@ -64,7 +64,8 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | workers.dev-style hostnames, custom domains and zone routes (`routes` in wrangler config) | |
 
 Uploads that use an unsupported binding are rejected rather than deployed without it. See
-[docs/compatibility.md](docs/compatibility.md) for details and known differences.
+[docs/compatibility.md](docs/compatibility.md) for details and known differences, and
+[docs/status.md](docs/status.md) for the project's progress and limitations.
 
 ## Quick start
 

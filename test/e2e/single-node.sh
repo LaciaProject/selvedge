@@ -489,12 +489,16 @@ check "wrangler lists the lifecycle rules" "2" \
 for _ in $(seq 1 20); do [ "$(r2code old/a.txt)" = 404 ] && break; sleep 0.5; done
 check "lifecycle deletes objects past their date" "404" "$(r2code old/a.txt)"
 check "...and keeps the others" "200" "$(r2code young/b.txt)"
-check "lifecycle aborts stale multipart uploads" "NoSuchUpload" "$(cd "$E2E" && node -e '
+upload_state() { (cd "$E2E" && node -e '
 const { S3Client, ListPartsCommand } = require("@aws-sdk/client-s3");
 const [endpoint, accessKeyId, secretAccessKey, UploadId] = process.argv.slice(1);
 new S3Client({ endpoint, region: "auto", forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } })
   .send(new ListPartsCommand({ Bucket: "e2e-files", Key: "tmp/big.bin", UploadId })).then(() => console.log("still there"), (e) => console.log(e.name));' \
-  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET" "$UPLOAD")"
+  "http://127.0.0.1:$S3_PORT" "$S3_KEY" "$S3_SECRET" "$UPLOAD"); }
+# The rules arrive in two writes, so the pass that expired old/a.txt may have
+# run before the abort rule existed: wait for a pass that has it.
+for _ in $(seq 1 20); do [ "$(upload_state)" = NoSuchUpload ] && break; sleep 0.5; done
+check "lifecycle aborts stale multipart uploads" "NoSuchUpload" "$(upload_state)"
 wrangler r2 bucket lifecycle remove e2e-files --name expire-old > /dev/null 2>&1
 check "wrangler removes a lifecycle rule" "Default Multipart Abort Rule,abort-tmp" \
   "$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/r2/buckets/e2e-files/lifecycle" | python3 -c 'import sys, json; print(",".join(r["id"] for r in json.load(sys.stdin)["result"]["rules"]))')"

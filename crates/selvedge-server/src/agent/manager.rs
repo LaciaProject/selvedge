@@ -32,6 +32,8 @@ const DRAIN_GRACE: Duration = Duration::from_secs(30);
 pub struct Live {
     pub generation: i64,
     pub sockets: HashMap<String, PathBuf>,
+    /// Gradual deployments: script to (canary share 0-100, canary version id).
+    pub splits: HashMap<String, (f64, String)>,
     process: Mutex<Option<WorkerdProcess>>,
     render_dir: PathBuf,
     socket_dir: PathBuf,
@@ -89,6 +91,8 @@ pub struct Manager {
     uids: Option<super::uids::Uids>,
     /// The agent's S3 proxy for Durable Object storage.
     s3_proxy: Option<std::net::SocketAddr>,
+    /// Where account cgroups go, when the cgroup tree is writable.
+    cgroup_dir: Option<PathBuf>,
 }
 
 pub enum Lookup {
@@ -102,6 +106,7 @@ impl Manager {
         cfg: Arc<AgentConfig>,
         max_date: String,
         s3_proxy: Option<std::net::SocketAddr>,
+        cgroup_dir: Option<PathBuf>,
     ) -> Result<Arc<Self>> {
         let uids = cfg
             .account_uids
@@ -111,13 +116,14 @@ impl Manager {
         Ok(Arc::new(Self {
             uids,
             s3_proxy,
+            cgroup_dir,
             cfg,
-            http: reqwest::Client::builder()
+            http: crate::tls::reqwest(reqwest::Client::builder())
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("HTTP client"),
-            control: reqwest::Client::builder()
+            control: crate::tls::reqwest(reqwest::Client::builder())
                 .connect_timeout(Duration::from_secs(1))
                 .timeout(Duration::from_secs(3))
                 .build()
@@ -344,10 +350,16 @@ impl Manager {
             uid,
         )
         .await?;
+        if let (Some(dir), Some(limits), Some(pid)) = (&self.cgroup_dir, &self.cfg.limits, process.pid()) {
+            if let Err(e) = super::limits::place(dir, account, pid, limits) {
+                tracing::warn!(%account, error = %e, "placing the account process in its cgroup failed");
+            }
+        }
         tracing::info!(%account, generation = bundle.generation, "account process ready");
         let live = Arc::new(Live {
             generation: bundle.generation,
             sockets: rendered.sockets.iter().cloned().collect(),
+            splits: rendered.splits.iter().map(|(s, p, v)| (s.clone(), (*p, v.clone()))).collect(),
             process: Mutex::new(Some(process)),
             render_dir: opts.dir.clone(),
             socket_dir: opts.socket_dir.clone(),
@@ -441,6 +453,35 @@ impl Manager {
             write_atomic(&path, &bytes)?;
         }
         Ok(())
+    }
+
+    /// Every running account process: `(account, pid)`.
+    pub async fn live_pids(&self) -> Vec<(AccountId, u32)> {
+        let states: Vec<_> =
+            self.accounts.lock().expect("poisoned").iter().map(|(a, s)| (a.clone(), s.clone())).collect();
+        let mut out = Vec::new();
+        for (account, state) in states {
+            let live = state.slot.lock().await.live.clone();
+            if let Some(live) = live
+                && let Some(pid) = live.process.lock().await.as_ref().and_then(WorkerdProcess::pid)
+            {
+                out.push((account, pid));
+            }
+        }
+        out
+    }
+
+    /// Kills an account's process; the next request starts a new one.
+    pub async fn kill(&self, account: &AccountId) {
+        let state = self.accounts.lock().expect("poisoned").get(account).cloned();
+        if let Some(state) = state {
+            let live = state.slot.lock().await.live.clone();
+            if let Some(live) = live
+                && let Some(p) = live.process.lock().await.as_mut()
+            {
+                p.kill_now();
+            }
+        }
     }
 
     /// Stops processes unused for longer than the idle timeout.

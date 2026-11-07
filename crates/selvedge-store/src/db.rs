@@ -16,6 +16,9 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (8, include_str!("../migrations/0008_tails.sql")),
     (9, include_str!("../migrations/0009_workflows.sql")),
     (10, include_str!("../migrations/0010_token_ids.sql")),
+    (11, include_str!("../migrations/0011_asset_gc.sql")),
+    (12, include_str!("../migrations/0012_gradual_deployments.sql")),
+    (13, include_str!("../migrations/0013_zones.sql")),
 ];
 
 /// An arbitrary constant identifying Selvedge's migration lock.

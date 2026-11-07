@@ -193,7 +193,8 @@ Differences:
 
 - A service binding to a Worker that has code calls that code directly, which named entrypoints and
   RPC need. A service binding to a Worker with only assets reaches its assets.
-- Uploaded files are not deleted when no version uses them any more.
+- A file is deleted a day after the last version that uses it is deleted (versions are kept for
+  rollbacks, so deleting a script is what frees its files).
 - `assets.base_path` is ignored. Uploads use wrangler's bulk mode (several files per request).
 
 ## Workflows
@@ -250,7 +251,17 @@ against `/client/v4`. Set `CLOUDFLARE_API_BASE_URL` to Selvedge's API.
 
 - A deploy reaches the runners within about 2 seconds: agents follow a change feed every second and
   start the new version before retiring the old one.
-- Gradual deployments (two versions with percentages) are rejected.
+- Gradual deployments (`wrangler versions deploy a@90% b@10%`) split HTTP requests between two
+  versions by percentage. `Cloudflare-Workers-Version-Key` keeps a client on one version and
+  `Cloudflare-Workers-Version-Overrides` picks one, as on Cloudflare. Service bindings, Cron Triggers
+  and queue batches go to the version with the larger share. Workers that define Durable Objects or
+  have static assets cannot be split.
 - Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported.
 - Hostnames: `<script>.<account subdomain>.<zone>` for scripts with workers.dev enabled, and custom
-  domains (`/workers/domains`). Zone routes are not supported yet.
+  domains (`/workers/domains`), and zone routes.
+- Zone routes: an operator assigns a zone to an account with an admin token (`POST /zones` with
+  `{"name", "account": {"id"}}`), because Selvedge cannot check who owns a domain. The account's
+  `routes` (`example.com/api/*`, `*.example.com/*`) are then set by `wrangler deploy` or the zone
+  routes API. A host may start with `*` and a path may end with `*`, and the most specific pattern
+  wins. Custom domains and workers.dev hostnames take precedence over routes, as on Cloudflare. A
+  route without a script keeps its requests from Workers.

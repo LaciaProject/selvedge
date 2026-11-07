@@ -8,9 +8,14 @@ use selvedge_core::assets::UploadManifest;
 
 use crate::Db;
 
-/// Where an account's asset file lives in the blob store.
-pub fn asset_path(account: &AccountId, hash: &str) -> String {
+/// Where a file uploaded before asset paths were recorded lives.
+pub fn legacy_asset_path(account: &AccountId, hash: &str) -> String {
     format!("assets/{account}/{hash}")
+}
+
+/// A fresh blob path for one upload of an asset file.
+pub fn new_asset_path(account: &AccountId, hash: &str) -> String {
+    format!("assets/{account}/{hash}/{}", selvedge_core::HexId::random())
 }
 
 /// How long an upload session (and its completion token) stays valid.
@@ -31,6 +36,8 @@ pub struct AssetFile {
     pub hash: String,
     pub content_type: Option<String>,
     pub size: i64,
+    /// Its blob's path.
+    pub path: String,
 }
 
 impl Db {
@@ -109,19 +116,85 @@ impl Db {
         .transpose()
     }
 
-    /// Records uploaded files.
-    pub async fn put_asset_files(&self, account: &AccountId, files: &[AssetFile]) -> Result<()> {
+    /// Records uploaded files. Returns the paths of those that were already
+    /// recorded (a concurrent upload of the same hash won), whose new blobs
+    /// the caller should delete.
+    pub async fn put_asset_files(&self, account: &AccountId, files: &[AssetFile]) -> Result<Vec<String>> {
         let client = self.client().await?;
+        let mut duplicates = Vec::new();
         for f in files {
-            client
+            let n = client
                 .execute(
-                    "INSERT INTO asset_files (account_id, hash, content_type, size) VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (account_id, hash) DO UPDATE SET content_type = excluded.content_type",
-                    &[&account.as_str(), &f.hash, &f.content_type, &f.size],
+                    "INSERT INTO asset_files (account_id, hash, content_type, size, path) VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (account_id, hash) DO NOTHING",
+                    &[&account.as_str(), &f.hash, &f.content_type, &f.size, &f.path],
                 )
                 .await?;
+            if n == 0 {
+                duplicates.push(f.path.clone());
+            }
         }
+        Ok(duplicates)
+    }
+
+    /// Records the files a version manifest references, so they are kept.
+    pub async fn record_asset_manifest(
+        &self,
+        account: &AccountId,
+        manifest: &str,
+        hashes: &[String],
+    ) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO asset_manifest_entries (account_id, manifest, hash)
+                 SELECT $1, $2, h FROM unnest($3::text[]) AS h
+                 ON CONFLICT (account_id, manifest, hash) DO UPDATE SET created_at = now()",
+                &[&account.as_str(), &manifest, &hashes],
+            )
+            .await?;
         Ok(())
+    }
+
+    /// Deletes up to `limit` asset files that no stored version and no live
+    /// upload session references, and that were not uploaded or referenced
+    /// in the last `grace_secs`. Returns their blob paths, for the caller to
+    /// delete. Rows go first, so a blob is never deleted while a row names it.
+    pub async fn collect_asset_files(&self, grace_secs: i64, limit: i64) -> Result<Vec<String>> {
+        let client = self.client().await?;
+        let grace = grace_secs as f64;
+        // Manifest entries of manifests no version uses any more.
+        client
+            .execute(
+                "DELETE FROM asset_manifest_entries e
+                 WHERE e.created_at < now() - make_interval(secs => $1)
+                   AND NOT EXISTS (SELECT 1 FROM script_versions v
+                                   WHERE v.account_id = e.account_id AND v.assets->>'manifest' = e.manifest)",
+                &[&grace],
+            )
+            .await?;
+        let rows = client
+            .query(
+                "WITH doomed AS (
+                   SELECT f.account_id, f.hash FROM asset_files f
+                   WHERE f.path IS NOT NULL
+                     AND f.created_at < now() - make_interval(secs => $1)
+                     AND NOT EXISTS (SELECT 1 FROM asset_manifest_entries e
+                                     WHERE e.account_id = f.account_id AND e.hash = f.hash)
+                     AND NOT EXISTS (SELECT 1 FROM asset_upload_sessions s
+                                     WHERE s.account_id = f.account_id AND s.expires_at > now()
+                                       AND jsonb_path_exists(s.manifest, '$.*.hash ? (@ == $h)',
+                                                             jsonb_build_object('h', f.hash)))
+                   LIMIT $2
+                   FOR UPDATE OF f SKIP LOCKED
+                 )
+                 DELETE FROM asset_files f USING doomed d
+                 WHERE f.account_id = d.account_id AND f.hash = d.hash
+                 RETURNING f.path",
+                &[&grace, &limit],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     /// Marks hashes of a session uploaded. Returns `true` exactly once: for the
@@ -162,8 +235,9 @@ impl Db {
         Ok(completes)
     }
 
-    /// The manifest of a completed session, by its completion token.
-    pub async fn asset_manifest_by_completion(
+    /// The manifest of a completed session, by its completion token. The
+    /// session is used up: one completion token makes one version.
+    pub async fn take_asset_manifest(
         &self,
         account: &AccountId,
         completion_token_sha256: &str,
@@ -172,8 +246,9 @@ impl Db {
             .client()
             .await?
             .query_opt(
-                "SELECT manifest FROM asset_upload_sessions
-                 WHERE account_id = $1 AND completion_token_sha256 = $2 AND expires_at > now()",
+                "DELETE FROM asset_upload_sessions
+                 WHERE account_id = $1 AND completion_token_sha256 = $2 AND expires_at > now()
+                 RETURNING manifest",
                 &[&account.as_str(), &completion_token_sha256],
             )
             .await?;
@@ -186,10 +261,15 @@ impl Db {
             .client()
             .await?
             .query_opt(
-                "SELECT content_type, size FROM asset_files WHERE account_id = $1 AND hash = $2",
+                "SELECT content_type, size, path FROM asset_files WHERE account_id = $1 AND hash = $2",
                 &[&account.as_str(), &hash],
             )
             .await?;
-        Ok(row.map(|r| AssetFile { hash: hash.to_owned(), content_type: r.get(0), size: r.get(1) }))
+        Ok(row.map(|r| AssetFile {
+            hash: hash.to_owned(),
+            content_type: r.get(0),
+            size: r.get(1),
+            path: r.get::<_, Option<String>>(2).unwrap_or_else(|| legacy_asset_path(account, hash)),
+        }))
     }
 }

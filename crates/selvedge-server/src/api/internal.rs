@@ -31,7 +31,10 @@ async fn routes_table(
 ) -> ApiResult<Response> {
     let mut routes = state.db.routes(state.workers_dev_zone.as_deref()).await?;
     routes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
-    let body = serde_json::to_vec(&json!({ "routes": routes })).map_err(anyhow::Error::from)?;
+    // Zone route patterns; custom domains and workers.dev hostnames win.
+    let patterns = state.db.pattern_routes().await?;
+    let body = serde_json::to_vec(&json!({ "routes": routes, "patterns": patterns }))
+        .map_err(anyhow::Error::from)?;
     let etag = format!("\"{}\"", &selvedge_core::sha256_hex(&body)[..32]);
     if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
         return Ok((StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response());

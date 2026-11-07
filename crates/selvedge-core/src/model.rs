@@ -228,6 +228,16 @@ pub struct BundleScript {
     pub bindings: Vec<Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assets: Option<crate::assets::ScriptAssets>,
+    /// A gradual deployment's other version and the share of requests it
+    /// gets (0-100). This script is the version with the larger share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<Box<Canary>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Canary {
+    pub percentage: f64,
+    pub script: BundleScript,
 }
 
 #[cfg(test)]

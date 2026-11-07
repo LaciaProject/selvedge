@@ -22,7 +22,7 @@ use rand::RngCore as _;
 use selvedge_core::AccountId;
 use selvedge_core::assets::{ScriptAssets, UploadManifest, validate_manifest};
 use selvedge_core::envelope::Envelope;
-use selvedge_store::assets::{AssetFile, SESSION_TTL_SECS, asset_path};
+use selvedge_store::assets::{AssetFile, SESSION_TTL_SECS, new_asset_path};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -158,10 +158,13 @@ async fn upload(
                 bytes.len()
             )));
         }
-        state.blobs.put_at(&asset_path(&id, &hash), bytes).await?;
-        files.push(AssetFile { hash, content_type, size: size as i64 });
+        let path = new_asset_path(&id, &hash);
+        state.blobs.put_at(&path, bytes).await?;
+        files.push(AssetFile { hash, content_type, size: size as i64, path });
     }
-    state.db.put_asset_files(&id, &files).await?;
+    for duplicate in state.db.put_asset_files(&id, &files).await? {
+        state.blobs.delete(&duplicate).await?;
+    }
     let hashes: Vec<String> = files.into_iter().map(|f| f.hash).collect();
     let completion = new_token();
     if state.db.finish_asset_uploads(&session.id, &hashes, &token_sha(&completion)).await? {
@@ -183,7 +186,7 @@ pub(super) async fn resolve(
     let jwt = meta.jwt.as_deref().ok_or_else(|| ApiError::bad_request("metadata.assets is missing `jwt`"))?;
     let manifest = state
         .db
-        .asset_manifest_by_completion(account, &token_sha(jwt))
+        .take_asset_manifest(account, &token_sha(jwt))
         .await?
         .ok_or_else(|| ApiError::bad_request("the assets completion token is invalid or has expired"))?;
     let hashes: Vec<String> = manifest.values().map(|e| e.hash.clone()).collect();
@@ -192,5 +195,7 @@ pub(super) async fn resolve(
     }
     let encoded = selvedge_core::assets::encode_manifest(&manifest);
     let sha = state.blobs.put(Bytes::from(encoded)).await?;
+    // Before the version exists: the collector spares recently recorded files.
+    state.db.record_asset_manifest(account, &sha, &hashes).await?;
     ScriptAssets::from_upload(sha, manifest.len(), &meta.config).map_err(ApiError::bad_request)
 }

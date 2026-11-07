@@ -69,6 +69,10 @@ struct ApiArgs {
     internal: InternalArgs,
     #[arg(long, env = "SELVEDGE_API_LISTEN", default_value = "0.0.0.0:8787")]
     listen: SocketAddr,
+    /// The internal endpoints for agents and gateways, with mTLS. With mTLS
+    /// on, the public listener does not serve them.
+    #[arg(long, env = "SELVEDGE_API_INTERNAL_LISTEN")]
+    internal_listen: Option<SocketAddr>,
     /// Where module bytes live: s3://bucket/prefix, file:///dir or memory://.
     #[arg(long, env = "SELVEDGE_BLOB_URL")]
     blob_url: String,
@@ -147,9 +151,19 @@ struct AgentArgs {
     drain_delay: u64,
     /// Run each account's workerd as its own Linux user, with UIDs from this
     /// range (`first-last`, e.g. 10000-59999). Needs root with CAP_SETUID,
-    /// CAP_SETGID, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL.
+    /// CAP_SETGID, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_KILL and CAP_SYS_NICE.
     #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
     account_uids: Option<String>,
+    /// Memory limit per account process, in MiB (0: no CPU, memory or
+    /// process limits).
+    #[arg(long, env = "SELVEDGE_ACCOUNT_MEMORY_MB", default_value_t = 1024)]
+    account_memory_mb: u64,
+    /// CPUs an account process may use.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_CPUS", default_value_t = 1.0)]
+    account_cpus: f64,
+    /// Processes and threads per account process.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_PIDS", default_value_t = 1024)]
+    account_pids: u64,
     /// Local disk for cached static assets, in MiB.
     #[arg(long, env = "SELVEDGE_ASSET_CACHE_MB", default_value_t = 1024)]
     asset_cache_mb: u64,
@@ -161,6 +175,10 @@ struct GatewayArgs {
     internal: InternalArgs,
     #[arg(long, env = "SELVEDGE_GATEWAY_LISTEN", default_value = "0.0.0.0:8080")]
     listen: SocketAddr,
+    /// For the API and data service's requests into account processes, with
+    /// mTLS. With mTLS on, the public listener does not route those.
+    #[arg(long, env = "SELVEDGE_GATEWAY_INTERNAL_LISTEN")]
+    internal_listen: Option<SocketAddr>,
     #[arg(long, env = "SELVEDGE_API_URL", default_value = "http://127.0.0.1:8787")]
     api_url: String,
     /// Runner agents, host:port, comma separated.
@@ -207,6 +225,12 @@ struct AllArgs {
     /// Run each account's workerd as its own Linux user (see `agent --help`).
     #[arg(long, env = "SELVEDGE_ACCOUNT_UIDS")]
     account_uids: Option<String>,
+    /// Memory limit per account process, in MiB (0: no limits).
+    #[arg(long, env = "SELVEDGE_ACCOUNT_MEMORY_MB", default_value_t = 1024)]
+    account_memory_mb: u64,
+    /// CPUs an account process may use.
+    #[arg(long, env = "SELVEDGE_ACCOUNT_CPUS", default_value_t = 1.0)]
+    account_cpus: f64,
 }
 
 #[derive(Subcommand)]
@@ -270,7 +294,7 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         internal_token: args.internal.internal_token.clone(),
         workers_dev_zone: args.workers_dev_zone.clone(),
         gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
-        http: reqwest::Client::builder()
+        http: selvedge_server::tls::reqwest(reqwest::Client::builder())
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(60))
             .build()?,
@@ -287,6 +311,34 @@ async fn serve_axum(
     tracing::info!(addr = %listen, "listening");
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
     Ok(())
+}
+
+/// Serves an internal-only listener: with mTLS, every client needs a
+/// platform certificate.
+async fn serve_axum_internal(
+    listen: SocketAddr,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    if selvedge_server::tls::get().is_none() {
+        return serve_axum(listen, app, shutdown).await;
+    }
+    let listener =
+        tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+    tracing::info!(addr = %listen, "listening (mTLS)");
+    axum::serve(selvedge_server::tls::Listener::new(listener)?, app).with_graceful_shutdown(shutdown).await?;
+    Ok(())
+}
+
+/// With mTLS, the API's public listener refuses the internal endpoints.
+async fn refuse_internal(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.uri().path().starts_with("/internal/") {
+        return axum::response::IntoResponse::into_response((axum::http::StatusCode::NOT_FOUND, "not found"));
+    }
+    next.run(req).await
 }
 
 fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
@@ -314,6 +366,11 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
         drain_delay: Duration::from_secs(a.drain_delay),
         asset_cache_bytes: a.asset_cache_mb << 20,
         account_uids: a.account_uids.as_deref().map(selvedge_server::agent::uids::parse_range).transpose()?,
+        limits: (a.account_memory_mb > 0).then_some(selvedge_server::agent::limits::Limits {
+            memory_bytes: a.account_memory_mb << 20,
+            cpus: a.account_cpus,
+            pids: a.account_pids,
+        }),
     })
 }
 
@@ -321,6 +378,12 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_json);
+    selvedge_server::tls::init_from_env()?;
+    if matches!(cli.command, Command::All(_)) && selvedge_server::tls::get().is_some() {
+        anyhow::bail!(
+            "`selvedge all` runs every component in one process; mTLS (SELVEDGE_TLS_*) is for separate ones"
+        );
+    }
     match cli.command {
         Command::Migrate(db) => {
             open_db(&db).await?;
@@ -338,7 +401,23 @@ async fn main() -> Result<()> {
         }
         Command::Api(args) => {
             let state = api_state(&args).await?;
-            serve_axum(args.listen, selvedge_server::api::router(state), shutdown_signal()).await?;
+            let router = selvedge_server::api::router(state);
+            if selvedge_server::tls::get().is_some() {
+                let addr = args
+                    .internal_listen
+                    .context("mTLS needs --internal-listen for the API's internal endpoints")?;
+                let internal = router.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_axum_internal(addr, internal, shutdown_signal()).await {
+                        tracing::error!(error = %format!("{e:#}"), "API internal listener failed");
+                    }
+                });
+                // The public listener: everything but the internal endpoints.
+                let public = router.layer(axum::middleware::from_fn(refuse_internal));
+                serve_axum(args.listen, public, shutdown_signal()).await?;
+            } else {
+                serve_axum(args.listen, router, shutdown_signal()).await?;
+            }
         }
         Command::Data(args) => {
             let db = open_db(&args.db).await?;
@@ -381,7 +460,7 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            serve_axum(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
+            serve_axum_internal(args.listen, selvedge_server::data::router(state), shutdown_signal()).await?;
         }
         Command::Agent(args) => {
             selvedge_server::agent::run(agent_config(&args)?, shutdown_signal()).await?;
@@ -394,6 +473,7 @@ async fn main() -> Result<()> {
             selvedge_server::gateway::run(
                 GatewayConfig {
                     listen: args.listen,
+                    internal_listen: args.internal_listen,
                     api_url: args.api_url.trim_end_matches('/').to_owned(),
                     internal_token: args.internal.internal_token,
                     runners,
@@ -423,12 +503,30 @@ async fn purge_expired(db: Db) {
 /// Deletes object store blobs that nothing references any more, ten minutes
 /// after they were released, so reads already streaming them can finish.
 async fn collect_garbage(db: Db, blobs: Blobs) {
+    // Tests shorten these; operators have no reason to.
+    let interval = std::env::var("SELVEDGE_GC_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(interval)).await;
         match selvedge_server::r2::collect_garbage(&db, &blobs, 600).await {
             Ok(0) => {}
             Ok(n) => tracing::debug!(n, "deleted unreferenced blobs"),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "deleting unreferenced blobs failed"),
+        }
+        // Static asset files no version uses, a day after their last use.
+        let grace =
+            std::env::var("SELVEDGE_ASSET_GC_GRACE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(86_400);
+        match db.collect_asset_files(grace, 1000).await {
+            Ok(paths) => {
+                for p in &paths {
+                    if let Err(e) = blobs.delete(p).await {
+                        tracing::warn!(error = %format!("{e:#}"), path = %p, "deleting an asset blob failed");
+                    }
+                }
+                if !paths.is_empty() {
+                    tracing::info!(n = paths.len(), "deleted unused static asset files");
+                }
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "collecting static asset files failed"),
         }
     }
 }
@@ -488,11 +586,15 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         drain_delay: 0,
         asset_cache_mb: 1024,
         account_uids: args.account_uids,
+        account_memory_mb: args.account_memory_mb,
+        account_cpus: args.account_cpus,
+        account_pids: 1024,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(
         GatewayConfig {
             listen: args.gateway_listen,
+            internal_listen: None,
             api_url,
             internal_token: token,
             runners: Runners::Static(vec![loopback(args.agent_listen).to_string()]),

@@ -36,7 +36,8 @@ spec:
             - name: SELVEDGE_AGENT_LISTEN
               value: 0.0.0.0:8789
             - name: SELVEDGE_API_URL
-              value: http://{{ $name }}-api:{{ .Values.api.service.port }}
+              value: {{ include "selvedge.apiInternalUrl" . }}
+            {{- include "selvedge.tlsEnv" . | nindent 12 }}
             - name: SELVEDGE_DATA_ADDR
               value: {{ $name }}-data:8788
             - name: SELVEDGE_IDLE_TIMEOUT
@@ -45,6 +46,12 @@ spec:
               value: {{ .Values.runner.drainDelaySeconds | quote }}
             - name: SELVEDGE_ASSET_CACHE_MB
               value: {{ .Values.runner.assetCacheMB | quote }}
+            - name: SELVEDGE_ACCOUNT_MEMORY_MB
+              value: {{ .Values.runner.accountLimits.memoryMB | quote }}
+            - name: SELVEDGE_ACCOUNT_CPUS
+              value: {{ .Values.runner.accountLimits.cpus | quote }}
+            - name: SELVEDGE_ACCOUNT_PIDS
+              value: {{ .Values.runner.accountLimits.pids | quote }}
             {{- if .Values.runner.accountUsers.enabled }}
             - name: SELVEDGE_ACCOUNT_UIDS
               value: {{ .Values.runner.accountUsers.uidRange | quote }}
@@ -64,14 +71,13 @@ spec:
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: secret-access-key } }
           ports: [{ name: http, containerPort: 8789 }]
-          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 1 }
-          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          {{- include "selvedge.probes" (dict "root" . "port" 8789 "failureThreshold" 1) | nindent 10 }}
           resources: {{- toYaml .Values.runner.resources | nindent 12 }}
           {{- if .Values.runner.accountUsers.enabled }}
           # The agent runs as root with only what it needs to start each
           # account's workerd as its own user; workerd keeps no capabilities.
           securityContext:
-            {{- toYaml (mergeOverwrite (deepCopy .Values.securityContext) (dict "runAsUser" 0 "runAsGroup" 0 "runAsNonRoot" false "capabilities" (dict "drop" (list "ALL") "add" (list "SETUID" "SETGID" "CHOWN" "DAC_OVERRIDE" "FOWNER" "KILL")))) | nindent 12 }}
+            {{- toYaml (mergeOverwrite (deepCopy .Values.securityContext) (dict "runAsUser" 0 "runAsGroup" 0 "runAsNonRoot" false "capabilities" (dict "drop" (list "ALL") "add" (list "SETUID" "SETGID" "CHOWN" "DAC_OVERRIDE" "FOWNER" "KILL" "SYS_NICE")))) | nindent 12 }}
           {{- else }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           {{- end }}
@@ -79,11 +85,13 @@ spec:
             - { name: state, mountPath: /var/lib/selvedge }
             - { name: run, mountPath: /run/selvedge }
             - { name: tmp, mountPath: /tmp }
+            {{- include "selvedge.tlsMount" . | nindent 12 }}
       volumes:
         # Code bundles and Durable Object caches; the bucket holds the truth.
         - { name: state, emptyDir: {} }
         - { name: run, emptyDir: { medium: Memory, sizeLimit: 16Mi } }
         - { name: tmp, emptyDir: {} }
+        {{- include "selvedge.tlsVolume" . | nindent 8 }}
 ---
 # Gateways discover ready runners through this headless Service.
 apiVersion: v1

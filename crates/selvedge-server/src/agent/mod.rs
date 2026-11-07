@@ -6,6 +6,7 @@
 //! request reaches tenant code.
 
 mod bindings;
+pub mod limits;
 mod manager;
 pub mod s3proxy;
 pub mod uids;
@@ -99,6 +100,8 @@ pub struct AgentConfig {
     pub asset_cache_bytes: u64,
     /// Run each account's workerd as its own user, from this range.
     pub account_uids: Option<std::ops::Range<u32>>,
+    /// CPU, memory and process limits per account process.
+    pub limits: Option<limits::Limits>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -134,7 +137,30 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         }
         None => None,
     };
-    let manager = Manager::new(cfg.clone(), max_date, s3_proxy)?;
+    let limit_mode = cfg.limits.as_ref().map(|_| limits::detect());
+    let cgroup_dir = match &limit_mode {
+        Some(limits::Mode::Cgroup(d)) => Some(d.clone()),
+        _ => None,
+    };
+    let manager = Manager::new(cfg.clone(), max_date, s3_proxy, cgroup_dir)?;
+    let watchdog = match (&cfg.limits, &limit_mode) {
+        (Some(l), Some(limits::Mode::Watchdog)) => {
+            let (manager, l) = (manager.clone(), l.clone());
+            Some(tokio::spawn(async move {
+                let mut w = limits::Watchdog::default();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let pids = manager.live_pids().await;
+                    for (account, action) in w.check(&pids, &l) {
+                        if action == limits::Action::Kill {
+                            manager.kill(&account).await;
+                        }
+                    }
+                }
+            }))
+        }
+        _ => None,
+    };
 
     let evictor = {
         let manager = manager.clone();
@@ -175,7 +201,15 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     let accept = |accepted: std::io::Result<(tokio::net::TcpStream, SocketAddr)>| match accepted {
         Ok((stream, _)) => {
             let _ = stream.set_nodelay(true);
-            proxy::serve_connection(stream, handler.clone());
+            let handler = handler.clone();
+            // With mTLS, only gateways (holding a platform certificate) get in.
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(10), crate::tls::accept(stream)).await {
+                    Ok(Ok(stream)) => proxy::serve_connection(stream, handler),
+                    Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
+                    Err(_) => tracing::debug!("TLS handshake timed out"),
+                }
+            });
         }
         Err(e) => tracing::warn!(error = %e, "accept failed"),
     };
@@ -200,9 +234,37 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     tracing::info!("agent draining");
     evictor.abort();
     pruner.abort();
+    if let Some(w) = watchdog {
+        w.abort();
+    }
     watcher.abort();
     manager.stop_all().await;
     Ok(())
+}
+
+/// Whether a request goes to a gradual deployment's canary, as on Cloudflare:
+/// `Cloudflare-Workers-Version-Overrides: <script>="<version id>"` picks a
+/// version; `Cloudflare-Workers-Version-Key` keeps a client on one version;
+/// otherwise each request is assigned at random by the percentages.
+fn pick_canary(headers: &http::HeaderMap, script: &str, share: f64, canary: &str) -> bool {
+    let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok());
+    if let Some(overrides) = h("cloudflare-workers-version-overrides") {
+        for item in overrides.split(',') {
+            if let Some((name, version)) = item.split_once('=')
+                && name.trim() == script
+            {
+                return version.trim().trim_matches('"') == canary;
+            }
+        }
+    }
+    let roll = match h("cloudflare-workers-version-key") {
+        Some(key) => {
+            let d = selvedge_core::sha256_hex(format!("{script}\0{key}").as_bytes());
+            (u64::from_str_radix(&d[..12], 16).unwrap_or_default() % 10_000) as f64 / 100.0
+        }
+        None => rand::random::<f64>() * 100.0,
+    };
+    roll < share
 }
 
 async fn handle(
@@ -248,7 +310,13 @@ async fn handle(
             return proxy::full(StatusCode::SERVICE_UNAVAILABLE, "Worker unavailable");
         }
     };
-    let Some(socket) = live.sockets.get(&script) else {
+    let target = match live.splits.get(&script) {
+        Some((share, canary)) if pick_canary(req.headers(), &script, *share, canary) => {
+            selvedge_workerd::render::canary_socket(&script)
+        }
+        _ => script.clone(),
+    };
+    let Some(socket) = live.sockets.get(&target) else {
         return proxy::full(StatusCode::NOT_FOUND, "Worker not found");
     };
     match proxy::forward(Target::Unix(socket), req).await {

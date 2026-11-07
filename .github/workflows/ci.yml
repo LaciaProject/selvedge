@@ -84,3 +84,10 @@ jobs:
           SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
           DO_S3_ENDPOINT: http://127.0.0.1:29000
         run: test/e2e/cluster.sh
+      - name: The same, with mTLS between every component
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+          DO_S3_ENDPOINT: http://127.0.0.1:29000
+          SELVEDGE_E2E_TLS: "1"
+          PORT_BASE: "28300"
+        run: test/e2e/cluster.sh

@@ -61,6 +61,11 @@ objectStore:
   nodeSelector: {}
   tolerations: []
 
+# mTLS between components: the chart generates a platform CA and a
+# certificate (kept across upgrades); every internal hop requires it.
+tls:
+  enabled: true
+
 api:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
@@ -101,13 +106,20 @@ runner:
   drainDelaySeconds: 5
   # Local disk (the pod's state emptyDir) for cached static assets.
   assetCacheMB: 1024
+  # Limits per account process. In Kubernetes the agent enforces them (memory:
+  # restart; CPU: lower priority beyond the share); with a writable cgroup
+  # tree the kernel does. memoryMB: 0 turns them off.
+  accountLimits:
+    memoryMB: 1024
+    cpus: 1
+    pids: 1024
   terminationGracePeriodSeconds: 60
   # e.g. gvisor, for an extra sandbox around workerd.
   runtimeClassName: ""
   # Run each account's workerd as its own Linux user, so a compromised
   # process cannot read another account's files or use its binding socket.
   # The agent then runs as root with CAP_SETUID, CAP_SETGID, CAP_CHOWN,
-  # CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_KILL only. Namespaces enforcing the
+  # CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_KILL and CAP_SYS_NICE only. Namespaces enforcing the
   # `restricted` Pod Security Standard must disable this.
   accountUsers:
     enabled: true

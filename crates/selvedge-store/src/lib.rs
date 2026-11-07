@@ -13,6 +13,7 @@ pub mod repo;
 pub mod secrets;
 pub mod tails;
 pub mod workflows;
+pub mod zones;
 
 pub use blobs::Blobs;
 pub use db::Db;

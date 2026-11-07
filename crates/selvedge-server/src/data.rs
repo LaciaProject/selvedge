@@ -83,7 +83,7 @@ async fn asset_get(state: &DataState, req: axum::extract::Request) -> Response {
             return error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
         }
     };
-    let stream = match state.blobs.stream_at(&selvedge_store::assets::asset_path(&account, &hash)).await {
+    let stream = match state.blobs.stream_at(&file.path).await {
         Ok(Some(s)) => s,
         Ok(None) => return error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => {

@@ -103,6 +103,16 @@ impl WorkerdProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// The process id, while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// Kills the process at once (SIGKILL).
+    pub fn kill_now(&mut self) {
+        let _ = self.child.start_kill();
+    }
+
     /// Asks workerd to drain (SIGTERM), then kills it after `grace`. In cluster
     /// mode a drain deregisters the instance so peers take its objects at once.
     pub async fn stop(mut self, grace: Duration) {

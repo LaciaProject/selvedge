@@ -7,9 +7,12 @@ pub mod assets;
 pub mod envelope;
 pub mod ids;
 pub mod model;
+pub mod routes;
 
 pub use ids::{AccountId, HexId, NamespaceId, VersionId, new_version_id, validate_script_name};
-pub use model::{AccountBundle, Binding, BundleScript, Module, ModuleKind, ScriptMetadata, WorkflowDef};
+pub use model::{
+    AccountBundle, Binding, BundleScript, Canary, Module, ModuleKind, ScriptMetadata, WorkflowDef,
+};
 
 /// Content hash of a blob, as lowercase hex SHA-256.
 pub fn sha256_hex(bytes: &[u8]) -> String {

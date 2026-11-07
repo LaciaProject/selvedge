@@ -66,7 +66,9 @@ load_start() {
   rm -f "$WORK/stop" "$WORK/codes"
   ( f=0 t=0
     while [ ! -f "$WORK/stop" ]; do
-      t=$((t+1)); code=$(kv); [ "$code" = 200 ] || { f=$((f+1)); echo "$(date +%T) $code" >> "$WORK/codes"; }; sleep 0.05
+      # A request that times out (in flight on a lost node) is a failure, not
+      # the end of the test.
+      t=$((t+1)); code=$(kv || true); [ "$code" = 200 ] || { f=$((f+1)); echo "$(date +%T) $code" >> "$WORK/codes"; }; sleep 0.05
     done
     echo "$f $t" > "$WORK/load.out" ) & LOAD=$!
 }

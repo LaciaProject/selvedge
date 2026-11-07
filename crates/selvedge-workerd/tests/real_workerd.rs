@@ -73,6 +73,7 @@ export default {
                     Binding::D1 { name: "DB".into(), id: "db-1".into() },
                 ],
                 assets: None,
+                canary: None,
             },
             BundleScript {
                 name: "other".into(),
@@ -83,6 +84,7 @@ export default {
                 modules: vec![module("o.js", other)],
                 bindings: vec![],
                 assets: None,
+                canary: None,
             },
         ],
         d1_databases: vec!["db-1".into()],
@@ -191,6 +193,7 @@ export default {
         modules,
         bindings,
         assets: Some(assets.clone()),
+        canary: None,
     };
     let bundle = AccountBundle {
         account_id: HexId::random(),

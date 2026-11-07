@@ -13,7 +13,8 @@ miniflare ships it:
 
 - Source: npm `miniflare@5.20261104.0-beta` (a dependency of the `wrangler` pinned in
   `test/e2e/package.json`)
-- License: MIT, see `LICENSE`. `zod.js` bundles [zod](https://github.com/colinhacks/zod), also MIT (Copyright (c) 2025 Colin McDonnell)
+- License: MIT (`LICENSE` is workers-sdk's `LICENSE-MIT`, verbatim). miniflare is MIT; workers-shared and
+  workflows-shared are MIT OR Apache-2.0, used here under MIT. `zod.js` bundles [zod](https://github.com/colinhacks/zod), also MIT (Copyright (c) 2025 Colin McDonnell)
 
 To update them, bump `wrangler` in `test/e2e/package.json`, run `npm ci` there, then:
 

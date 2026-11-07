@@ -60,11 +60,35 @@ conditional write is one transaction.
 
 Differences:
 
-- R2's S3-compatible endpoint, presigned URLs, public buckets and custom domains on buckets are not
-  available yet.
+- Public buckets, custom domains on buckets and event notifications are not available yet.
 - SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
 - Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
   the same size is not enforced.
+
+### The S3-compatible API
+
+The data service serves R2's S3 API (`--r2-s3-listen`; in Helm, the `<release>-r2-s3` Service).
+Credentials work as on Cloudflare: the access key id is an account API token's id, and the secret
+access key is the SHA-256 (hex) of the token's value. Creating a token returns both. Use path-style
+addressing (`forcePathStyle: true`, or rclone's `force_path_style`) and region `auto`.
+
+Supported: ListBuckets, CreateBucket, HeadBucket, DeleteBucket and GetBucketLocation; PutObject,
+GetObject (ranges, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`),
+HeadObject, DeleteObject, DeleteObjects and CopyObject; conditional writes (`If-Match`,
+`If-None-Match: *`); ListObjects and ListObjectsV2; multipart uploads (create, upload part,
+complete, abort, ListParts). Requests are signed with SigV4 in headers or in presigned URLs (at
+most 7 days). `aws-chunked` bodies, which current AWS SDKs send, are accepted. Objects are shared
+with the binding and `wrangler r2`.
+
+Differences:
+
+- Virtual-hosted addressing (`<bucket>.<host>`) is not supported.
+- The signatures of individual `aws-chunked` chunks and trailing checksums are not checked; the
+  request's signature and the object's MD5 are.
+- Object tagging, ACLs, versioning, lifecycle rules, CORS and bucket policies are not available.
+  ListMultipartUploads answers an empty list.
+- The secret access key is the hash the API stores to check the token, so whoever can read the
+  database can use the S3 API as that token. Cloudflare's model has the same property.
 
 ## D1
 

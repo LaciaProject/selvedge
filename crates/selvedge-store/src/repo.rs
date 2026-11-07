@@ -203,17 +203,34 @@ impl Db {
     }
 
     /// Creates an API token and returns its plaintext, which is not stored.
-    pub async fn create_token(&self, account: Option<&AccountId>, name: &str) -> Result<String> {
+    /// Creates a token. Returns its id and its value.
+    pub async fn create_token(&self, account: Option<&AccountId>, name: &str) -> Result<(String, String)> {
         let bytes: [u8; 24] = rand::random();
         let token = format!("slv_{}", hex::encode(bytes));
+        let id = HexId::random().to_string();
         self.client()
             .await?
             .execute(
-                "INSERT INTO api_tokens (token_sha256, account_id, name) VALUES ($1, $2, $3)",
-                &[&token_hash(&token), &account.map(HexId::as_str), &name],
+                "INSERT INTO api_tokens (token_sha256, account_id, name, id) VALUES ($1, $2, $3, $4)",
+                &[&token_hash(&token), &account.map(HexId::as_str), &name, &id],
             )
             .await?;
-        Ok(token)
+        Ok((id, token))
+    }
+
+    /// For R2's S3 API: an account token's secret (the SHA-256 of its value)
+    /// and account, by the token's id. Admin tokens have no account and no S3
+    /// access.
+    pub async fn s3_credentials(&self, access_key_id: &str) -> Result<Option<(String, AccountId)>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT token_sha256, account_id FROM api_tokens WHERE id = $1 AND account_id IS NOT NULL",
+                &[&access_key_id],
+            )
+            .await?;
+        row.map(|r| Ok((r.get(0), r.get::<_, String>(1).parse()?))).transpose()
     }
 
     /// Ensures an admin token with this plaintext exists (bootstrap from config).
@@ -221,7 +238,7 @@ impl Db {
         self.client()
             .await?
             .execute(
-                "INSERT INTO api_tokens (token_sha256, account_id, name) VALUES ($1, NULL, 'bootstrap')
+                "INSERT INTO api_tokens (token_sha256, account_id, name, id) VALUES ($1, NULL, 'bootstrap', md5(random()::text))
                  ON CONFLICT (token_sha256) DO NOTHING",
                 &[&token_hash(token)],
             )

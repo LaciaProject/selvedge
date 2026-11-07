@@ -15,6 +15,8 @@ pub mod kvlogic;
 pub mod proxy;
 pub mod queues;
 pub mod r2;
+pub mod r2s3;
+pub mod sigv4;
 pub mod tail;
 
 /// Compares secrets without leaking where they differ through timing.

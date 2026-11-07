@@ -27,6 +27,7 @@ use axum::response::{IntoResponse, Response};
 use futures::{StreamExt, TryStreamExt};
 use md5::{Digest, Md5};
 use selvedge_store::r2::{PutOutcome, R2Object, R2Part, R2Upload, R2UploadedPart};
+use selvedge_store::r2notify::ObjectEvent;
 use selvedge_store::{Blobs, Db};
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncWriteExt;
@@ -377,6 +378,8 @@ pub struct Bucket<'a> {
 }
 
 /// What wrote an object, as event notifications name it.
+/// Event notifications go out in the write's own transaction (see
+/// `selvedge_store::r2notify`), so a stored change is never left unannounced.
 pub enum Change<'a> {
     Put,
     /// A copy from `bucket`/`key` (bucket by name).
@@ -384,15 +387,6 @@ pub enum Change<'a> {
         bucket: &'a str,
         key: &'a str,
     },
-}
-
-/// One object change, for event notifications.
-struct Event {
-    action: &'static str,
-    key: String,
-    /// `(size, etag)` of the new object.
-    object: Option<(i64, String)>,
-    copy_source: Option<(String, String)>,
 }
 
 pub enum GetResult {
@@ -464,73 +458,15 @@ impl Bucket<'_> {
             parts: vec![R2Part { path: written.path, size: written.size }],
         };
         let only_if = req.get("onlyIf").cloned();
-        match self.db.r2_put(&self.id, &object, |cur| condition_holds(only_if.as_ref(), cur)).await? {
-            PutOutcome::Stored => {
-                let (action, copy_source) = match change {
-                    Change::Put => ("PutObject", None),
-                    Change::Copy { bucket, key } => ("CopyObject", Some((bucket.to_owned(), key.to_owned()))),
-                };
-                self.notify(vec![Event {
-                    action,
-                    key: key.to_owned(),
-                    object: Some((object.size, object.etag.clone())),
-                    copy_source,
-                }])
-                .await;
-                Ok(Some(object))
-            }
-            PutOutcome::PreconditionFailed => Ok(None),
-        }
-    }
-
-    /// Sends object changes to the queues of matching notification rules.
-    /// A failure here is logged; the change itself has happened.
-    async fn notify(&self, events: Vec<Event>) {
-        if events.is_empty() {
-            return;
-        }
-        let targets = match self.db.r2_notification_targets(&self.id).await {
-            Ok(Some(t)) => t,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::warn!(bucket = %self.id, error = %format!("{e:#}"), "reading R2 notification rules failed");
-                return;
+        let event = match change {
+            Change::Put => ObjectEvent { action: "PutObject", copy_source: None },
+            Change::Copy { bucket, key } => {
+                ObjectEvent { action: "CopyObject", copy_source: Some((bucket, key)) }
             }
         };
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        for queue in &targets.queues {
-            let messages: Vec<selvedge_store::queues::NewMessage> = events
-                .iter()
-                .filter(|e| queue.rules.iter().any(|r| r.matches(e.action, &e.key)))
-                .map(|e| {
-                    let mut object = json!({ "key": e.key });
-                    if let Some((size, etag)) = &e.object {
-                        object["size"] = json!(size);
-                        object["eTag"] = json!(etag);
-                    }
-                    let mut m = json!({
-                        "account": targets.account_id,
-                        "action": e.action,
-                        "bucket": targets.bucket_name,
-                        "object": object,
-                        "eventTime": now,
-                    });
-                    if let Some((bucket, key)) = &e.copy_source {
-                        m["copySource"] = json!({ "bucket": bucket, "object": key });
-                    }
-                    selvedge_store::queues::NewMessage {
-                        body: m.to_string().into_bytes(),
-                        content_type: "json".into(),
-                        delay_secs: 0,
-                    }
-                })
-                .collect();
-            if messages.is_empty() {
-                continue;
-            }
-            if let Err(e) = self.db.enqueue(&queue.queue_id, &messages).await {
-                tracing::warn!(queue = %queue.queue_id, error = %format!("{e:#}"), "sending R2 notifications failed");
-            }
+        match self.db.r2_put(&self.id, &object, |cur| condition_holds(only_if.as_ref(), cur), event).await? {
+            PutOutcome::Stored => Ok(Some(object)),
+            PutOutcome::PreconditionFailed => Ok(None),
         }
     }
 
@@ -541,14 +477,7 @@ impl Bucket<'_> {
         if keys.len() > 1000 {
             return Err(R2Error::bad("You can delete at most 1000 objects at once."));
         }
-        let deleted = self.db.r2_delete(&self.id, &keys).await?;
-        self.notify(
-            deleted
-                .into_iter()
-                .map(|key| Event { action: "DeleteObject", key, object: None, copy_source: None })
-                .collect(),
-        )
-        .await;
+        self.db.r2_delete(&self.id, &keys).await?;
         Ok(())
     }
 
@@ -724,13 +653,6 @@ impl Bucket<'_> {
         if !self.db.r2_complete_upload(&self.id, upload, &object).await? {
             return Err(R2Error::no_such_upload());
         }
-        self.notify(vec![Event {
-            action: "CompleteMultipartUpload",
-            key: key.to_owned(),
-            object: Some((object.size, object.etag.clone())),
-            copy_source: None,
-        }])
-        .await;
         Ok(object)
     }
 

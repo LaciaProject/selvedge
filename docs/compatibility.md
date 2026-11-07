@@ -75,9 +75,8 @@ shape (`account`, `action`, `bucket`, `object` with `key`, `size` and `eTag`, `e
 
 Differences:
 
-- A message is enqueued right after the change commits. If enqueuing fails then (PostgreSQL went
-  away between the two statements), the event is lost and logged; Cloudflare delivers at least
-  once.
+- Messages are enqueued in the same transaction as the change, so every stored change sends its
+  messages and a change that fails sends none; delivery is then at least once, as for any queue.
 - Deleting several objects at once sends one message per object that existed.
 
 ### Public buckets

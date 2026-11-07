@@ -587,6 +587,12 @@ async fn collect_garbage(db: Db, blobs: Blobs) {
             }
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "collecting static asset files failed"),
         }
+        // R2 lifecycle rules: expired objects and stale multipart uploads.
+        match selvedge_server::r2lifecycle::apply(&db).await {
+            Ok((0, 0)) => {}
+            Ok((deleted, aborted)) => tracing::info!(deleted, aborted, "applied R2 lifecycle rules"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "applying R2 lifecycle rules failed"),
+        }
         // D1 import and export files whose URLs expired unused.
         match db.take_expired_d1_transfers().await {
             Ok(paths) => {

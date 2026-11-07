@@ -60,16 +60,25 @@ conditional write is one transaction.
 
 Differences:
 
-- Lifecycle rules are not available, so no `LifecycleDeletion` events are sent.
+- Lifecycle rules can delete objects and abort uploads, but storage class transitions are accepted
+  and ignored (every object is `Standard`).
 - SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
 - Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
   the same size is not enforced.
+
+### Lifecycle rules
+
+`wrangler r2 bucket lifecycle add|list|remove|set` work. A rule deletes objects under its prefix
+once they are older than an age (`--expire-days`) or on a date (`--expire-date`), and aborts
+multipart uploads left incomplete for an age (`--abort-multipart-days`). A bucket without rules has
+Cloudflare's default one, which aborts uploads after 7 days. The data service applies the rules
+every minute; deletions send `LifecycleDeletion` event notifications.
 
 ### Event notifications
 
 `wrangler r2 bucket notification create|list|delete` work: a rule sends a message to a queue in the
 account when an object whose key has the rule's prefix and suffix is created (`PutObject`,
-`CopyObject`, `CompleteMultipartUpload`) or deleted (`DeleteObject`). Messages have Cloudflare's
+`CopyObject`, `CompleteMultipartUpload`) or deleted (`DeleteObject`, `LifecycleDeletion`). Messages have Cloudflare's
 shape (`account`, `action`, `bucket`, `object` with `key`, `size` and `eTag`, `eventTime`, and
 `copySource` for copies), and changes from the binding, the S3 API and `wrangler r2` all send them.
 

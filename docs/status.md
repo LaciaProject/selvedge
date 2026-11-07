@@ -43,7 +43,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | 灰度发布 | 两个版本按百分比分流，支持 `Cloudflare-Workers-Version-Key` 和 `-Overrides` 头 | 每个版本是单独的 workerd 服务 |
 | 路由 | workers.dev 式子域名、自定义域名、zone 路由（如 `*.example.com/*`），最具体的规则优先 | 由网关匹配；zone 由管理员分配给账号 |
 | KV | 全部绑定操作、TTL、元数据、`wrangler kv` | PostgreSQL，强一致 |
-| R2 | 全部绑定操作、条件请求、分片上传、`wrangler r2`；公开访问 URL（`pub-<id>.<zone>`，相当于 r2.dev）和自定义域名；对象变更通知到队列 | 元数据存 PostgreSQL，数据存 S3；公开读取由 data 服务的 S3 端口提供 |
+| R2 | 全部绑定操作、条件请求、分片上传、`wrangler r2`；公开访问 URL（`pub-<id>.<zone>`，相当于 r2.dev）和自定义域名；对象变更通知到队列；生命周期规则 | 元数据存 PostgreSQL，数据存 S3；公开读取由 data 服务的 S3 端口提供 |
 | R2 S3 API | 常用的桶、对象、分片操作，SigV4（含预签名 URL），`aws-chunked` 请求体 | 与绑定共享同一批对象，已用 AWS SDK 测试 |
 | Durable Objects | fetch、RPC、WebSocket 休眠、SQLite 与 KV 存储、alarms | workerd 集群模式，存储写入 S3 后才确认 |
 | D1 | `prepare/bind/first/all/run/raw/batch/exec`，以及 `wrangler d1` 的常用命令、迁移、导出和文件导入 | 每个数据库是一个 SQLite Durable Object |
@@ -90,7 +90,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |
 | mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |
 | 路由 | zone 只能由管理员分配，Selvedge 不验证域名所有权 |
-| R2 | 没有生命周期规则。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
+| R2 | 生命周期规则不做存储类别转换（只有 `Standard`）。公开 URL 没有限流和缓存，TLS 由前面的负载均衡终止。S3 API 只支持 path-style 寻址，没有 tagging、ACL、版本控制、生命周期规则和 CORS |
 | D1 | 没有读副本和 Time Travel；导入文件最大 64 MB，导入导出都在 Durable Object 内存中完成 |
 | Queues | 不支持 `v8` 内容类型；`queue.metrics()` 只有积压数 |
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |

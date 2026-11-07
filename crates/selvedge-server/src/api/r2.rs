@@ -26,6 +26,7 @@ pub fn routes() -> Router<State> {
             get(get_object).put(put_object).delete(delete_object),
         )
         .route(&format!("{base}/{{bucket}}/domains/managed"), get(get_dev_url).put(put_dev_url))
+        .route(&format!("{base}/{{bucket}}/lifecycle"), get(get_lifecycle).put(put_lifecycle))
         .route(&format!("{base}/{{bucket}}/domains/custom"), get(list_custom).post(add_custom))
         .route(
             &format!("{base}/{{bucket}}/domains/custom/{{domain}}"),
@@ -396,4 +397,35 @@ async fn delete_custom(
         return Err(no_domain());
     }
     Ok(ok(json!({ "domain": domain })))
+}
+
+// ---- lifecycle rules ----
+
+async fn get_lifecycle(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let rules = state.db.r2_lifecycle(&bucket_id).await?.unwrap_or_else(crate::r2lifecycle::default_rules);
+    Ok(ok(json!({ "rules": rules })))
+}
+
+#[derive(Deserialize)]
+struct LifecycleBody {
+    rules: Value,
+}
+
+async fn put_lifecycle(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+    super::JsonBody(body): super::JsonBody<LifecycleBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    crate::r2lifecycle::parse_rules(&body.rules).map_err(ApiError::bad_request)?;
+    state.db.set_r2_lifecycle(&bucket_id, &body.rules).await?;
+    Ok(ok(Value::Null))
 }

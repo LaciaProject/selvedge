@@ -258,6 +258,12 @@ impl Db {
 
     /// Deletes objects; returns the keys that existed.
     pub async fn r2_delete(&self, bucket: &str, keys: &[String]) -> Result<Vec<String>> {
+        self.r2_delete_as(bucket, keys, "DeleteObject").await
+    }
+
+    /// [`Db::r2_delete`], reporting the deletions to event notifications as
+    /// `action` (`DeleteObject` or `LifecycleDeletion`).
+    pub async fn r2_delete_as(&self, bucket: &str, keys: &[String], action: &str) -> Result<Vec<String>> {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         let rows = tx
@@ -271,7 +277,7 @@ impl Db {
             let parts: Vec<R2Part> = serde_json::from_value(r.get(0))?;
             garbage(&*tx, &parts).await?;
             let key: String = r.get(1);
-            let event = crate::r2notify::ObjectEvent { action: "DeleteObject", copy_source: None };
+            let event = crate::r2notify::ObjectEvent { action, copy_source: None };
             crate::r2notify::notify_in(&*tx, bucket, &key, None, event).await?;
             deleted.push(key);
         }
@@ -439,6 +445,72 @@ impl Db {
         tx.execute("DELETE FROM r2_uploads WHERE id = $1", &[&upload]).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    // ---- lifecycle ----
+
+    /// The bucket's lifecycle rules as stored; `None`: the default rule.
+    pub async fn r2_lifecycle(&self, bucket: &str) -> Result<Option<serde_json::Value>> {
+        let row = self
+            .client()
+            .await?
+            .query_one("SELECT lifecycle FROM r2_buckets WHERE id = $1", &[&bucket])
+            .await?;
+        Ok(row.get(0))
+    }
+
+    pub async fn set_r2_lifecycle(&self, bucket: &str, rules: &serde_json::Value) -> Result<()> {
+        self.client()
+            .await?
+            .execute("UPDATE r2_buckets SET lifecycle = $2 WHERE id = $1", &[&bucket, rules])
+            .await?;
+        Ok(())
+    }
+
+    /// Every bucket and its lifecycle rules (`None`: the default rule).
+    pub async fn r2_lifecycles(&self) -> Result<Vec<(String, Option<serde_json::Value>)>> {
+        let rows = self.client().await?.query("SELECT id, lifecycle FROM r2_buckets", &[]).await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// Keys under `prefix` uploaded before `before_ms`.
+    pub async fn r2_keys_uploaded_before(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT key FROM r2_objects WHERE bucket_id = $1 AND starts_with(key, $2) AND uploaded_ms < $3
+                 ORDER BY key LIMIT $4",
+                &[&bucket, &prefix, &before_ms, &limit],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Multipart uploads under `prefix` started more than `age_secs` ago.
+    pub async fn r2_uploads_older_than(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        age_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id FROM r2_uploads WHERE bucket_id = $1 AND starts_with(key, $2)
+                   AND created_at <= now() - make_interval(secs => $3) LIMIT $4",
+                &[&bucket, &prefix, &(age_secs as f64), &limit],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     // ---- garbage ----

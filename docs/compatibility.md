@@ -128,8 +128,10 @@ Differences:
 
 - **Failover takes up to about 20 seconds.** When the process owning an object dies, calls to that
   object fail (as with Cloudflare's "Network connection lost") until the owner's lease expires and
-  another runner takes the object over. A clean shutdown, such as a rolling upgrade, hands objects
-  over without this wait.
+  another runner takes the object over. The lease is fixed in workerd. A clean shutdown, such as
+  a rolling upgrade, hands objects over without this wait, and so does the agent's restart of a
+  process over its memory limit, which drains it for up to 3 seconds before killing it. A kernel
+  OOM kill (cgroup mode) or a crash still waits for the lease.
 - Storage writes wait for the object store, so write latency depends on it (single-digit
   milliseconds for an in-cluster store).
 - Requires an S3-compatible store that supports conditional writes (`If-None-Match: *` and

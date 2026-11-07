@@ -27,6 +27,8 @@ const GENERATION_TTL: Duration = Duration::from_secs(30);
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_GRACE: Duration = Duration::from_secs(30);
+/// How long a process over its limits may take to drain before SIGKILL.
+const LIMIT_GRACE: Duration = Duration::from_secs(3);
 
 /// A running account process.
 pub struct Live {
@@ -471,15 +473,19 @@ impl Manager {
         out
     }
 
-    /// Kills an account's process; the next request starts a new one.
-    pub async fn kill(&self, account: &AccountId) {
+    /// Restarts an account's process that went over its limits: SIGTERM, then
+    /// SIGKILL after [`LIMIT_GRACE`]; the next request starts a new one. In
+    /// cluster mode the drain deregisters the instance, so its Durable Objects
+    /// move at once instead of after the cluster lease (20 seconds). Starts
+    /// wait meanwhile, so a new process never shares local SQLite files with
+    /// the old one.
+    pub async fn restart_over_limit(&self, account: &AccountId) {
         let state = self.accounts.lock().expect("poisoned").get(account).cloned();
         if let Some(state) = state {
-            let live = state.slot.lock().await.live.clone();
-            if let Some(live) = live
-                && let Some(p) = live.process.lock().await.as_mut()
-            {
-                p.kill_now();
+            let _start = state.start.lock().await;
+            let live = state.slot.lock().await.live.take();
+            if let Some(live) = live {
+                live.stop(LIMIT_GRACE).await;
             }
         }
     }

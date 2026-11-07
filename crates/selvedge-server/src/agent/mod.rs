@@ -153,7 +153,7 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
                     let pids = manager.live_pids().await;
                     for (account, action) in w.check(&pids, &l) {
                         if action == limits::Action::Kill {
-                            manager.kill(&account).await;
+                            manager.restart_over_limit(&account).await;
                         }
                     }
                 }

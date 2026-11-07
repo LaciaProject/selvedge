@@ -31,7 +31,8 @@ compatibility date later than that release supports is lowered to the newest one
 | D1 | Supported | See below |
 | Queues (producers) | Supported | See below |
 | Static assets (`assets`) | Supported | See below |
-| Workflows, Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
+| Workflows (`workflow`) | Supported | See below |
+| Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
 
 ## KV
 
@@ -170,6 +171,28 @@ Differences:
   RPC need. A service binding to a Worker with only assets reaches its assets.
 - Uploaded files are not deleted when no version uses them any more.
 - `assets.base_path` is ignored. Uploads use wrangler's bulk mode (several files per request).
+
+## Workflows
+
+Instances run on Cloudflare's own Workflows engine (from workers-sdk, run unmodified): one Durable
+Object per instance, so they get cluster mode's single owner, durability and failover. A runner
+crash pauses an instance for at most the Durable Object failover time, and it then carries on
+where it was. The binding is workerd's own (`cloudflare-internal:workflows-api`): `create`,
+`createBatch`, `get`, and on an instance `status`, `pause`, `resume`, `terminate`, `restart` and
+`sendEvent`. Steps support `step.do` with retries and timeouts, `step.sleep`, `step.sleepUntil` and
+`step.waitForEvent`.
+
+`wrangler deploy` registers workflows. `wrangler workflows list`, `trigger`, `instances list`,
+`describe` (with steps and attempts), `send-event`, `pause`, `resume`, `terminate`, `restart` and
+`delete` work.
+
+Differences:
+
+- `schedules`, `concurrency` and `default_retention` in a workflow's config are accepted and
+  ignored, and instances are kept until deleted.
+- Versions are not tracked: `versionId` is empty, and an instance resumes on whatever code is
+  deployed when it next runs.
+- `instances list` shows instances newest first and does not filter by status or date.
 
 ## wrangler tail
 

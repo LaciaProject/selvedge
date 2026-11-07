@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 pub enum IdError {
     #[error("identifier must be 32 lowercase hex characters")]
     BadHex,
-    #[error("script name must be 1-63 characters of a-z, 0-9, '-' or '_', and not start with '-'")]
+    #[error(
+        "script name must be 1-63 characters of a-z, 0-9, '-' or '_', and not start with '-' or 'selvedge-' (reserved)"
+    )]
     BadScriptName,
 }
 
@@ -83,10 +85,15 @@ pub fn new_version_id() -> VersionId {
 
 /// Script names follow Cloudflare's rules closely enough that every name
 /// Cloudflare accepts and Selvedge can route is accepted here.
+/// Script names starting with this are Selvedge's own system workers, whose
+/// sockets share the namespace of script names.
+pub const RESERVED_SCRIPT_PREFIX: &str = "selvedge-";
+
 pub fn validate_script_name(name: &str) -> Result<(), IdError> {
     let ok = !name.is_empty()
         && name.len() <= 63
         && !name.starts_with('-')
+        && !name.starts_with(RESERVED_SCRIPT_PREFIX)
         && name.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
     if ok { Ok(()) } else { Err(IdError::BadScriptName) }
 }
@@ -94,6 +101,13 @@ pub fn validate_script_name(name: &str) -> Result<(), IdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_script_names() {
+        assert!(validate_script_name("my-worker").is_ok());
+        assert!(validate_script_name("selvedge-d1").is_err());
+        assert!(validate_script_name("selvedge").is_ok());
+    }
 
     #[test]
     fn hex_ids() {

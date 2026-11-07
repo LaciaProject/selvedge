@@ -296,6 +296,17 @@ pub(super) async fn create_version(
                     return Err(ApiError::bad_request(format!("R2 bucket `{bucket_name}` not found")));
                 }
             }
+            Binding::Workflow { workflow_name, class_name, script_name, .. } => {
+                if !selvedge_core::model::valid_workflow_name(workflow_name) {
+                    return Err(ApiError::bad_request(format!("invalid workflow name `{workflow_name}`")));
+                }
+                if class_name.is_empty() {
+                    return Err(ApiError::bad_request("a `workflow` binding needs `class_name`"));
+                }
+                if let Some(s) = script_name {
+                    validate_script_name(s).map_err(|e| ApiError::bad_request(e.to_string()))?;
+                }
+            }
             Binding::Assets { .. } => {
                 if assets.is_none() && !meta.keep_assets {
                     return Err(ApiError::bad_request("an `assets` binding needs assets in the upload"));

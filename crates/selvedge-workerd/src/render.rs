@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use selvedge_core::{AccountBundle, Binding, BundleScript, ModuleKind};
+use selvedge_core::{AccountBundle, Binding, BundleScript, ModuleKind, WorkflowDef};
 
 /// The header carrying the KV namespace id on binding requests.
 pub const KV_NAMESPACE_HEADER: &str = "x-selvedge-kv-namespace";
@@ -57,6 +57,37 @@ const EVENTS_WORKER: &str = include_str!("events.js");
 pub const D1_SERVICE: &str = "selvedge-d1";
 const D1_WORKER: &str = include_str!("d1.js");
 
+/// The system worker behind Workflow bindings and the Workflows REST API.
+pub const WORKFLOWS_SERVICE: &str = "selvedge-workflows";
+const WORKFLOWS_WORKER: &str = include_str!("workflows.js");
+const WORKFLOWS_ENGINE: &str = include_str!("vendor/workflows-engine.js");
+const ZOD: &str = include_str!("vendor/zod.js");
+
+/// The Workflows an account process runs: the registered ones and those that
+/// bindings define, whose class is in a deployed script with code.
+pub fn workflows(bundle: &AccountBundle) -> Vec<WorkflowDef> {
+    let mut all: std::collections::BTreeMap<String, WorkflowDef> =
+        bundle.workflows.iter().map(|w| (w.name.clone(), w.clone())).collect();
+    for s in &bundle.scripts {
+        for b in &s.bindings {
+            if let Binding::Workflow { workflow_name, class_name, script_name, .. } = b {
+                all.entry(workflow_name.clone()).or_insert_with(|| WorkflowDef {
+                    name: workflow_name.clone(),
+                    script_name: script_name.clone().unwrap_or_else(|| s.name.clone()),
+                    class_name: class_name.clone(),
+                });
+            }
+        }
+    }
+    all.into_values()
+        .filter(|w| bundle.scripts.iter().any(|s| s.name == w.script_name && has_code(s)))
+        .collect()
+}
+
+fn workflow_service(name: &str) -> String {
+    format!("wf-{name}")
+}
+
 /// Whether a bundle needs the D1 system worker.
 pub fn uses_d1(bundle: &AccountBundle) -> bool {
     !bundle.d1_databases.is_empty()
@@ -66,6 +97,7 @@ pub fn uses_d1(bundle: &AccountBundle) -> bool {
 /// Whether a bundle needs Durable Object storage (and, with a bucket, cluster mode).
 pub fn uses_durable_objects(bundle: &AccountBundle) -> bool {
     uses_d1(bundle)
+        || !workflows(bundle).is_empty()
         || bundle
             .scripts
             .iter()
@@ -268,7 +300,11 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
                 quote(&format!("unix:{}", socket.display())),
                 quote(&entry),
             ));
-            sockets.push((script.name.clone(), socket));
+            // A reserved name (stored before names were checked) must not shadow
+            // a system worker's socket.
+            if !script.name.starts_with(selvedge_core::ids::RESERVED_SCRIPT_PREFIX) {
+                sockets.push((script.name.clone(), socket));
+            }
             continue;
         }
         let (worker, kvs, missing) = render_worker(bundle, script, opts, modules, &targets, &do_classes)?;
@@ -293,7 +329,11 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(&format!("unix:{}", socket.display())),
             quote(&entry),
         ));
-        sockets.push((script.name.clone(), socket));
+        // A reserved name (stored before names were checked) must not shadow
+        // a system worker's socket.
+        if !script.name.starts_with(selvedge_core::ids::RESERVED_SCRIPT_PREFIX) {
+            sockets.push((script.name.clone(), socket));
+        }
     }
     if need_assets_kv {
         std::fs::write(opts.dir.join("m").join("selvedge-asset-worker.js"), ASSET_WORKER)?;
@@ -383,6 +423,59 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(TAIL_HEADER),
         ));
     }
+    let wfs = workflows(bundle);
+    if !wfs.is_empty() {
+        std::fs::write(opts.dir.join("m").join("selvedge-workflows.js"), WORKFLOWS_WORKER)?;
+        std::fs::write(opts.dir.join("m").join("selvedge-workflows-engine.js"), WORKFLOWS_ENGINE)?;
+        std::fs::write(opts.dir.join("m").join("selvedge-zod.js"), ZOD)?;
+        let mut front = vec!["(name = \"INDEX\", durableObjectNamespace = \"WorkflowIndex\")".to_owned()];
+        for w in &wfs {
+            let service = workflow_service(&w.name);
+            let name = serde_json::json!(w.name).to_string();
+            services.push(format!(
+                "(name = {}, worker = (modules = [(name = \"workflows.mjs\", esModule = embed \"m/selvedge-workflows-engine.js\")], \
+                 compatibilityDate = \"2024-10-22\", \
+                 durableObjectNamespaces = [(className = \"Engine\", uniqueKey = {}, enableSql = true, preventEviction = true)], \
+                 durableObjectStorage = (localDisk = \"do-storage\"), \
+                 bindings = [(name = \"ENGINE\", durableObjectNamespace = \"Engine\"), \
+                 (name = \"USER_WORKFLOW\", service = (name = {}, entrypoint = {})), \
+                 (name = \"BINDING_NAME\", json = {}), (name = \"WORKFLOW_NAME\", json = {})]))",
+                quote(&service),
+                quote(&durable_object_key(bundle.account_id.as_str(), &service, "Engine")),
+                quote(&worker_service(&w.script_name)),
+                quote(&w.class_name),
+                quote(&name),
+                quote(&name),
+            ));
+            front.push(format!(
+                "(name = {}, service = (name = {}, entrypoint = \"WorkflowBinding\"))",
+                quote(&format!("B_{}", w.name)),
+                quote(&service)
+            ));
+            front.push(format!(
+                "(name = {}, durableObjectNamespace = (className = \"Engine\", serviceName = {}))",
+                quote(&format!("E_{}", w.name)),
+                quote(&service)
+            ));
+        }
+        services.push(format!(
+            "(name = {}, worker = (modules = [(name = \"workflows.js\", esModule = embed \"m/selvedge-workflows.js\")], \
+             compatibilityDate = \"2025-09-01\", \
+             durableObjectNamespaces = [(className = \"WorkflowIndex\", uniqueKey = {}, enableSql = true)], \
+             durableObjectStorage = (localDisk = \"do-storage\"), bindings = [{}]))",
+            quote(WORKFLOWS_SERVICE),
+            quote(&durable_object_key(bundle.account_id.as_str(), WORKFLOWS_SERVICE, "WorkflowIndex")),
+            front.join(", "),
+        ));
+        let socket = opts.socket_dir.join("workflows.sock");
+        sockets_cfg.push(format!(
+            "(name = {}, address = {}, http = (), service = {})",
+            quote(WORKFLOWS_SERVICE),
+            quote(&format!("unix:{}", socket.display())),
+            quote(WORKFLOWS_SERVICE),
+        ));
+        sockets.push((WORKFLOWS_SERVICE.to_owned(), socket));
+    }
     let d1 = uses_d1(bundle);
     if d1 {
         std::fs::write(opts.dir.join("m").join("selvedge-d1.js"), D1_WORKER)?;
@@ -403,7 +496,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         ));
         sockets.push((D1_SERVICE.to_owned(), socket));
     }
-    if !do_classes.is_empty() || d1 {
+    if !do_classes.is_empty() || d1 || !wfs.is_empty() {
         std::fs::create_dir_all(&opts.do_storage_dir)?;
         services.push(format!(
             "(name = \"do-storage\", disk = (path = {}, writable = true))",
@@ -428,7 +521,13 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
         let _ = writeln!(text, "    {s},");
     }
     text.push_str("  ],\n");
-    let experimental = opts.cluster.is_some() && (!do_classes.is_empty() || d1);
+    if !wfs.is_empty() {
+        // The engine imports zod by miniflare's module name.
+        text.push_str(
+            "  extensions = [(modules = [(name = \"miniflare:zod\", esModule = embed \"m/selvedge-zod.js\")])],\n",
+        );
+    }
+    let experimental = opts.cluster.is_some() && (!do_classes.is_empty() || d1 || !wfs.is_empty());
     if experimental {
         let c = opts.cluster.as_ref().expect("checked above");
         let mut fields = vec![
@@ -532,6 +631,25 @@ fn render_worker(
             ),
             Binding::R2Bucket { bucket_name, .. } => {
                 format!("r2Bucket = {}", quote(&r2_service(bucket_name)))
+            }
+            Binding::Workflow { workflow_name, .. } => {
+                let defined = workflows(bundle).iter().any(|w| w.name == *workflow_name);
+                if !defined {
+                    missing = true;
+                }
+                let fetcher = if defined {
+                    format!(
+                        "(name = {}, entrypoint = \"Binding\", props = (json = {}))",
+                        quote(WORKFLOWS_SERVICE),
+                        quote(&serde_json::json!({ "workflow": workflow_name }).to_string())
+                    )
+                } else {
+                    quote(MISSING_SERVICE)
+                };
+                format!(
+                    "wrapped = (moduleName = \"cloudflare-internal:workflows-api\", innerBindings = \
+                     [(name = \"fetcher\", service = {fetcher})])"
+                )
             }
             Binding::Assets { .. } => {
                 if script.assets.is_some() {
@@ -662,6 +780,7 @@ mod tests {
                 assets: None,
             }],
             d1_databases: vec![],
+            workflows: vec![],
         };
         let opts = RenderOptions {
             dir: dir.path().join("g1"),

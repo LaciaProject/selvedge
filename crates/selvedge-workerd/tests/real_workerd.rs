@@ -86,6 +86,7 @@ export default {
             },
         ],
         d1_databases: vec!["db-1".into()],
+        workflows: vec![],
     };
     let opts = RenderOptions {
         dir: dir.path().join("cfg"),
@@ -206,6 +207,7 @@ export default {
             script("site", vec![], vec![]),
         ],
         d1_databases: vec![],
+        workflows: vec![],
     };
     serve_assets(
         &dir.path().join("b.sock"),

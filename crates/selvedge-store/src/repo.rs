@@ -650,12 +650,27 @@ impl Db {
                 name,
             });
         }
-        let d1_databases = tx_d1_ids(&**self.client().await?, account).await?;
+        let client = self.client().await?;
+        let d1_databases = tx_d1_ids(&client, account).await?;
+        let workflows = client
+            .query(
+                "SELECT name, script_name, class_name FROM workflows WHERE account_id = $1 ORDER BY name",
+                &[&account.as_str()],
+            )
+            .await?
+            .iter()
+            .map(|r| selvedge_core::WorkflowDef {
+                name: r.get(0),
+                script_name: r.get(1),
+                class_name: r.get(2),
+            })
+            .collect();
         Ok(Some(AccountBundle {
             account_id: account.clone(),
             generation: gen_row.get(0),
             scripts,
             d1_databases,
+            workflows,
         }))
     }
 
@@ -998,6 +1013,7 @@ fn binding_type(b: &Binding) -> &'static str {
         Binding::D1 { .. } => "d1",
         Binding::Queue { .. } => "queue",
         Binding::Assets { .. } => "assets",
+        Binding::Workflow { .. } => "workflow",
     }
 }
 

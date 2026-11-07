@@ -100,6 +100,15 @@ pub enum Binding {
     Assets {
         name: String,
     },
+    /// A Workflow, by its account-wide name. `class_name` (in `script_name`, or
+    /// this script) is the `WorkflowEntrypoint` that runs its instances.
+    Workflow {
+        name: String,
+        workflow_name: String,
+        class_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_name: Option<String>,
+    },
 }
 
 /// Binding types Selvedge knows about but does not implement yet. An upload that
@@ -112,7 +121,6 @@ const NOT_YET: &[&str] = &[
     "vectorize",
     "mtls_certificate",
     "dispatch_namespace",
-    "workflow",
     "version_metadata",
     "send_email",
     "pipelines",
@@ -132,7 +140,8 @@ impl Binding {
             | Self::R2Bucket { name, .. }
             | Self::D1 { name, .. }
             | Self::Queue { name, .. }
-            | Self::Assets { name } => name,
+            | Self::Assets { name }
+            | Self::Workflow { name, .. } => name,
         }
     }
 
@@ -187,6 +196,24 @@ pub struct AccountBundle {
     /// when no script binds it.
     #[serde(default)]
     pub d1_databases: Vec<String>,
+    /// Workflows registered for the account (`PUT /workflows/:name`).
+    #[serde(default)]
+    pub workflows: Vec<WorkflowDef>,
+}
+
+/// A Workflow: the `WorkflowEntrypoint` class that runs it, and its script.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowDef {
+    pub name: String,
+    pub script_name: String,
+    pub class_name: String,
+}
+
+/// Workflow names: as Cloudflare allows, and usable in a binding name.
+pub fn valid_workflow_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

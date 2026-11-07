@@ -300,7 +300,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | Queues：官方 Queue 生产者绑定；消息存 Postgres，data 副本按租约认领批次（至少一次投递），经 `selvedge-events` 以 `MessageBatch` 形状的对象投递；重试、死信队列 | 完成（不支持 `v8` 格式：解码需要实验性标志） | wrangler 部署 + 生产、消费、重试的端到端测试 |
 | Static Assets：wrangler 的上传会话协议（只传账户里还没有的文件）、纯静态 Worker、`ASSETS` 绑定；由官方 workers-sdk 的 asset worker 和 router worker（未修改）在 workerd 里提供服务，`_headers`、`_redirects`、`run_worker_first` 在部署时解析；runner 本地磁盘缓存 | 完成 | 官方 workerd 渲染测试；wrangler 部署的端到端测试；两 runner 测试中 data 服务停掉后已缓存的资源照常返回 |
 | `wrangler tail`：每个账户进程里有一个 tail worker，只在有人 tail 时把事件转给 agent；API 按 wrangler 的过滤条件筛选，经 PostgreSQL `LISTEN/NOTIFY` 送到持有 WebSocket 的副本 | 完成 | wrangler tail 的端到端测试（日志、异常、结束会话） |
-| Workflows | 未开始 | |
+| Workflows：官方 workers-sdk 的 Workflows 引擎（未修改，每个实例一个 DO，跟随 cluster 模式）、workerd 自带的 `workflows-api` 绑定模块；系统 worker `selvedge-workflows` 维护实例索引、对外提供 REST；不需要实验性标志 | 完成 | wrangler 部署和 `wrangler workflows` 的端到端测试；两 runner 测试中 runner 崩溃后等待事件的实例全部继续完成 |
 | 每账户 UID：agent 以只带六个 capability 的 root 运行，每个账户的 workerd 用独立 UID、无 capability，目录 0700、绑定 socket 0600；Helm 默认开启，可选 `hostUsers: false`；Pod 使用 `RuntimeDefault` seccomp | 完成 | 以 root 在容器里跑的单节点端到端测试（进程 UID、socket 和目录权限）；kind 测试默认开启 |
 | `request.cf` 由 gateway 设置，不再暴露 runner 本地 socket 的 PID/UID | 完成 | 端到端测试（含客户端伪造） |
 | 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 只拿到按账户派生的密钥；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |

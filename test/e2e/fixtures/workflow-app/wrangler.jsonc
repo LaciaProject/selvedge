@@ -1,0 +1,6 @@
+{
+  "name": "workflow-app",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "workflows": [{ "name": "e2e-flow", "binding": "FLOW", "class_name": "Flow" }]
+}

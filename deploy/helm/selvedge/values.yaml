@@ -81,6 +81,10 @@ data:
   # an account API token's id and the SHA-256 of its value.
   r2S3:
     enabled: true
+    # Zone for public bucket URLs, pub-<id>.<zone> (like r2.dev), which
+    # `wrangler r2 bucket dev-url enable` turns on. Point *.<zone> and any R2
+    # custom domains at the r2-s3 Service. Empty: public URLs are off.
+    devZone: ""
     service:
       type: ClusterIP
       port: 80

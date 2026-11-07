@@ -37,6 +37,10 @@ spec:
             {{- include "selvedge.tlsEnv" . | nindent 12 }}
             - name: SELVEDGE_WORKERS_DEV_ZONE
               value: {{ .Values.workersDevZone | quote }}
+            {{- if and .Values.data.r2S3.enabled .Values.data.r2S3.devZone }}
+            - name: SELVEDGE_R2_DEV_ZONE
+              value: {{ .Values.data.r2S3.devZone | quote }}
+            {{- end }}
             - name: SELVEDGE_MASTER_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: master-key } }
             - name: SELVEDGE_ADMIN_TOKEN

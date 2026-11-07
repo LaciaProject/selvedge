@@ -37,7 +37,7 @@ enum Command {
     /// Route requests by hostname to runners.
     Gateway(GatewayArgs),
     /// Run every role in one process (the minimal profile).
-    All(AllArgs),
+    All(Box<AllArgs>),
     /// Apply database migrations and exit.
     Migrate(DbArgs),
     /// Administrative commands.
@@ -85,6 +85,10 @@ struct ApiArgs {
     /// Zone for <script>.<subdomain>.<zone> hostnames.
     #[arg(long, env = "SELVEDGE_WORKERS_DEV_ZONE")]
     workers_dev_zone: Option<String>,
+    /// Zone for public bucket URLs, pub-<id>.<zone> (like r2.dev); the data
+    /// service's R2 S3 listener serves them.
+    #[arg(long, env = "SELVEDGE_R2_DEV_ZONE")]
+    r2_dev_zone: Option<String>,
     /// The gateway, for API requests into account processes (D1 queries).
     #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
     gateway_url: Option<String>,
@@ -105,8 +109,12 @@ struct DataArgs {
     #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
     gateway_url: Option<String>,
     /// Serve R2's S3-compatible API here (path-style), e.g. 0.0.0.0:8790.
+    /// Public buckets are served here too.
     #[arg(long, env = "SELVEDGE_R2_S3_LISTEN")]
     r2_s3_listen: Option<SocketAddr>,
+    /// Zone for public bucket URLs, pub-<id>.<zone>, as the API names them.
+    #[arg(long, env = "SELVEDGE_R2_DEV_ZONE")]
+    r2_dev_zone: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -293,6 +301,7 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         secrets: SecretBox::from_hex(&args.master_key)?,
         internal_token: args.internal.internal_token.clone(),
         workers_dev_zone: args.workers_dev_zone.clone(),
+        r2_dev_zone: args.r2_dev_zone.clone(),
         gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
         http: selvedge_server::tls::reqwest(
             reqwest::Client::builder(),
@@ -439,7 +448,14 @@ async fn main() -> Result<()> {
             let db = open_db(&args.db).await?;
             let blobs = Blobs::open(&args.blob_url, &blob_options())?;
             let r2_s3 = args.r2_s3_listen.map(|addr| {
-                (addr, Arc::new(selvedge_server::r2s3::S3State { db: db.clone(), blobs: blobs.clone() }))
+                (
+                    addr,
+                    Arc::new(selvedge_server::r2s3::S3State {
+                        db: db.clone(),
+                        blobs: blobs.clone(),
+                        r2_dev_zone: args.r2_dev_zone.clone(),
+                    }),
+                )
             });
             let state = selvedge_server::data::DataState::new(
                 db.clone(),
@@ -506,7 +522,7 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Command::All(args) => run_all(args).await?,
+        Command::All(args) => run_all(*args).await?,
     }
     Ok(())
 }
@@ -569,8 +585,11 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     };
     let api_url = format!("http://{}", loopback(args.api.listen));
     let data = selvedge_server::data::DataState::new(state.db.clone(), state.blobs.clone(), token.clone());
-    let s3_state =
-        Arc::new(selvedge_server::r2s3::S3State { db: state.db.clone(), blobs: state.blobs.clone() });
+    let s3_state = Arc::new(selvedge_server::r2s3::S3State {
+        db: state.db.clone(),
+        blobs: state.blobs.clone(),
+        r2_dev_zone: args.api.r2_dev_zone.clone(),
+    });
     tokio::spawn(purge_expired(state.db.clone()));
     tokio::spawn(collect_garbage(state.db.clone(), state.blobs.clone()));
     let dispatcher = selvedge_server::dispatch::Dispatcher::new(

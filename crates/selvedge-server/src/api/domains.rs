@@ -18,7 +18,7 @@ pub fn routes() -> Router<State> {
 }
 
 /// A DNS hostname: labels of letters, digits and hyphens.
-fn valid_hostname(h: &str) -> bool {
+pub(super) fn valid_hostname(h: &str) -> bool {
     !h.is_empty()
         && h.len() <= 253
         && h.split('.').count() >= 2

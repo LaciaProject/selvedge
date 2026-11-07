@@ -18,6 +18,7 @@ export SELVEDGE_MASTER_KEY=$(openssl rand -hex 32)
 export SELVEDGE_INTERNAL_TOKEN=$(openssl rand -hex 16)
 export SELVEDGE_ADMIN_TOKEN=admin-$(openssl rand -hex 8)
 export SELVEDGE_WORKERS_DEV_ZONE=workers.test
+export SELVEDGE_R2_DEV_ZONE=r2.test
 export SELVEDGE_STATE_DIR="$WORK/state"
 export SELVEDGE_RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/slv-e2e-$$"
 export SELVEDGE_API_LISTEN=127.0.0.1:$API_PORT
@@ -301,6 +302,38 @@ check "a route pattern reaches its Worker" "route:app.$ZONE/api/hello" "$(rt "ap
 check "a wildcard host route reaches its Worker" "route:x.$ZONE/wild/a" "$(rt "x.$ZONE" /wild/a)"
 check "a path no route matches is not served" "404" \
   "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: app.$ZONE" "http://127.0.0.1:$GATEWAY_PORT/other")"
+
+# Public buckets: the r2.dev-style URL, and a custom domain in the account's
+# zone. Both read objects without credentials on the S3 listener.
+ZONE_ID=$(admin "$API/zones?name=$ZONE" | json '["result"][0]["id"]')
+code_as() { local host=$1 path=$2; shift 2; curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" "$@" "http://127.0.0.1:$S3_PORT$path"; }
+DEV=$(wrangler r2 bucket dev-url enable e2e-files -y 2>&1 | grep -o 'pub-[0-9a-f]*\.r2\.test' | head -1)
+check "wrangler turns on a bucket's public URL" "pub-" "${DEV:0:4}"
+check "the public URL serves an object without credentials" "from wrangler" \
+  "$(curl -s -H "Host: $DEV" "http://127.0.0.1:$S3_PORT/seed.txt")"
+check "the public URL serves ranges" "wrangler" \
+  "$(curl -s -H "Host: $DEV" -H 'Range: bytes=5-' "http://127.0.0.1:$S3_PORT/seed.txt")"
+ETAG=$(curl -s -I -H "Host: $DEV" "http://127.0.0.1:$S3_PORT/seed.txt" | tr -d '\r' | sed -n 's/^etag: //Ip')
+check "the public URL answers conditional requests" "304" "$(code_as "$DEV" /seed.txt -H "If-None-Match: $ETAG")"
+check "the public URL refuses writes" "405" "$(code_as "$DEV" /seed.txt -X PUT -d x)"
+check "the public URL lists nothing" "404" "$(code_as "$DEV" /)"
+check "the public URL answers 404 for a missing object" "404" "$(code_as "$DEV" /nope.txt)"
+check "wrangler reports the public URL" "enabled at 'https://$DEV'" \
+  "$(wrangler r2 bucket dev-url get e2e-files 2>&1 | grep -o "enabled at 'https://[^']*'")"
+wrangler r2 bucket dev-url disable e2e-files -y > /dev/null 2>&1
+check "a disabled public URL serves nothing" "403" "$(code_as "$DEV" /seed.txt)"
+FILES="files.$ZONE"
+wrangler r2 bucket domain add e2e-files --domain "$FILES" --zone-id "$ZONE_ID" -y > "$WORK/domain.log" 2>&1 || cat "$WORK/domain.log"
+check "a custom domain serves the bucket" "from wrangler" "$(curl -s -H "Host: $FILES" "http://127.0.0.1:$S3_PORT/seed.txt")"
+check "wrangler lists the custom domain" "$FILES" \
+  "$(wrangler r2 bucket domain list e2e-files 2>&1 | grep -o "$FILES" | head -1)"
+check "a custom domain outside the zone is refused" "1" \
+  "$(wrangler r2 bucket domain add e2e-files --domain files.elsewhere.test --zone-id "$ZONE_ID" -y 2>&1 | grep -c 'is not in the zone')"
+check "a custom domain in another account's zone is refused" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "$API/accounts/$ACCOUNT/r2/buckets/e2e-files/domains/custom" -d '{"domain":"x.y.test","zoneId":"0123456789abcdef0123456789abcdef"}')"
+wrangler r2 bucket domain remove e2e-files --domain "$FILES" -y > /dev/null 2>&1
+check "a removed custom domain serves nothing" "403" "$(code_as "$FILES" /seed.txt)"
 
 # Gradual deployments: two versions share the requests.
 SPLIT="$WORK/split-app"

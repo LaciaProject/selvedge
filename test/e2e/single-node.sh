@@ -285,6 +285,23 @@ check "describe lists its steps" "double-1 approval-1 pause-1" \
 check "wrangler workflows instances list sees both" "2" \
   "$(wwr workflows instances list e2e-flow --json 2>/dev/null | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')"
 
+# Zone routes: the operator assigns a zone; wrangler adds the routes.
+check "a tenant cannot claim a zone" "403" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$API/zones" -d "{\"name\":\"stolen.test\",\"account\":{\"id\":\"$ACCOUNT\"}}")"
+# Zone names are unique across the platform, and the test database is shared.
+ZONE="r$(openssl rand -hex 4).test"
+admin -X POST "$API/zones" -d "{\"name\":\"$ZONE\",\"account\":{\"id\":\"$ACCOUNT\"}}" > /dev/null
+ROUTES="$WORK/route-app"
+cp -r "$E2E/fixtures/route-app" "$ROUTES"
+sed -i "s/routes\.test/$ZONE/g" "$ROUTES/wrangler.jsonc"
+(cd "$ROUTES" && "$E2E/node_modules/.bin/wrangler" deploy > "$WORK/routes.log" 2>&1) || { cat "$WORK/routes.log"; exit 1; }
+settle
+rt() { curl -s -H "Host: $1" "http://127.0.0.1:$GATEWAY_PORT$2"; }
+check "a route pattern reaches its Worker" "route:app.$ZONE/api/hello" "$(rt "app.$ZONE" /api/hello)"
+check "a wildcard host route reaches its Worker" "route:x.$ZONE/wild/a" "$(rt "x.$ZONE" /wild/a)"
+check "a path no route matches is not served" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: app.$ZONE" "http://127.0.0.1:$GATEWAY_PORT/other")"
+
 # Gradual deployments: two versions share the requests.
 SPLIT="$WORK/split-app"
 cp -r "$E2E/fixtures/split-app" "$SPLIT"

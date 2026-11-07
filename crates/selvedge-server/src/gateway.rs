@@ -47,6 +47,8 @@ pub struct GatewayConfig {
 #[derive(Default)]
 struct Shared {
     routes: RwLock<HashMap<String, Route>>,
+    /// Zone route patterns, tried when no hostname matches.
+    patterns: RwLock<Vec<selvedge_store::zones::PatternRoute>>,
     /// Runner addresses that passed their last health check, sorted.
     healthy: RwLock<Vec<String>>,
 }
@@ -131,10 +133,13 @@ async fn refresh_routes(
     #[derive(serde::Deserialize)]
     struct Table {
         routes: Vec<Route>,
+        #[serde(default)]
+        patterns: Vec<selvedge_store::zones::PatternRoute>,
     }
     let table: Table = resp.json().await?;
     let map = table.routes.into_iter().map(|r| (r.hostname.clone(), r)).collect();
     *shared.routes.write().expect("poisoned") = map;
+    *shared.patterns.write().expect("poisoned") = table.patterns;
     *etag = new_etag;
     Ok(())
 }
@@ -227,7 +232,23 @@ async fn handle(
             let Some(host) = hostname(&req) else {
                 return proxy::full(StatusCode::BAD_REQUEST, "missing Host header");
             };
-            let Some(route) = shared.routes.read().expect("poisoned").get(&host).cloned() else {
+            let exact = shared.routes.read().expect("poisoned").get(&host).cloned();
+            let route = exact.or_else(|| {
+                let patterns = shared.patterns.read().expect("poisoned");
+                let i = selvedge_core::routes::best(
+                    patterns.iter().map(|p| p.pattern.as_str()),
+                    &host,
+                    req.uri().path(),
+                )?;
+                let p = &patterns[i];
+                // A route without a script: matching requests skip Workers.
+                (!p.service.is_empty()).then(|| Route {
+                    hostname: host.clone(),
+                    account_id: p.account_id.clone(),
+                    service: p.service.clone(),
+                })
+            });
+            let Some(route) = route else {
                 return proxy::full(
                     StatusCode::NOT_FOUND,
                     "There is nothing here yet. (Selvedge: no Worker is routed for this hostname)",

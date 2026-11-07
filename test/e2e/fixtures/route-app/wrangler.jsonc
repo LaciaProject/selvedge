@@ -1,0 +1,9 @@
+{
+  "name": "route-app",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "routes": [
+    { "pattern": "app.routes.test/api/*", "zone_name": "routes.test" },
+    { "pattern": "*.routes.test/wild/*", "zone_name": "routes.test" }
+  ]
+}

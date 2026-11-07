@@ -258,4 +258,10 @@ against `/client/v4`. Set `CLOUDFLARE_API_BASE_URL` to Selvedge's API.
   have static assets cannot be split.
 - Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported.
 - Hostnames: `<script>.<account subdomain>.<zone>` for scripts with workers.dev enabled, and custom
-  domains (`/workers/domains`). Zone routes are not supported yet.
+  domains (`/workers/domains`), and zone routes.
+- Zone routes: an operator assigns a zone to an account with an admin token (`POST /zones` with
+  `{"name", "account": {"id"}}`), because Selvedge cannot check who owns a domain. The account's
+  `routes` (`example.com/api/*`, `*.example.com/*`) are then set by `wrangler deploy` or the zone
+  routes API. A host may start with `*` and a path may end with `*`, and the most specific pattern
+  wins. Custom domains and workers.dev hostnames take precedence over routes, as on Cloudflare. A
+  route without a script keeps its requests from Workers.

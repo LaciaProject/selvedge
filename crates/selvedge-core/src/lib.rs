@@ -7,6 +7,7 @@ pub mod assets;
 pub mod envelope;
 pub mod ids;
 pub mod model;
+pub mod routes;
 
 pub use ids::{AccountId, HexId, NamespaceId, VersionId, new_version_id, validate_script_name};
 pub use model::{

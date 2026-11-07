@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-workerd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "hex",

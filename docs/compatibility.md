@@ -60,10 +60,27 @@ conditional write is one transaction.
 
 Differences:
 
-- Public buckets, custom domains on buckets and event notifications are not available yet.
+- Event notifications are not available yet.
 - SSE-C, storage classes other than `Standard`, and jurisdictions are accepted and ignored.
 - Parts of a multipart upload other than the last must be at least 5 MiB; R2's rule that they all be
   the same size is not enforced.
+
+### Public buckets
+
+`wrangler r2 bucket dev-url enable|disable|get` and `wrangler r2 bucket domain
+add|list|get|update|remove` work. A bucket's public URL is `pub-<id>.<zone>`, where the operator
+sets the zone (`SELVEDGE_R2_DEV_ZONE`; in Helm, `data.r2S3.devZone`) in place of `r2.dev`. A custom
+domain must lie in a zone the operator assigned to the account, and `--zone-id` names that zone.
+Both serve GET and HEAD of objects without credentials, with ranges and conditional requests, on
+the data service's S3 listener: point `*.<zone>` and the custom domains at it.
+
+Differences:
+
+- The listener does not terminate TLS; put the load balancer or ingress that serves the hostnames
+  in front of it. `minTLS` is stored for that front end and not enforced by Selvedge.
+- There is no rate limiting on the public URL, and no caching in front of it.
+- Requests for a hostname without an object key, and requests other than GET and HEAD, are
+  refused; there is no directory listing.
 
 ### The S3-compatible API
 

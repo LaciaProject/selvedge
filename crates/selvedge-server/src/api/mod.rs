@@ -35,6 +35,8 @@ pub struct ApiState {
     pub internal_token: String,
     /// Zone for `<script>.<subdomain>.<zone>` hostnames, like workers.dev.
     pub workers_dev_zone: Option<String>,
+    /// Zone for public bucket URLs, `pub-<id>.<zone>`, like r2.dev.
+    pub r2_dev_zone: Option<String>,
     /// The gateway, for requests the API sends into account processes (D1).
     pub gateway_url: Option<String>,
     pub http: reqwest::Client,

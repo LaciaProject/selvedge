@@ -6,6 +6,10 @@
 //! access key id is an account API token's id and the secret is the SHA-256 of
 //! the token's value. Bodies may be `aws-chunked` (what current SDKs send for
 //! uploads); chunk signatures are not checked, the request signature is.
+//!
+//! Unsigned GET and HEAD requests for a public bucket's hostname (its
+//! `pub-<id>.<dev zone>` URL or a custom domain) read objects without
+//! credentials, as r2.dev and R2 custom domains do.
 
 use std::sync::Arc;
 
@@ -31,6 +35,8 @@ const MAX_XML_BODY: usize = 4 << 20;
 pub struct S3State {
     pub db: Db,
     pub blobs: Blobs,
+    /// Zone of public bucket URLs, `pub-<id>.<zone>`.
+    pub r2_dev_zone: Option<String>,
 }
 
 pub fn router(state: Arc<S3State>) -> axum::Router {
@@ -498,6 +504,12 @@ async fn dispatch(st: &S3State, req: Request) -> S3Result<Response> {
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_owned();
     let query = parts.uri.query().unwrap_or("").to_owned();
+    if !signed(&parts.headers, &query)
+        && let Some(host) = request_host(&parts.headers)
+        && let Some(bucket) = st.db.r2_public_bucket(&host, st.r2_dev_zone.as_deref()).await?
+    {
+        return Ok(public_read(st, bucket, &parts.method, &path, &parts.headers).await);
+    }
     let (account, payload) = authenticate(st, &parts.method, &path, &query, &parts.headers).await?;
     let pairs = query_pairs(&query);
     let has = |k: &str| pairs.iter().any(|(n, _)| n == k);
@@ -598,6 +610,50 @@ async fn dispatch(st: &S3State, req: Request) -> S3Result<Response> {
             complete_upload(&bucket, &bucket_name, &key, &q("uploadId").unwrap_or_default(), body).await
         }
         _ => Err(S3Error::bad("unsupported object request")),
+    }
+}
+
+/// Whether a request carries a SigV4 signature (header or presigned URL).
+fn signed(headers: &HeaderMap, query: &str) -> bool {
+    headers.contains_key(http::header::AUTHORIZATION) || query.contains("X-Amz-Signature=")
+}
+
+/// The request's host name, lowercased, without a port.
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(http::header::HOST)?.to_str().ok()?;
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    };
+    Some(host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// An anonymous read of a public bucket: GET and HEAD of objects, no listing.
+async fn public_read(
+    st: &S3State,
+    bucket: String,
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let plain = |status: StatusCode, text: &'static str| {
+        (status, [(http::header::CONTENT_TYPE, "text/plain")], text).into_response()
+    };
+    if method != Method::GET && method != Method::HEAD {
+        return (StatusCode::METHOD_NOT_ALLOWED, [(http::header::ALLOW, "GET, HEAD")], "Method not allowed")
+            .into_response();
+    }
+    let Ok(key) = percent_decode_str(path.trim_start_matches('/')).decode_utf8() else {
+        return plain(StatusCode::BAD_REQUEST, "Invalid path");
+    };
+    if key.is_empty() {
+        return plain(StatusCode::NOT_FOUND, "Object not found");
+    }
+    let bucket = Bucket { db: &st.db, blobs: &st.blobs, id: bucket };
+    match get_object(&bucket, &key, headers, method == Method::HEAD).await {
+        Ok(r) => r,
+        Err(e) if e.status == StatusCode::NOT_FOUND => plain(StatusCode::NOT_FOUND, "Object not found"),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -936,6 +992,19 @@ async fn list_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosts_and_signatures() {
+        let mut h = HeaderMap::new();
+        h.insert(http::header::HOST, HeaderValue::from_static("Pub-ABC.R2.Example.com:8790"));
+        assert_eq!(request_host(&h).as_deref(), Some("pub-abc.r2.example.com"));
+        h.insert(http::header::HOST, HeaderValue::from_static("files.example.com."));
+        assert_eq!(request_host(&h).as_deref(), Some("files.example.com"));
+        assert!(!signed(&h, "x=1"));
+        assert!(signed(&h, "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=ab"));
+        h.insert(http::header::AUTHORIZATION, HeaderValue::from_static("AWS4-HMAC-SHA256 ..."));
+        assert!(signed(&h, ""));
+    }
 
     #[tokio::test]
     async fn aws_chunked_bodies() {

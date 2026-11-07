@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use selvedge_core::AccountId;
 use selvedge_store::r2::BucketDelete;
+use selvedge_store::r2public::CustomDomain;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,6 +24,12 @@ pub fn routes() -> Router<State> {
         .route(
             &format!("{base}/{{bucket}}/objects/{{*key}}"),
             get(get_object).put(put_object).delete(delete_object),
+        )
+        .route(&format!("{base}/{{bucket}}/domains/managed"), get(get_dev_url).put(put_dev_url))
+        .route(&format!("{base}/{{bucket}}/domains/custom"), get(list_custom).post(add_custom))
+        .route(
+            &format!("{base}/{{bucket}}/domains/custom/{{domain}}"),
+            get(get_custom).put(update_custom).delete(delete_custom),
         )
 }
 
@@ -213,4 +220,180 @@ mod tests {
         assert!(!super::valid_bucket_name("My-Bucket"));
         assert_eq!(&super::iso(std::time::UNIX_EPOCH)[..19], "1970-01-01T00:00:00");
     }
+}
+
+// ---- public access: the r2.dev-style URL and custom domains ----
+
+fn dev_url_json(state: &State, bucket: &str, url: &selvedge_store::r2public::DevUrl) -> Value {
+    let domain = state.r2_dev_zone.as_deref().map(|z| format!("pub-{}.{z}", url.id)).unwrap_or_default();
+    json!({ "bucketId": bucket, "domain": domain, "enabled": url.enabled && state.r2_dev_zone.is_some() })
+}
+
+async fn get_dev_url(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let url = state.db.r2_dev_url(&bucket_id).await?;
+    Ok(ok(dev_url_json(&state, &bucket_id, &url)))
+}
+
+#[derive(Deserialize)]
+struct DevUrlBody {
+    enabled: bool,
+}
+
+async fn put_dev_url(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+    super::JsonBody(body): super::JsonBody<DevUrlBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    if body.enabled && state.r2_dev_zone.is_none() {
+        return Err(ApiError::bad_request(
+            "public bucket URLs are not set up on this platform (the operator sets SELVEDGE_R2_DEV_ZONE)",
+        ));
+    }
+    let url = state.db.set_r2_dev_url(&bucket_id, Some(body.enabled)).await?;
+    Ok(ok(dev_url_json(&state, &bucket_id, &url)))
+}
+
+fn custom_json(d: &CustomDomain) -> Value {
+    json!({
+        "domain": d.domain,
+        "enabled": d.enabled,
+        "minTLS": d.min_tls,
+        "zoneId": d.zone_id,
+        "zoneName": d.zone_name,
+        "status": { "ownership": "active", "ssl": "active" },
+    })
+}
+
+fn no_domain() -> ApiError {
+    ApiError::new(http::StatusCode::NOT_FOUND, 10102, "The custom domain is not connected to this bucket.")
+}
+
+fn valid_min_tls(v: &str) -> bool {
+    matches!(v, "1.0" | "1.1" | "1.2" | "1.3")
+}
+
+async fn list_custom(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let domains = state.db.r2_custom_domains(&bucket_id).await?;
+    Ok(ok(json!({ "domains": domains.iter().map(custom_json).collect::<Vec<_>>() })))
+}
+
+async fn get_custom(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket, domain)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let d =
+        state.db.r2_custom_domain(&bucket_id, &domain.to_ascii_lowercase()).await?.ok_or_else(no_domain)?;
+    Ok(ok(custom_json(&d)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddCustomBody {
+    domain: String,
+    zone_id: String,
+    #[serde(default = "yes")]
+    enabled: bool,
+    #[serde(rename = "minTLS")]
+    min_tls: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn add_custom(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+    super::JsonBody(body): super::JsonBody<AddCustomBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let domain = body.domain.trim_end_matches('.').to_ascii_lowercase();
+    if !super::domains::valid_hostname(&domain) {
+        return Err(ApiError::bad_request(format!("`{domain}` is not a valid hostname")));
+    }
+    let min_tls = body.min_tls.unwrap_or_else(|| "1.0".to_owned());
+    if !valid_min_tls(&min_tls) {
+        return Err(ApiError::bad_request("minTLS must be one of 1.0, 1.1, 1.2 and 1.3"));
+    }
+    // The zone stands for ownership of the domain: an operator assigned it.
+    let zone = state.db.zone(&body.zone_id).await?.filter(|z| z.account_id == id).ok_or_else(|| {
+        ApiError::new(http::StatusCode::NOT_FOUND, 10103, "The zone does not exist in this account.")
+    })?;
+    if domain != zone.name && !domain.ends_with(&format!(".{}", zone.name)) {
+        return Err(ApiError::bad_request(format!("`{domain}` is not in the zone `{}`", zone.name)));
+    }
+    if !state.db.add_r2_custom_domain(&bucket_id, &domain, &zone.id, body.enabled, &min_tls).await? {
+        return Err(ApiError::new(
+            http::StatusCode::CONFLICT,
+            10104,
+            "The domain is already in use by a bucket or a Worker.",
+        ));
+    }
+    let d = state.db.r2_custom_domain(&bucket_id, &domain).await?.ok_or_else(no_domain)?;
+    Ok(ok(custom_json(&d)))
+}
+
+#[derive(Deserialize)]
+struct UpdateCustomBody {
+    enabled: Option<bool>,
+    #[serde(rename = "minTLS")]
+    min_tls: Option<String>,
+}
+
+async fn update_custom(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket, domain)): Path<(String, String, String)>,
+    super::JsonBody(body): super::JsonBody<UpdateCustomBody>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    if body.min_tls.as_deref().is_some_and(|v| !valid_min_tls(v)) {
+        return Err(ApiError::bad_request("minTLS must be one of 1.0, 1.1, 1.2 and 1.3"));
+    }
+    let d = state
+        .db
+        .update_r2_custom_domain(
+            &bucket_id,
+            &domain.to_ascii_lowercase(),
+            body.enabled,
+            body.min_tls.as_deref(),
+        )
+        .await?
+        .ok_or_else(no_domain)?;
+    Ok(ok(custom_json(&d)))
+}
+
+async fn delete_custom(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket, domain)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let bucket_id = bucket_id(&state, &id, &bucket).await?;
+    let domain = domain.to_ascii_lowercase();
+    if !state.db.delete_r2_custom_domain(&bucket_id, &domain).await? {
+        return Err(no_domain());
+    }
+    Ok(ok(json!({ "domain": domain })))
 }

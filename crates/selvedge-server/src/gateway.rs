@@ -46,6 +46,93 @@ pub struct GatewayConfig {
     pub replicas: usize,
     /// Trust `x-forwarded-for`/`x-forwarded-proto` from the load balancer.
     pub trust_forwarded: bool,
+    /// `request.cf` fields read from request headers the load balancer sets
+    /// (GeoIP and the like): `(field, lowercase header name)`.
+    pub cf_headers: Vec<(String, String)>,
+    /// `request.cf.colo`: a name for this site.
+    pub colo: Option<String>,
+}
+
+/// `request.cf` fields that can come from a load balancer's headers, and
+/// whether each is a number (the rest are strings, as on Cloudflare).
+pub const CF_FIELDS: &[(&str, bool)] = &[
+    ("country", false),
+    ("city", false),
+    ("continent", false),
+    ("region", false),
+    ("regionCode", false),
+    ("postalCode", false),
+    ("metroCode", false),
+    ("timezone", false),
+    ("latitude", false),
+    ("longitude", false),
+    ("asn", true),
+    ("asOrganization", false),
+    ("tlsVersion", false),
+    ("tlsCipher", false),
+    ("clientTcpRtt", true),
+];
+
+/// European Union member states, for `request.cf.isEUCountry`.
+const EU: &[&str] = &[
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT",
+    "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+];
+
+/// Parses `field=header` pairs, checking each field against [`CF_FIELDS`].
+pub fn parse_cf_headers(pairs: &[String]) -> Result<Vec<(String, String)>> {
+    pairs
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| {
+            let (field, header) = p
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("`{p}`: expected <request.cf field>=<header name>"))?;
+            let field = field.trim();
+            anyhow::ensure!(
+                CF_FIELDS.iter().any(|(f, _)| *f == field),
+                "`{field}` is not a request.cf field Selvedge fills from headers; use one of {}",
+                CF_FIELDS.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(", ")
+            );
+            let header = header.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                http::HeaderName::try_from(header.as_str()).is_ok(),
+                "`{header}` is not a header name"
+            );
+            Ok((field.to_owned(), header))
+        })
+        .collect()
+}
+
+/// `request.cf` for a request: the protocol, the configured `colo`, and the
+/// fields the load balancer's headers carry.
+fn request_cf(cfg: &GatewayConfig, version: http::Version, headers: &http::HeaderMap) -> serde_json::Value {
+    let mut cf = serde_json::Map::new();
+    cf.insert("httpProtocol".into(), format!("{version:?}").into());
+    if let Some(colo) = &cfg.colo {
+        cf.insert("colo".into(), colo.clone().into());
+    }
+    for (field, header) in &cfg.cf_headers {
+        let Some(v) = headers.get(header).and_then(|v| v.to_str().ok()).map(str::trim) else { continue };
+        if v.is_empty() || v.len() > 256 {
+            continue;
+        }
+        let number = CF_FIELDS.iter().any(|(f, n)| f == field && *n);
+        let value = if number {
+            match v.parse::<i64>() {
+                Ok(n) => n.into(),
+                Err(_) => continue,
+            }
+        } else {
+            v.into()
+        };
+        cf.insert(field.clone(), value);
+    }
+    if let Some(country) = cf.get("country").and_then(|c| c.as_str()) {
+        let eu = EU.contains(&country.to_ascii_uppercase().as_str());
+        cf.insert("isEUCountry".into(), if eu { "1" } else { "0" }.into());
+    }
+    serde_json::Value::Object(cf)
 }
 
 #[derive(Default)]
@@ -334,8 +421,9 @@ async fn handle(
     headers.insert(ACCOUNT_HEADER, account);
     headers.insert(SCRIPT_HEADER, script);
     headers.insert(TOKEN_HEADER, token);
-    // `request.cf`: only what the gateway knows. No geo or network data.
-    let cf = serde_json::json!({ "httpProtocol": format!("{:?}", version) }).to_string();
+    // `request.cf`: what the gateway knows, and what the load balancer's
+    // headers say (`--cf-header`).
+    let cf = request_cf(cfg, version, headers).to_string();
     if let Ok(v) = HeaderValue::from_str(&cf) {
         headers.insert(selvedge_workerd::render::CF_HEADER, v);
     }
@@ -372,7 +460,60 @@ async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::rank;
+    use super::*;
+
+    fn cfg_with(cf_headers: &[&str], colo: Option<&str>) -> GatewayConfig {
+        GatewayConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            internal_listen: None,
+            api_url: String::new(),
+            internal_token: String::new(),
+            runners: Runners::Static(vec![]),
+            replicas: 1,
+            trust_forwarded: true,
+            cf_headers: parse_cf_headers(&cf_headers.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .unwrap(),
+            colo: colo.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn request_cf_from_headers() {
+        let cfg = cfg_with(
+            &["country=X-Geo-Country", "city=x-geo-city", "asn=x-geo-asn", "latitude=x-geo-lat"],
+            Some("fra1"),
+        );
+        let mut h = http::HeaderMap::new();
+        h.insert("x-geo-country", HeaderValue::from_static("DE"));
+        h.insert("x-geo-city", HeaderValue::from_static("Berlin"));
+        h.insert("x-geo-asn", HeaderValue::from_static("3320"));
+        h.insert("x-geo-lat", HeaderValue::from_static("52.52"));
+        let cf = request_cf(&cfg, http::Version::HTTP_11, &h);
+        assert_eq!(
+            cf,
+            serde_json::json!({
+                "httpProtocol": "HTTP/1.1", "colo": "fra1", "country": "DE", "city": "Berlin",
+                "asn": 3320, "latitude": "52.52", "isEUCountry": "1"
+            })
+        );
+        // A number field with a non-number is left out; nothing else is added.
+        h.insert("x-geo-asn", HeaderValue::from_static("nope"));
+        h.insert("x-geo-country", HeaderValue::from_static("US"));
+        h.remove("x-geo-city");
+        let cf = request_cf(&cfg, http::Version::HTTP_2, &h);
+        assert_eq!(cf["asn"], serde_json::Value::Null);
+        assert_eq!(cf["city"], serde_json::Value::Null);
+        assert_eq!(cf["isEUCountry"], "0");
+        assert_eq!(cf["httpProtocol"], "HTTP/2.0");
+    }
+
+    #[test]
+    fn cf_header_mappings_are_checked() {
+        assert!(parse_cf_headers(&["country".into()]).is_err());
+        assert!(parse_cf_headers(&["botManagement=x-bot".into()]).is_err());
+        assert!(parse_cf_headers(&["country=bad header".into()]).is_err());
+        assert_eq!(parse_cf_headers(&["".into()]).unwrap(), vec![]);
+    }
 
     #[test]
     fn rendezvous_is_stable_and_minimal() {

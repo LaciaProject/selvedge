@@ -20,6 +20,7 @@ const kept = [];
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    if (url.pathname === "/cf") return new Response(JSON.stringify(req.cf));
     if (url.pathname === "/grow") {
       kept.push(new Uint8Array(64 << 20).fill(1));
       return new Response(String(kept.length));

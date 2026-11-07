@@ -203,6 +203,13 @@ struct GatewayArgs {
     /// Trust X-Forwarded-For/-Proto from the load balancer in front.
     #[arg(long, env = "SELVEDGE_TRUST_FORWARDED")]
     trust_forwarded: bool,
+    /// Fill a request.cf field from a header the load balancer sets, e.g.
+    /// country=x-geo-country. Repeatable; needs --trust-forwarded.
+    #[arg(long = "cf-header", env = "SELVEDGE_CF_HEADERS", value_delimiter = ',')]
+    cf_headers: Vec<String>,
+    /// request.cf.colo: a name for this site.
+    #[arg(long, env = "SELVEDGE_COLO")]
+    colo: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -517,6 +524,15 @@ async fn main() -> Result<()> {
                     runners,
                     replicas: args.replicas,
                     trust_forwarded: args.trust_forwarded,
+                    cf_headers: {
+                        let h = selvedge_server::gateway::parse_cf_headers(&args.cf_headers)?;
+                        anyhow::ensure!(
+                            h.is_empty() || args.trust_forwarded,
+                            "--cf-header reads headers the load balancer sets, so it needs --trust-forwarded"
+                        );
+                        h
+                    },
+                    colo: args.colo.filter(|c| !c.is_empty()),
                 },
                 shutdown_signal(),
             )
@@ -641,6 +657,8 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
             runners: Runners::Static(vec![loopback(args.agent_listen).to_string()]),
             replicas: 1,
             trust_forwarded: false,
+            cf_headers: vec![],
+            colo: None,
         },
         stop(&tx),
     ));

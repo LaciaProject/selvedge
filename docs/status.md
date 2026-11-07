@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-v0.1.0 是第一个发布版本：镜像 `ghcr.io/laciaproject/selvedge:0.1.0`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。代码分 20 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+v0.1.1 是第一个发布版本：镜像 `ghcr.io/laciaproject/selvedge:0.1.1`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品。）代码分 20 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |

@@ -45,7 +45,7 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
 ## 4. 方案：agent 实现 Docker API 子集，背后用 Kubernetes Pod
 
 ```
-           runner Pod                                        容器 Pod（RuntimeClass: gvisor 或 kata）
+           runner Pod                                        容器 Pod（RuntimeClass: kata）
  ┌──────────────────────────────────────┐            ┌──────────────────────────────────────┐
  │ workerd（账号 A，UID a）              │            │ proxy-everything 边车（NET_ADMIN）     │
  │   │ containerEngine.localDocker       │  入站转发   │   ▲ 共享网络命名空间                    │
@@ -68,8 +68,9 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
   - 通信方式：agent 通过 mTLS 内部接口调用它，新增 `containers` 角色，沿用 PR #9 的按角色校验。
   - 它是 RFC 0001 §4.5 中设想过的 controller 的第一个职责。
 - **容器 Pod**：
+  - 沙箱用 Kata（`runtimeClassName` 由 Helm 配置，默认 `kata-qemu`），所以节点需要 KVM，也就是裸金属机器或开启了嵌套虚拟化的云主机。
   - 放在 release 所在的命名空间，以便用 ownerReference 指向发起它的 runner Pod：runner Pod 被删除时，Kubernetes 会自动回收它的容器 Pod（§6）。
-  - 规格固定：两个容器（边车 + 应用），`runtimeClassName` 由 Helm 配置，默认 `gvisor`；不挂载 ServiceAccount token；`hostNetwork: false`；资源上下限按实例规格设定（§5.3）。
+  - 规格固定：两个容器（边车 + 应用）；不挂载 ServiceAccount token；`hostNetwork: false`；资源上下限按实例规格设定（§5.3）。
 
 ### 4.2 Docker API 映射
 
@@ -197,11 +198,34 @@ GPU；持久磁盘；选择地域或位置；SSH 到实例（`/instances/{id}/ss
 3. gVisor 加 `--net-raw` 后，传统 iptables 的 `REDIRECT` 可用，所以一个基于 `REDIRECT` 的边车理论上可行。代价有两个：
    - 要自己维护一个兼容 workerd 协议的边车，包括入站 CONNECT、出站 CONNECT 加主机名提示、DNS 和 TLS 拦截用的 CA；
    - 沙箱里会开放原始套接字，需要做安全评估。
-4. Kata 无法在 Docker 下验证：Docker 中每个 Kata 容器各自是一台虚拟机，不支持 workerd 依赖的 `--net=container:`。到了 Kubernetes 里，同一个 Pod 的容器共享一台虚拟机，这个问题就不存在了。
+4. Kata 无法在 Docker 下验证：Docker 中每个 Kata 容器各自是一台虚拟机，不支持 workerd 依赖的 `--net=container:`。到了 Kubernetes 里，同一个 Pod 的容器共享一台虚拟机，这个问题就不存在了，所以改在 kind 上验证（下一小节）。
 
-**下一步**
+### 11.1 Kata（kind + kata-deploy 4.3.1）
 
-- 在 kind 中用 Kata 的 RuntimeClass 跑同样的测试。需要 GitHub 托管机器提供 `/dev/kvm`，并在 kind 节点里配置 Kata。
-- 如果 Kata 可行，P1 就以 Kata 为默认沙箱，不需要自己写边车，gVisor 不作为选项。
-- 如果 Kata 在目标环境中不可用，再评估自写 REDIRECT 边车的成本，或者重新讨论是否支持容器。
+workerd 的容器布局放进一个 Kubernetes Pod：`proxy-everything` 边车用 workerd 传给它的同一组参数，带 `NET_ADMIN`，和应用容器共享 Pod 的网络命名空间；RuntimeClass 用 `kata-qemu`。
+
+| 检查项 | 结果 |
+| --- | --- |
+| Pod 就绪耗时（镜像已在节点上） | 6 s |
+| 容器内核和宿主机内核 | `6.18.56` 和 `7.0.0-1019-azure`，确实运行在独立的虚拟机里 |
+| `proxy-everything` | 正常运行，没有重启，入口端口开始接受 CONNECT |
+| 按 workerd 的方式发入站请求（向边车 `CONNECT 127.0.0.1:8080`，带 `X-Dst-Addr`） | 拿到应用的响应 |
+| 策略路由、TPROXY、nat REDIRECT、owner 匹配 | 全部支持 |
+| 出站（边车回连 workerd） | 未测：需要 workerd 在场，留给最小闭环（§9 第 2 点） |
+
+**要让 Kata 在 kind 里跑起来，踩过这些坑**（只和 kind 有关，真实节点上不需要）：
+
+- 默认的 `kata-qemu-runtime-rs` 要通过 systemd 的 D-Bus 设置 cgroup，而 kind 节点里没有 D-Bus socket，所以改用 Go 版运行时 `kata-qemu`；
+- 宿主机要加载 `vhost_vsock` 和 `vhost_net`，并把 `/dev/kvm`、`/dev/vhost-vsock`、`/dev/vhost-net` 挂进节点；
+- 客户机内存以文件形式放在 `/dev/shm`（virtio-fs 需要共享内存），kind 节点自己的 `/dev/shm` 只有 64 MiB，QEMU 会报 `kvm run failed Bad address`。要把宿主机的 `/dev/shm` 挂进去。
+
+GitHub 托管的 Ubuntu 机器提供 `/dev/kvm`（嵌套虚拟化），所以这些检查可以在 CI 里持续运行。
+
+**决定**：沙箱用 Kata，现成的 `proxy-everything` 可以直接用，不需要自己写边车，gVisor 不作为选项。代价是容器所在的节点必须支持 KVM，而且每个容器 Pod 都多一台轻量虚拟机的开销。这个要求要写进 Helm 文档和 compatibility.md。
+
+**下一步**（P0 剩下的部分）
+
+1. 最小闭环（§9 第 2 点）：垫片只实现 create/start/json/wait/delete，背后创建 Kata Pod，让 workerd 的 `getTcpPort().fetch()`、出站和 `interceptOutboundHttp` 都打通，量出冷启动时间（包括镜像拉取和虚拟机启动）。
+2. 出站回连的隔离（§9 第 3 点）：NetworkPolicy 加 agent 中转，验证跨账号的连接会被拒绝。
+3. 把 `docker-recorder.py` 做成契约测试，接进每天的 workerd 升级工作流。
 

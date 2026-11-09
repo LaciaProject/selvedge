@@ -11,3 +11,7 @@ nodes:
         containerPath: /dev/vhost-vsock
       - hostPath: /dev/vhost-net
         containerPath: /dev/vhost-net
+      # Kata backs guest memory with a file in /dev/shm (shared for
+      # virtio-fs); a node container's own /dev/shm is 64 MiB.
+      - hostPath: /dev/shm
+        containerPath: /dev/shm

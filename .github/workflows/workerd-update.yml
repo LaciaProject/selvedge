@@ -1,0 +1,111 @@
+name: workerd update
+
+# workerd releases almost daily. Once a day this checks npm for a newer
+# release, commits the move to it (tools/bump-workerd.sh) on a branch
+# `bot/workerd-<version>`, and runs the CI and Kubernetes suites on that
+# branch. Then it opens a pull request when the WORKERD_BUMP_TOKEN secret holds
+# a token that may (a pull request opened with GITHUB_TOKEN would not run CI,
+# and this repository does not let Actions open them); otherwise it opens an
+# issue with the results and a link to open the pull request.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "workerd version (default: the latest on npm)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workerd-update
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      branch: ${{ steps.bump.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Move to the new release
+        id: bump
+        env:
+          WANTED: ${{ inputs.version }}
+        run: |
+          version=${WANTED:-$(npm view workerd version)}
+          branch="bot/workerd-$version"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "$branch exists already"; exit 0
+          fi
+          tools/bump-workerd.sh "$version"
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -qam "workerd $version" -m "Moved by the workerd update workflow (tools/bump-workerd.sh)."
+          git push -q origin "$branch"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: bump
+    if: needs.bump.outputs.branch != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.bump.outputs.branch }}
+
+  kubernetes:
+    needs: bump
+    if: needs.bump.outputs.branch != ''
+    uses: ./.github/workflows/k8s.yml
+    with:
+      ref: ${{ needs.bump.outputs.branch }}
+
+  report:
+    needs: [bump, ci, kubernetes]
+    if: always() && needs.bump.outputs.branch != ''
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      VERSION: ${{ needs.bump.outputs.version }}
+      BRANCH: ${{ needs.bump.outputs.branch }}
+      CI_RESULT: ${{ needs.ci.result }}
+      K8S: ${{ needs.kubernetes.result }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BUMP_TOKEN: ${{ secrets.WORKERD_BUMP_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Open a pull request or an issue
+        run: |
+          compare="${{ github.server_url }}/$GH_REPO/compare/main...$BRANCH?expand=1"
+          body=$(cat <<EOF
+          workerd [$VERSION](https://www.npmjs.com/package/workerd/v/$VERSION) was released. \`$BRANCH\` moves Selvedge to it (\`tools/bump-workerd.sh\`).
+
+          | Suite | Result |
+          | --- | --- |
+          | ci (unit and end-to-end) | $CI_RESULT |
+          | kubernetes (3-zone HA) | $K8S |
+
+          Run: $RUN
+
+          Before merging, read the release's changes to the cluster mode and to compatibility-date defaults: https://github.com/cloudflare/workerd/releases/tag/v$VERSION
+          EOF
+          )
+          if [ -n "$BUMP_TOKEN" ]; then
+            GH_TOKEN=$BUMP_TOKEN gh pr create --base main --head "$BRANCH" --title "workerd $VERSION" --body "$body"
+          else
+            GH_TOKEN=${{ github.token }} gh issue create --title "workerd $VERSION is out (ci: $CI_RESULT, kubernetes: $K8S)" \
+              --body "$body
+
+          Open the pull request: $compare"
+          fi

@@ -7,12 +7,18 @@ on:
   push:
     branches: [main, "ci/**"]
   workflow_dispatch:
+  # The workerd update workflow tests its branch with this one.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: k8s-${{ github.ref }}
+  group: k8s-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,6 +27,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
       - uses: docker/setup-buildx-action@v3
       - name: Build the image
         uses: docker/build-push-action@v6

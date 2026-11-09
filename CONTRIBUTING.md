@@ -39,6 +39,15 @@ This adds a `Signed-off-by: Your Name <you@example.com>` line. There is no CLA.
    `bench` workflow runs it for `main` and your commit on the same machine (push `ci/<topic>`) and
    puts a comparison in the job summary. Local numbers only compare runs on one machine.
 
+## Moving to a new workerd release
+
+`tools/bump-workerd.sh [<version>]` moves every pin at once: CI, the image and its checksums, the e2e
+dependencies, the docs and the experimental flag list. The `workerd update` workflow runs it daily:
+it pushes `bot/workerd-<version>`, runs the `ci` and `kubernetes` suites on it, then opens a pull
+request if the `WORKERD_BUMP_TOKEN` secret holds a token allowed to (one opened with `GITHUB_TOKEN`
+would not run CI), or else an issue with the results and a link to open one. Read the release's
+cluster-mode changes and compatibility-date defaults before merging.
+
 ## Releases
 
 Set `version` and `appVersion` in `deploy/helm/selvedge/Chart.yaml`, merge, then push a tag

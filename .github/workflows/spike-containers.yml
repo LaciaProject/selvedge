@@ -74,8 +74,29 @@ jobs:
               print(f"- `{c}`")
           print()
           PY
+      - name: Probe the network stack
+        if: always()
+        run: |
+          test/spike/containers/probe-netstack.sh | tee "netstack-${{ matrix.runtime }}.jsonl"
+          {
+            echo "### Network setup steps under ${{ matrix.runtime }}"
+            echo
+            python3 -c '
+          import json, sys
+          for l in open(sys.argv[1]):
+              r = json.loads(l)
+              if "step" in r:
+                  print(f"- `{r[\"step\"]}`: exit {r[\"exit\"]} {r[\"out\"][:100]}")
+              else:
+                  print(f"\nproxy-everything ({r[\"binary\"]}):\n")
+                  for c in r["commands"]:
+                      print(f"    {c}")
+          ' "netstack-${{ matrix.runtime }}.jsonl"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: spike-${{ matrix.runtime }}
-          path: result-*.json
+          path: |
+            result-*.json
+            netstack-*.jsonl

@@ -127,6 +127,10 @@ pub struct ClusterOptions {
     pub advertise: Option<String>,
     /// Hex of a secret of at least 32 bytes, unique to the account.
     pub key_hex: String,
+    /// From SIGTERM to exit: the instance hands its Durable Objects to peers
+    /// within three quarters of it, then deregisters. Killed sooner, it leaves
+    /// them to wait for its lease to expire (20 seconds).
+    pub stop_timeout_ms: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -595,6 +599,7 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             ),
             format!("address = {}", quote(&c.address)),
             format!("key = {}", quote(&c.key_hex)),
+            format!("stopTimeoutMs = {}", c.stop_timeout_ms),
         ];
         if let Some(adv) = &c.advertise {
             fields.push(format!("advertise = {}", quote(adv)));
@@ -864,5 +869,56 @@ mod tests {
             r.sockets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             ["hello", EVENTS_SERVICE, HEALTH_SERVICE]
         );
+    }
+
+    #[test]
+    fn renders_cluster_membership_with_its_stop_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = AccountBundle {
+            account_id: HexId::random(),
+            generation: 1,
+            scripts: vec![BundleScript {
+                name: "rooms".into(),
+                version_id: selvedge_core::new_version_id(),
+                main_module: "index.js".into(),
+                compatibility_date: "2026-01-01".into(),
+                compatibility_flags: vec![],
+                modules: vec![Module {
+                    name: "index.js".into(),
+                    kind: ModuleKind::EsModule,
+                    sha256: "aa".into(),
+                }],
+                bindings: vec![Binding::DurableObjectNamespace {
+                    name: "ROOM".into(),
+                    class_name: "Room".into(),
+                    script_name: None,
+                }],
+                assets: None,
+                canary: None,
+            }],
+            d1_databases: vec![],
+            workflows: vec![],
+        };
+        let opts = RenderOptions {
+            dir: dir.path().join("g1"),
+            socket_dir: dir.path().join("s"),
+            binding_socket: dir.path().join("b.sock"),
+            max_compatibility_date: "2026-11-06".into(),
+            do_storage_dir: dir.path().join("do"),
+            cluster: Some(ClusterOptions {
+                bucket: "s3://b/do/acct".into(),
+                bucket_options: vec!["aws_endpoint=http://127.0.0.1:9".into()],
+                address: "10.0.0.1:0".into(),
+                advertise: None,
+                key_hex: "ab".repeat(32),
+                stop_timeout_ms: 8000,
+            }),
+        };
+        let src = |sha: &str| Ok(format!("// {sha}").into_bytes());
+        let r = render(&bundle, &opts, &src).unwrap();
+        let text = std::fs::read_to_string(&r.config_path).unwrap();
+        assert!(r.experimental);
+        assert!(text.contains("cluster = (bucket = \"s3://b/do/acct\""), "{text}");
+        assert!(text.contains("stopTimeoutMs = 8000"), "{text}");
     }
 }

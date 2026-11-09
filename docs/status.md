@@ -51,7 +51,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 | 产品 | 支持的内容 | 实现方式 |
 | --- | --- | --- |
-| Workers 运行时 | ES module、多模块（ES、CommonJS、Wasm、JSON、Python 等）、兼容日期与标志、出站 `fetch()` 和 `connect()` | workerd `1.20261106.1`，每个账号一个进程 |
+| Workers 运行时 | ES module、多模块（ES、CommonJS、Wasm、JSON、Python 等）、兼容日期与标志、出站 `fetch()` 和 `connect()` | workerd `1.20261109.1`，每个账号一个进程 |
 | 部署与版本 | `deploy`、`versions upload/deploy`、`rollback`、`delete`、`secret`，约 2 秒内生效 | agent 跟随变更流，先启动新版本再退掉旧版本 |
 | 灰度发布 | 两个版本按百分比分流，支持 `Cloudflare-Workers-Version-Key` 和 `-Overrides` 头 | 每个版本是单独的 workerd 服务 |
 | 路由 | workers.dev 式子域名、自定义域名、zone 路由（如 `*.example.com/*`），最具体的规则优先 | 由网关匹配；zone 由管理员分配给账号 |
@@ -78,7 +78,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 - API、网关、数据服务和 runner 都是多副本，分散在不同可用区。状态只存在 PostgreSQL 和 S3 里。
 - runner 在本地缓存配置和静态资源，数据服务不可用时，已部署的 Worker 照常服务。
-- 每个 Durable Object 同一时间只有一个所属进程。正常关闭（如滚动升级）时立即交给别的进程；进程崩溃时要等租约过期，最多约 20 秒。
+- 每个 Durable Object 同一时间只有一个所属进程。正常关闭（如滚动升级、超内存重启）时，workerd 逐个交接对象：先让对象上正在处理的请求完成（最多 4 秒），再交给下一个请求所在的进程；进程崩溃时要等租约过期，最多约 20 秒。
 - Cron 和 Queues 靠数据库里的抢占和租约避免重复执行。副本崩溃后租约过期，消息会重新投递。
 
 **安全与隔离**
@@ -98,8 +98,8 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 | 方面 | 局限 |
 | --- | --- |
-| DO 故障转移 | 所属进程崩溃或节点宕机后，对该对象的调用最多失败约 20 秒。这是 workerd 内部固定的租约时长，不改 workerd 就缩短不了。滚动升级和超内存重启会先注销租约，不用等。存储写入的延迟取决于 S3。S3 必须支持条件写（已测 SeaweedFS 4.50） |
-| CPU 和内存限制 | 限制针对整个账号进程，不针对单个请求。一个请求失控会让进程重启，同账号其他正在处理的请求也会失败。cgroup 不可写时（K8s 里常见）由 agent 自己监控：内存超限约 2 秒内重启进程（先给 3 秒退出，DO 立即转移），CPU 超限只降低优先级，不会被硬性封顶。陷入死循环的请求要等卡死检测超时（默认 30 秒）才会被终止，这期间同账号的所有请求都会挂起；被杀进程上的 DO 要等租约过期（约 20 秒）才能转移 |
+| DO 故障转移 | 所属进程崩溃或节点宕机后，对该对象的调用最多失败约 20 秒。这是 workerd 内部固定的租约时长，不改 workerd 就缩短不了。滚动升级和超内存重启会先交接对象，不用等，正在处理的请求也能完成。存储写入的延迟取决于 S3。S3 必须支持条件写（已测 SeaweedFS 4.50） |
+| CPU 和内存限制 | 限制针对整个账号进程，不针对单个请求。一个请求失控会让进程重启，同账号其他正在处理的请求也会失败。cgroup 不可写时（K8s 里常见）由 agent 自己监控：内存超限约 2 秒内重启进程（有 DO 的进程先给 10 秒交接，期间新请求已由新进程处理；没有 DO 的给 3 秒），CPU 超限只降低优先级，不会被硬性封顶。陷入死循环的请求要等卡死检测超时（默认 30 秒）才会被终止，这期间同账号的所有请求都会挂起；被杀进程上的 DO 要等租约过期（约 20 秒）才能转移 |
 | `request.cf` | 地理和网络字段来自前面负载均衡注入的请求头（`--cf-header` 映射），Selvedge 自己没有 GeoIP 数据库；没有 `botManagement` 等 Cloudflare 专有字段 |
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |
 | mTLS | runner 的证书仍能读取 API 内部接口提供的所有账号配置，因为任何账号都可能被调度到任何 runner 上。`selvedge all` 单进程模式不支持 TLS |

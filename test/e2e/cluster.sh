@@ -166,6 +166,20 @@ done
 t0=$(date +%s)
 check "Durable Objects answer at once after limit restarts, with their state" "11" "$(get /)"
 check "...within 8 seconds" "yes" "$([ $(( $(date +%s) - t0 )) -le 8 ] && echo yes || echo no)"
+# A request in flight on a Durable Object when its process crosses the memory
+# limit finishes: workerd hands the object off within its stopTimeoutMs, and
+# the agent waits for that before killing it.
+direct $((P + 91)) "/?name=handoff" > /dev/null
+direct $((P + 91)) "/?name=handoff&ms=2500" > "$WORK/inflight.out" &
+inflight=$!
+sleep 0.5
+direct $((P + 91)) "/grow?mb=640" > /dev/null || true
+wait "$inflight" || true
+check "a Durable Object request in flight finishes across a limit restart" "2" "$(cat "$WORK/inflight.out")"
+t0=$(date +%s)
+check "...and the object then answers from the new process" "3" "$(direct $((P + 91)) "/?name=handoff")"
+check "...at once" "yes" "$([ $(( $(date +%s) - t0 )) -le 3 ] && echo yes || echo no)"
+check "...which is a fresh process" "1" "$(direct $((P + 91)) "/grow?mb=1")"
 if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
   check "the public gateway port ignores internal routing, even with the token" "404" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "x-selvedge-token: $SELVEDGE_INTERNAL_TOKEN" \

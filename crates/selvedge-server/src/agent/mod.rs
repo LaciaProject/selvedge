@@ -155,8 +155,12 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     let pids = manager.live_pids().await;
                     for (account, action) in w.check(&pids, &l) {
-                        if action == limits::Action::Kill {
-                            manager.restart_over_limit(&account).await;
+                        let pid = pids.iter().find(|(a, _)| *a == account).map(|(_, p)| *p);
+                        if let (limits::Action::Kill, Some(pid)) = (action, pid) {
+                            // A restart can take a while (a Durable Object
+                            // handoff); other accounts are still checked.
+                            let manager = manager.clone();
+                            tokio::spawn(async move { manager.restart_over_limit(&account, pid).await });
                         }
                     }
                 }

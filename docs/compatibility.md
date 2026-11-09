@@ -6,7 +6,7 @@ If you find a difference that is not listed, please open an issue.
 
 ## Runtime
 
-Workers run on the official workerd release pinned in the image (currently `1.20261106.1`). A
+Workers run on the official workerd release pinned in the image (currently `1.20261109.1`). A
 compatibility date later than that release supports is lowered to the newest one it supports.
 
 | Feature | Status | Notes |
@@ -177,9 +177,11 @@ Differences:
 - **Failover takes up to about 20 seconds.** When the process owning an object dies, calls to that
   object fail (as with Cloudflare's "Network connection lost") until the owner's lease expires and
   another runner takes the object over. The lease is fixed in workerd. A clean shutdown, such as
-  a rolling upgrade, hands objects over without this wait, and so does the agent's restart of a
-  process over its memory limit, which drains it for up to 3 seconds before killing it. A kernel
-  OOM kill (cgroup mode) or a crash still waits for the lease.
+  a rolling upgrade or the agent's restart of a process over its memory limit, hands objects over
+  without this wait: workerd lets requests in flight on each object finish (up to 4 seconds), then
+  releases it to the next request anywhere, and the agent gives it workerd's full stop timeout
+  (8 seconds, plus 2) before killing it. A kernel OOM kill (cgroup mode), a crash, or the agent
+  killing a hung process still waits for the lease.
 - Storage writes wait for the object store, so write latency depends on it (single-digit
   milliseconds for an in-cluster store).
 - Requires an S3-compatible store that supports conditional writes (`If-None-Match: *` and

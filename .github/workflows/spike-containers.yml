@@ -1,0 +1,74 @@
+name: containers spike
+
+# RFC 0002 §9: does workerd's container backend (and its proxy-everything
+# sidecar) work under each OCI runtime? Throwaway; runs on ci/spike-* pushes
+# and by hand.
+on:
+  push:
+    branches: ["ci/spike-containers*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [runc, runsc, runsc-netraw]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install workerd
+        run: |
+          mkdir -p "$RUNNER_TEMP/w" && cd "$RUNNER_TEMP/w" && npm init -y > /dev/null
+          npm install --no-audit --no-fund workerd@1.20261109.1 > /dev/null
+          echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
+      - name: Install gVisor and make it Docker's default runtime
+        if: matrix.runtime != 'runc'
+        run: |
+          base=https://storage.googleapis.com/gvisor/releases/release/latest/x86_64
+          cd "$RUNNER_TEMP" && curl -fsSLO "$base/runsc" && curl -fsSLO "$base/runsc.sha512"
+          sha512sum -c runsc.sha512
+          sudo install -m 755 runsc /usr/local/bin/runsc
+          runsc --version
+          if [ "${{ matrix.runtime }}" = runsc-netraw ]; then
+            sudo runsc install --runtime runsc -- --net-raw
+          else
+            sudo runsc install --runtime runsc
+          fi
+          sudo python3 - <<'PY'
+          import json
+          p = "/etc/docker/daemon.json"
+          d = json.load(open(p))
+          d["default-runtime"] = "runsc"
+          json.dump(d, open(p, "w"), indent=1)
+          print(json.dumps(d))
+          PY
+          sudo systemctl restart docker
+          docker info --format '{{.DefaultRuntime}}'
+          docker run --rm alpine:3.20 dmesg | head -3
+      - name: Run the spike
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          test/spike/containers/run.sh | tee "result-${{ matrix.runtime }}.json"
+          python3 - "result-${{ matrix.runtime }}.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print(f"### {r['runtime']}\n\n| Step | Seconds | Answer |\n| --- | ---: | --- |")
+          for s in r["steps"]:
+              a = s["answer"].replace("|", "\\|").replace("\n", " ")[:120]
+              print(f"| {s['step']} | {s['seconds']} | {a} |")
+          print()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-${{ matrix.runtime }}
+          path: result-*.json

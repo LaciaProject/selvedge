@@ -1,6 +1,6 @@
 # RFC 0002：Containers 支持
 
-- 状态：**草案**，待讨论（P0 的第一轮实测已完成，见 §11）
+- 状态：**草案**，待讨论（P0 的沙箱实测已完成，结论是用 Kata，见 §11）
 - 日期：2026-11-09
 - 依赖：[RFC 0001](0001-architecture.md) §7（Durable Objects 集群模式）、§8（多租户隔离）
 - 依据：workerd `v1.20261109.1` 源码（`src/workerd/server/container-client.c++`、`docker-api.capnp`、`workerd.capnp`、`src/workerd/api/container.h`），wrangler 4.158.0
@@ -94,8 +94,8 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
   2. agent 在 runner Pod 里做一层中转：workerd 实际监听在回环地址上，外部连接先到 agent，agent 核对来源 IP 是否属于该账号的容器 Pod，再转给 workerd。
 - **入向限制**：容器 Pod 只接受所属 runner Pod 的连接，彼此之间、跨账号之间都不通。
 - **边车权限**：`NET_ADMIN` 只在 Pod 自己的网络命名空间里有效。**实测（§11）表明 `proxy-everything` 不能在 gVisor 下运行**：它依赖 gVisor 不支持的策略路由和 TPROXY。可选的做法有两种：
-  - 改用 Kata：它是真实的客户机内核，同一个 Pod 的容器共享一台虚拟机；
-  - 自己写一个基于 nat `REDIRECT` 的边车，配合 `runsc --net-raw`，并兼容 workerd 期望的 `proxy-everything` 协议。这会带来长期维护负担。
+  - **改用 Kata（已在 kind 上验证可行，采用这个方案）**：它是真实的客户机内核，同一个 Pod 的容器共享一台虚拟机，现成的 `proxy-everything` 可以照常运行；
+  - 自己写一个基于 nat `REDIRECT` 的边车，配合 `runsc --net-raw`，并兼容 workerd 期望的 `proxy-everything` 协议。这会带来长期维护负担，只作为没有 KVM 节点时的备选。
 
 ### 4.4 镜像仓库
 

@@ -152,6 +152,22 @@ topologySpread:
   enabled: null
   topologyKey: topology.kubernetes.io/zone
 
+# Prometheus metrics (`GET /metrics`) on their own plain-HTTP port in every
+# component. They hold counts and latencies only, never an account id.
+metrics:
+  enabled: true
+  port: 9464
+  # prometheus.io/* pod annotations, for Kubernetes service discovery.
+  annotations: true
+  # NetworkPolicy peers allowed to scrape (empty: any), e.g.
+  # [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }].
+  scrapeFrom: []
+  # A PodMonitor for the Prometheus Operator (needs its CRDs).
+  podMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
 networkPolicy:
   enabled: true
   # Private ranges tenant code must not reach. workerd already limits tenant

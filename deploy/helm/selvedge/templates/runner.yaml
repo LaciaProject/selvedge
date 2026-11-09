@@ -15,6 +15,7 @@ spec:
   template:
     metadata:
       labels: {{- include "selvedge.selector" $c | nindent 8 }}
+      {{- include "selvedge.metricsAnnotations" . | nindent 6 }}
     spec:
       {{- include "selvedge.pod" $c | nindent 6 }}
       {{- with .Values.runner.runtimeClassName }}
@@ -72,7 +73,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: access-key-id } }
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.objectStoreSecret" . }}, key: secret-access-key } }
-          ports: [{ name: http, containerPort: 8789 }]
+          ports:
+            - { name: http, containerPort: 8789 }
+            {{- if .Values.metrics.enabled }}
+            - { name: metrics, containerPort: {{ .Values.metrics.port }} }
+            {{- end }}
           {{- include "selvedge.probes" (dict "root" . "role" "runner" "port" 8789 "failureThreshold" 1) | nindent 10 }}
           resources: {{- toYaml .Values.runner.resources | nindent 12 }}
           {{- if .Values.runner.accountUsers.enabled }}

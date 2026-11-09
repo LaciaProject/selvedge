@@ -300,7 +300,7 @@ async fn handle(
     cfg: &AgentConfig,
     manager: &Arc<Manager>,
     draining: &AtomicBool,
-    mut req: Request<Incoming>,
+    req: Request<Incoming>,
 ) -> Response<Body> {
     if req.uri().path() == "/healthz" && !req.headers().contains_key(ACCOUNT_HEADER) {
         return if draining.load(Ordering::SeqCst) {
@@ -309,6 +309,17 @@ async fn handle(
             proxy::full(StatusCode::OK, "ok")
         };
     }
+    let start = std::time::Instant::now();
+    let resp = run_request(cfg, manager, req).await;
+    crate::metrics::request("agent", resp.status(), start.elapsed());
+    resp
+}
+
+async fn run_request(
+    cfg: &AgentConfig,
+    manager: &Arc<Manager>,
+    mut req: Request<Incoming>,
+) -> Response<Body> {
     let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let authorized = header(TOKEN_HEADER)
         .is_some_and(|t| crate::constant_time_eq(t.as_bytes(), cfg.internal_token.as_bytes()));

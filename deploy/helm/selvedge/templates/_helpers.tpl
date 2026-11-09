@@ -79,6 +79,30 @@ topologySpreadConstraints:
   valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: internal-token } }
 - name: RUST_LOG
   value: info
+{{- if .Values.metrics.enabled }}
+- name: SELVEDGE_METRICS_LISTEN
+  value: 0.0.0.0:{{ .Values.metrics.port }}
+{{- end }}
+{{- end -}}
+
+{{/* NetworkPolicy ingress to the metrics port, from metrics.scrapeFrom (default: anywhere). */}}
+{{- define "selvedge.metricsIngress" -}}
+{{- if .Values.metrics.enabled }}
+- ports: [{ port: {{ .Values.metrics.port }} }]
+  {{- with .Values.metrics.scrapeFrom }}
+  from: {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* Pod annotations for Prometheus' Kubernetes service discovery. */}}
+{{- define "selvedge.metricsAnnotations" -}}
+{{- if and .Values.metrics.enabled .Values.metrics.annotations }}
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: {{ .Values.metrics.port | quote }}
+  prometheus.io/path: /metrics
+{{- end }}
 {{- end -}}
 
 {{- define "selvedge.databaseEnv" -}}

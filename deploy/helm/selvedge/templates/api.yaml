@@ -13,6 +13,7 @@ spec:
   template:
     metadata:
       labels: {{- include "selvedge.selector" $c | nindent 8 }}
+      {{- include "selvedge.metricsAnnotations" . | nindent 6 }}
     spec:
       {{- include "selvedge.pod" $c | nindent 6 }}
       containers:
@@ -46,6 +47,9 @@ spec:
             - name: SELVEDGE_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: admin-token } }
           ports:
+            {{- if .Values.metrics.enabled }}
+            - { name: metrics, containerPort: {{ .Values.metrics.port }} }
+            {{- end }}
             - { name: http, containerPort: 8787 }
             {{- if .Values.tls.enabled }}
             - { name: internal, containerPort: 8786 }

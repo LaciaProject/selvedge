@@ -22,6 +22,9 @@ struct Cli {
     /// Log as JSON lines.
     #[arg(long, env = "SELVEDGE_LOG_JSON", global = true)]
     log_json: bool,
+    /// Serve Prometheus metrics (`GET /metrics`, plain HTTP) on this address.
+    #[arg(long, env = "SELVEDGE_METRICS_LISTEN", global = true)]
+    metrics_listen: Option<SocketAddr>,
     #[command(subcommand)]
     command: Command,
 }
@@ -420,6 +423,13 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "`selvedge all` runs every component in one process; mTLS (SELVEDGE_TLS_*) is for separate ones"
         );
+    }
+    if let Some(addr) = cli.metrics_listen {
+        tokio::spawn(async move {
+            if let Err(e) = selvedge_server::metrics::serve(addr).await {
+                tracing::error!(error = %format!("{e:#}"), "metrics listener failed");
+            }
+        });
     }
     match cli.command {
         Command::Migrate(db) => {

@@ -12,6 +12,7 @@ pub mod dispatch;
 pub mod error;
 pub mod gateway;
 pub mod kvlogic;
+pub mod metrics;
 pub mod proxy;
 pub mod queues;
 pub mod r2;

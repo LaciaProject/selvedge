@@ -28,6 +28,8 @@ export SELVEDGE_AGENT_LISTEN=127.0.0.1:$((PORT_BASE + 89))
 export SELVEDGE_GATEWAY_LISTEN=127.0.0.1:$GATEWAY_PORT
 S3_PORT=$((PORT_BASE + 90))
 export SELVEDGE_R2_S3_LISTEN=127.0.0.1:$S3_PORT
+METRICS_PORT=$((PORT_BASE + 64))
+export SELVEDGE_METRICS_LISTEN=127.0.0.1:$METRICS_PORT
 # Collect unused static asset files within seconds, not a day.
 export SELVEDGE_GC_INTERVAL_SECS=1 SELVEDGE_ASSET_GC_GRACE_SECS=2
 # Per-account limits, low enough for a test to cross.
@@ -560,6 +562,22 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 check "a hung process is replaced by a fresh one" "yes" "$([ -n "$(hog_pid)" ] && [ "$(hog_pid)" != "$hung_pid" ] && echo yes)"
+
+# Prometheus metrics: what the run above did, without account ids.
+curl -s "http://127.0.0.1:$METRICS_PORT/metrics" > "$WORK/metrics.txt"
+metric() { # name with labels: its value, or 0
+  awk -v m="$1" '$1 == m { print $2; found = 1 } END { if (!found) print 0 }' "$WORK/metrics.txt"
+}
+positive() { awk -v v="$1" 'BEGIN { print (v > 0) ? "yes" : "no" }'; }
+check "metrics count the gateway's requests" "yes" "$(positive "$(metric 'selvedge_http_requests_total{component="gateway",code="2xx"}')")"
+check "metrics count KV binding calls" "yes" "$(positive "$(metric 'selvedge_agent_binding_requests_total{binding="kv",code="2xx"}')")"
+check "metrics count the memory restart" "yes" "$(positive "$(metric 'selvedge_agent_process_stops_total{reason="memory"}')")"
+check "metrics count the hung process" "1" "$(metric 'selvedge_agent_process_stops_total{reason="hung"}')"
+check "metrics count the CPU throttle" "yes" "$(positive "$(metric 'selvedge_agent_cpu_throttles_total')")"
+check "metrics carry no account id" "0" "$(grep -c "$ACCOUNT" "$WORK/metrics.txt" || true)"
+reqs=$(metric 'selvedge_http_requests_total{component="agent",code="2xx"}')
+conns=$(metric 'selvedge_connections_opened_total{role="runner"}')
+check "the gateway reuses its connections to the runner" "yes" "$(awk -v r="$reqs" -v c="$conns" 'BEGIN { print (c > 0 && c < r / 2) ? "yes" : "no" }')"
 
 # Experimental workerd flags would be live in processes running with
 # --experimental (cluster mode), so uploads may not use them.

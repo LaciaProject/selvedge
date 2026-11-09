@@ -50,7 +50,11 @@ fn host_bucket(host: Option<&str>, domain: Option<&str>) -> Option<String> {
 }
 
 pub fn router(state: Arc<S3State>) -> axum::Router {
-    axum::Router::new().fallback(handle).layer(axum::extract::DefaultBodyLimit::disable()).with_state(state)
+    axum::Router::new()
+        .fallback(handle)
+        .layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(axum::middleware::from_fn(|r, n| crate::metrics::layer("r2-s3", r, n)))
+        .with_state(state)
 }
 
 // ---- responses ----

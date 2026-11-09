@@ -301,6 +301,7 @@ async fn check_runners(http: &reqwest::Client, cfg: &GatewayConfig, shared: &Sha
     });
     let mut healthy: Vec<String> = futures::future::join_all(checks).await.into_iter().flatten().collect();
     healthy.sort();
+    crate::metrics::GATEWAY_HEALTHY_RUNNERS.set(&[], healthy.len() as i64);
     let mut current = shared.healthy.write().expect("poisoned");
     if *current != healthy {
         tracing::info!(runners = ?healthy, "healthy runners changed");
@@ -339,12 +340,25 @@ async fn handle(
     cfg: &GatewayConfig,
     shared: &Shared,
     peer: SocketAddr,
-    mut req: Request<Incoming>,
+    req: Request<Incoming>,
     internal_listener: bool,
 ) -> Response<Body> {
     if req.uri().path() == "/__selvedge/healthz" {
         return proxy::full(StatusCode::OK, "ok");
     }
+    let start = std::time::Instant::now();
+    let resp = route(cfg, shared, peer, req, internal_listener).await;
+    crate::metrics::request("gateway", resp.status(), start.elapsed());
+    resp
+}
+
+async fn route(
+    cfg: &GatewayConfig,
+    shared: &Shared,
+    peer: SocketAddr,
+    mut req: Request<Incoming>,
+    internal_listener: bool,
+) -> Response<Body> {
     // Platform components (the API) may name the account and script directly.
     let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
     // With mTLS, direct routing needs the internal listener (and so a
@@ -443,10 +457,12 @@ async fn handle(
         match proxy::POOL.request(addr, crate::tls::Role::Runner, req).await {
             Ok(r) => return r,
             Err(proxy::Failed::Sent(e)) => {
+                crate::metrics::GATEWAY_RUNNER_ERRORS.inc(&["failed"]);
                 tracing::warn!(runner = %addr, error = %e, "runner request failed");
                 return proxy::full(StatusCode::BAD_GATEWAY, "Worker unavailable");
             }
             Err(proxy::Failed::NotSent(r, e)) => {
+                crate::metrics::GATEWAY_RUNNER_ERRORS.inc(&["unreachable"]);
                 tracing::warn!(runner = %addr, error = %e, "runner unreachable; trying the next");
                 shared.healthy.write().expect("poisoned").retain(|r| r != addr);
                 req = *r;

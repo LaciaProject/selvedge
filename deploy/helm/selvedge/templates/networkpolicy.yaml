@@ -15,6 +15,7 @@ spec:
     - from: {{- include "selvedge.peer" (dict "root" . "component" "gateway") | nindent 8 }}
       ports: [{ port: 8789 }]
     - from: {{- include "selvedge.peer" (dict "root" . "component" "runner") | nindent 8 }}
+    {{- include "selvedge.metricsIngress" . | nindent 4 }}
   egress:
     - to:
         - namespaceSelector: {}
@@ -55,6 +56,7 @@ spec:
     # R2's S3-compatible API is for clients anywhere; requests are signed.
     - ports: [{ port: 8790 }]
     {{- end }}
+    {{- include "selvedge.metricsIngress" . | nindent 4 }}
 {{- if .Values.postgres.bundled }}
 ---
 apiVersion: networking.k8s.io/v1

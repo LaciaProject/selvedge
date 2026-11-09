@@ -85,6 +85,7 @@ pub type Sender = hyper::client::conn::http1::SendRequest<Incoming>;
 pub async fn connect(target: Target<'_>) -> Result<Sender, String> {
     match target {
         Target::Tcp(addr, server) => {
+            crate::metrics::CONNECTIONS_OPENED.inc(&[server.label()]);
             // A vanished pod can drop SYNs silently; fail over instead of hanging.
             let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
                 .await

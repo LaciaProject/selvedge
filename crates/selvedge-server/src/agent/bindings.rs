@@ -71,6 +71,21 @@ pub fn serve(
             {
                 return resp;
             }
+            let binding = {
+                use selvedge_workerd::render::{
+                    ASSETS_HEADER, KV_NAMESPACE_HEADER, QUEUE_HEADER, R2_BUCKET_HEADER,
+                };
+                let h = req.headers();
+                [
+                    (KV_NAMESPACE_HEADER, "kv"),
+                    (R2_BUCKET_HEADER, "r2"),
+                    (QUEUE_HEADER, "queue"),
+                    (ASSETS_HEADER, "assets"),
+                ]
+                .into_iter()
+                .find(|(name, _)| h.contains_key(*name))
+                .map_or("other", |(_, b)| b)
+            };
             let headers = req.headers_mut();
             proxy::strip_internal_except(
                 headers,
@@ -84,6 +99,8 @@ pub fn serve(
             headers.insert(ACCOUNT_HEADER, account_header);
             headers.insert(http::header::AUTHORIZATION, auth);
             let sent = proxy::POOL.request_retrying(&cfg.data_addr, crate::tls::Role::Data, req, 4).await;
+            let code = sent.as_ref().map_or("error", |r| crate::metrics::code_class(r.status()));
+            crate::metrics::AGENT_BINDING_REQUESTS.inc(&[binding, code]);
             match sent {
                 Ok(r) if cached.is_some() && r.status() == StatusCode::OK => {
                     store_cached(cached.as_deref().expect("checked"), r).await

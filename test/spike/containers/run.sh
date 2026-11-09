@@ -19,6 +19,9 @@ sed "s|unix:/var/run/docker.sock|unix:$REC|" "$DIR/config.capnp" > "$WORK/config
 WPID=$!
 trap 'kill $WPID $RPID 2>/dev/null; docker ps -aq --filter name=workerd | xargs -r docker rm -f > /dev/null 2>&1; rm -rf "$WORK" "$REC"' EXIT
 for _ in $(seq 1 50); do curl -s -o /dev/null "$URL/" && break; sleep 0.2; done
+# Containers' exits, with codes: AutoRemove deletes them, and their logs.
+docker events --filter type=container --filter event=die --format '{{.Actor.Attributes.name}} {{.Actor.Attributes.image}} exit={{.Actor.Attributes.exitCode}}' > "$WORK/events.txt" &
+EPID=$!
 
 step() { # key, path: records the answer and seconds taken
   local t0 t1 out
@@ -40,10 +43,16 @@ step second_container "/ready?name=b"
 step destroy "/destroy?name=a"
 step restart_after_destroy "/ready?name=a"
 docker ps --format '{{.Names}} {{.Image}} {{.Status}}' > "$WORK/ps.txt"
-kill $WPID 2>/dev/null; sleep 1; kill $RPID 2>/dev/null; sleep 0.5
-python3 - "$WORK/ps.txt" "$WORK/workerd.log" "${RUNTIME:-runc}" "$WORK/docker-api.jsonl" "${RESULTS[@]}" <<'PY'
+kill $WPID 2>/dev/null; sleep 1; kill $RPID $EPID 2>/dev/null; sleep 0.5
+# The sidecar on its own, with workerd's arguments, to see why it stops.
+timeout 8 docker run --name spike-sidecar --cap-add NET_ADMIN --add-host host.docker.internal:host-gateway \
+  cloudflare/proxy-everything:main --http-egress-port 18491 --http-ingress-address 0.0.0.0:39001 \
+  --docker-gateway-cidr 172.17.0.0/16 --dns-enabled --tls-intercept --disable-ipv6 > "$WORK/sidecar.txt" 2>&1
+echo "exit=$?" >> "$WORK/sidecar.txt"
+docker rm -f spike-sidecar > /dev/null 2>&1
+python3 - "$WORK/ps.txt" "$WORK/workerd.log" "${RUNTIME:-runc}" "$WORK/docker-api.jsonl" "$WORK/events.txt" "$WORK/sidecar.txt" "${RESULTS[@]}" <<'PY'
 import json, os, sys
-ps, log, runtime, api, *steps = sys.argv[1:]
+ps, log, runtime, api, events, sidecar, *steps = sys.argv[1:]
 calls = []
 if os.path.exists(api):
     for line in open(api):
@@ -59,6 +68,8 @@ print(json.dumps({
     "runtime": runtime,
     "steps": [json.loads(s) for s in steps],
     "docker_api": calls,
+    "container_exits": open(events).read().splitlines()[:20],
+    "sidecar_alone": open(sidecar).read().splitlines()[-30:],
     "containers": open(ps).read().splitlines(),
     "workerd_log_tail": open(log).read().splitlines()[-25:],
 }, indent=1))

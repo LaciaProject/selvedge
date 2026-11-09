@@ -1,11 +1,11 @@
 name: containers spike
 
 # RFC 0002 §9: does workerd's container backend (and its proxy-everything
-# sidecar) work under each OCI runtime? Throwaway; runs on ci/spike-* pushes
+# sidecar) work under each OCI runtime? Throwaway; runs on spike/containers pushes
 # and by hand.
 on:
   push:
-    branches: ["ci/spike-containers*"]
+    branches: ["spike/containers"]
   workflow_dispatch:
 
 permissions:

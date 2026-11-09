@@ -35,6 +35,15 @@ This adds a `Signed-off-by: Your Name <you@example.com>` line. There is no CLA.
 4. Large tests (multi-node Kubernetes, chaos, upgrades) run on GitHub Actions only. Push a branch
    named `ci/<topic>` or run the `kubernetes` workflow by hand.
 
+## Moving to a new workerd release
+
+`tools/bump-workerd.sh [<version>]` moves every pin at once: CI, the image and its checksums, the e2e
+dependencies, the docs and the experimental flag list. The `workerd update` workflow runs it daily:
+it pushes `bot/workerd-<version>`, runs the `ci` and `kubernetes` suites on it, then opens a pull
+request if the `WORKERD_BUMP_TOKEN` secret holds a token allowed to (one opened with `GITHUB_TOKEN`
+would not run CI), or else an issue with the results and a link to open one. Read the release's
+cluster-mode changes and compatibility-date defaults before merging.
+
 ## Releases
 
 Set `version` and `appVersion` in `deploy/helm/selvedge/Chart.yaml`, merge, then push a tag

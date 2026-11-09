@@ -4,12 +4,18 @@ on:
   push:
     branches: [main, "ci/**"]
   pull_request:
+  # The workerd update workflow tests its branch with this one.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -22,15 +28,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install official workerd
         run: |
+          # The checked-out version: when called for another ref, this file's
+          # env is the caller's.
+          v=$(sed -n 's/^  WORKERD_VERSION: "\(.*\)"$/\1/p' .github/workflows/ci.yml)
           mkdir -p "$RUNNER_TEMP/workerd" && cd "$RUNNER_TEMP/workerd"
           npm init -y >/dev/null
-          npm install --no-audit --no-fund "workerd@$WORKERD_VERSION"
+          npm install --no-audit --no-fund "workerd@$v"
           echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
@@ -50,6 +61,8 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4

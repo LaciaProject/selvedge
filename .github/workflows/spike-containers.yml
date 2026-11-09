@@ -32,10 +32,13 @@ jobs:
       - name: Install gVisor and make it Docker's default runtime
         if: matrix.runtime != 'runc'
         run: |
-          base=https://storage.googleapis.com/gvisor/releases/release/latest/x86_64
-          cd "$RUNNER_TEMP" && curl -fsSLO "$base/runsc" && curl -fsSLO "$base/runsc.sha512"
-          sha512sum -c runsc.sha512
-          sudo install -m 755 runsc /usr/local/bin/runsc
+          # The release bucket's `latest` path is gone; GitHub releases carry
+          # the binaries now. Pinned, with the release's checksum.
+          cd "$RUNNER_TEMP"
+          curl -fsSLo gvisor.tar.bz2 https://github.com/google/gvisor/releases/download/release-20261102.0/gvisor-x86_64.tar.bz2
+          echo "6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a  gvisor.tar.bz2" | sha256sum -c
+          mkdir gvisor && tar -xjf gvisor.tar.bz2 -C gvisor
+          sudo install -m 755 "$(find gvisor -type f -name runsc | head -1)" /usr/local/bin/runsc
           runsc --version
           if [ "${{ matrix.runtime }}" = runsc-netraw ]; then
             sudo runsc install --runtime runsc -- --net-raw
@@ -57,7 +60,8 @@ jobs:
         env:
           RUNTIME: ${{ matrix.runtime }}
         run: |
-          test/spike/containers/run.sh | tee "result-${{ matrix.runtime }}.json"
+          test/spike/containers/run.sh > "result-${{ matrix.runtime }}.json"
+          cat "result-${{ matrix.runtime }}.json"
           python3 - "result-${{ matrix.runtime }}.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1]))
@@ -65,6 +69,9 @@ jobs:
           for s in r["steps"]:
               a = s["answer"].replace("|", "\\|").replace("\n", " ")[:120]
               print(f"| {s['step']} | {s['seconds']} | {a} |")
+          print("\nDocker API calls:\n")
+          for c in r.get("docker_api", []):
+              print(f"- `{c}`")
           print()
           PY
       - uses: actions/upload-artifact@v4

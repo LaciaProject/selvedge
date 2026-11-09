@@ -8,10 +8,16 @@ WORK=$(mktemp -d)
 URL=http://127.0.0.1:18490
 docker build -q -t selvedge-spike-app:1 "$DIR/app" > /dev/null
 docker pull -q cloudflare/proxy-everything:main > /dev/null
-cp "$DIR/config.capnp" "$DIR/worker.js" "$WORK/"
+# workerd reaches Docker through a recorder, which logs the API calls it makes.
+REC=${XDG_RUNTIME_DIR:-/tmp}/spike-docker-$$.sock
+python3 "$DIR/docker-recorder.py" "$REC" /var/run/docker.sock "$WORK/docker-api.jsonl" &
+RPID=$!
+for _ in $(seq 1 50); do [ -S "$REC" ] && break; sleep 0.1; done
+cp "$DIR/worker.js" "$WORK/"
+sed "s|unix:/var/run/docker.sock|unix:$REC|" "$DIR/config.capnp" > "$WORK/config.capnp"
 "$SELVEDGE_WORKERD" serve "$WORK/config.capnp" > "$WORK/workerd.log" 2>&1 &
 WPID=$!
-trap 'kill $WPID 2>/dev/null; docker ps -aq --filter name=workerd | xargs -r docker rm -f > /dev/null 2>&1; rm -rf "$WORK"' EXIT
+trap 'kill $WPID $RPID 2>/dev/null; docker ps -aq --filter name=workerd | xargs -r docker rm -f > /dev/null 2>&1; rm -rf "$WORK" "$REC"' EXIT
 for _ in $(seq 1 50); do curl -s -o /dev/null "$URL/" && break; sleep 0.2; done
 
 step() { # key, path: records the answer and seconds taken
@@ -24,19 +30,35 @@ step() { # key, path: records the answer and seconds taken
 RESULTS=()
 step cold_start "/ready?name=a"
 step warm_hello "/hello?name=a"
-step egress_http "/out?name=a&u=http://example.com/"
-step egress_https "/out?name=a&u=https://example.com/"
+step egress_default "/out?name=a&u=http://example.com/"
 step intercept "/intercept?name=a"
+step cold_start_internet "/ready?name=net&internet=1"
+step egress_http "/out?name=net&u=http://example.com/"
+step egress_https "/out?name=net&u=https://example.com/"
+step egress_private "/out?name=net&u=http://169.254.169.254/"
 step second_container "/ready?name=b"
 step destroy "/destroy?name=a"
 step restart_after_destroy "/ready?name=a"
 docker ps --format '{{.Names}} {{.Image}} {{.Status}}' > "$WORK/ps.txt"
-python3 - "$WORK/ps.txt" "$WORK/workerd.log" "${RUNTIME:-runc}" "${RESULTS[@]}" <<'PY'
-import json, sys
-ps, log, runtime, *steps = sys.argv[1:]
+kill $WPID 2>/dev/null; sleep 1; kill $RPID 2>/dev/null; sleep 0.5
+python3 - "$WORK/ps.txt" "$WORK/workerd.log" "${RUNTIME:-runc}" "$WORK/docker-api.jsonl" "${RESULTS[@]}" <<'PY'
+import json, os, sys
+ps, log, runtime, api, *steps = sys.argv[1:]
+calls = []
+if os.path.exists(api):
+    for line in open(api):
+        c = json.loads(line)
+        s = f"{c['method']} {c['path']}"
+        if "keys" in c:
+            s += f" keys={','.join(c['keys'])}"
+        if "HostConfig" in c:
+            s += f" HostConfig={','.join(c['HostConfig'])}"
+        if s not in calls:
+            calls.append(s)
 print(json.dumps({
     "runtime": runtime,
     "steps": [json.loads(s) for s in steps],
+    "docker_api": calls,
     "containers": open(ps).read().splitlines(),
     "workerd_log_tail": open(log).read().splitlines()[-25:],
 }, indent=1))

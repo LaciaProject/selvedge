@@ -9,9 +9,9 @@ export class Echo extends WorkerEntrypoint {
 }
 
 export class Box extends DurableObject {
-  async ready() {
+  async ready(internet) {
     const c = this.ctx.container;
-    if (!c.running) c.start();
+    if (!c.running) c.start(internet ? { enableInternet: true } : {});
     // Wait until the app answers on its port.
     for (let i = 0; i < 600; i++) {
       try {
@@ -29,7 +29,7 @@ export class Box extends DurableObject {
     try {
       switch (url.pathname) {
         case "/ready":
-          return new Response(await this.ready());
+          return new Response(await this.ready(url.searchParams.get("internet") === "1"));
         case "/hello":
           return c.getTcpPort(8080).fetch("http://container/");
         case "/out":

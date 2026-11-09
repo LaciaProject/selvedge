@@ -4,7 +4,7 @@
 # commands proxy-everything's binary contains, to see which ones it runs.
 set -uo pipefail
 script='
-apk add -q iproute2 iptables iptables-legacy > /dev/null 2>&1 || { echo "apk failed"; exit 0; }
+apk add -q iproute2 iptables iptables-legacy busybox-extras > /dev/null 2>&1 || { echo "apk failed"; exit 0; }
 try() { out=$(sh -c "$2" 2>&1); echo "$1|$?|$(echo "$out" | head -1)"; }
 try addr_add_loopback_alias "ip addr add 127.0.0.3/8 dev lo"
 try rule_fwmark "ip rule add fwmark 1 lookup 100"
@@ -18,7 +18,7 @@ try legacy_nat_redirect_out "iptables-legacy -t nat -A OUTPUT -p tcp ! -d 127.0.
 try legacy_nat_redirect_dns "iptables-legacy -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 15053"
 try legacy_owner_match "iptables-legacy -t nat -I OUTPUT -m owner --uid-owner 1337 -j RETURN"
 try legacy_mangle_tproxy "iptables-legacy -t mangle -A PREROUTING -p tcp -j TPROXY --on-port 15001 --tproxy-mark 1"
-try legacy_redirect_works "iptables-legacy -t nat -F OUTPUT && iptables-legacy -t nat -A OUTPUT -p tcp -d 203.0.113.7 --dport 80 -j REDIRECT --to-ports 15002 && mkdir -p /www && echo redirected > /www/index.html && httpd -p 15002 -h /www && sleep 0.5 && wget -qO- -T 3 http://203.0.113.7/"
+try legacy_redirect_works "iptables-legacy -t nat -F OUTPUT && iptables-legacy -t nat -A OUTPUT -p tcp -d 203.0.113.7 --dport 80 -j REDIRECT --to-ports 15002 && mkdir -p /www && echo redirected > /www/index.html && busybox-extras httpd -p 15002 -h /www && sleep 0.5 && wget -qO- -T 3 http://203.0.113.7/"
 try sysctl_route_localnet "sysctl -w net.ipv4.conf.all.route_localnet=1"
 '
 docker run --rm --cap-add NET_ADMIN alpine:3.20 sh -c "$script" | while IFS='|' read -r step code out; do

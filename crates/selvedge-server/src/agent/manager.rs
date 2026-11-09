@@ -54,11 +54,24 @@ pub struct Live {
     local_do: bool,
     /// A workerd cluster member, which hands its objects off when it stops.
     clustered: bool,
+    /// The process was found exited on its own (counted in metrics once).
+    exited: std::sync::atomic::AtomicBool,
 }
 
 impl Live {
+    /// Whether the process runs. One that exited on its own (a crash, a
+    /// kernel OOM kill) is counted once.
     async fn alive(&self) -> bool {
-        self.process.lock().await.as_mut().is_some_and(WorkerdProcess::alive)
+        match self.process.lock().await.as_mut() {
+            Some(p) => {
+                let alive = p.alive();
+                if !alive && !self.exited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    crate::metrics::AGENT_PROCESS_EXITS.inc(&[]);
+                }
+                alive
+            }
+            None => false,
+        }
     }
 
     /// How long to give the process to stop after its limits were crossed.
@@ -70,8 +83,13 @@ impl Live {
         self.process.lock().await.as_ref().and_then(WorkerdProcess::pid)
     }
 
-    async fn stop(&self, grace: Duration) {
+    /// Stops the process; `reason` labels the stop in metrics.
+    async fn stop(&self, grace: Duration, reason: &'static str) {
         if let Some(p) = self.process.lock().await.take() {
+            crate::metrics::AGENT_PROCESSES.add(&[], -1);
+            if !self.exited.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::metrics::AGENT_PROCESS_STOPS.inc(&[reason]);
+            }
             p.stop(grace).await;
         }
         let _ = std::fs::remove_dir_all(&self.render_dir);
@@ -290,6 +308,7 @@ impl Manager {
             }
         }
 
+        let starting = Instant::now();
         let bundle = self.bundle(account).await?;
         if bundle.scripts.is_empty() && bundle.d1_databases.is_empty() {
             stop_current(state).await;
@@ -336,7 +355,7 @@ impl Manager {
             // Two processes cannot share local Durable Object files.
             let old = state.slot.lock().await.live.take();
             if let Some(old) = old {
-                old.stop(DRAIN_GRACE).await;
+                old.stop(DRAIN_GRACE, "replaced").await;
             }
         }
 
@@ -381,6 +400,9 @@ impl Manager {
             }
         }
         tracing::info!(%account, generation = bundle.generation, "account process ready");
+        crate::metrics::AGENT_PROCESSES.add(&[], 1);
+        crate::metrics::AGENT_PROCESS_STARTS.inc(&[]);
+        crate::metrics::AGENT_PROCESS_START_DURATION.observe(&[], starting.elapsed());
         let live = Arc::new(Live {
             generation: bundle.generation,
             sockets: rendered.sockets.iter().cloned().collect(),
@@ -391,6 +413,7 @@ impl Manager {
             do_dir: (!local_do).then_some(do_dir),
             local_do,
             clustered: rendered.experimental,
+            exited: std::sync::atomic::AtomicBool::new(false),
         });
         let old = {
             let mut slot = state.slot.lock().await;
@@ -401,7 +424,7 @@ impl Manager {
             tokio::spawn(self.clone().monitor(account.clone(), live.clone(), timeout));
         }
         if let Some(old) = old {
-            tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
+            tokio::spawn(async move { old.stop(DRAIN_GRACE, "replaced").await });
         }
         Ok(Lookup::Ready(live))
     }
@@ -523,7 +546,7 @@ impl Manager {
         if !live.local_do {
             drop(start);
         }
-        live.stop(live.limit_grace()).await;
+        live.stop(live.limit_grace(), "memory").await;
     }
 
     /// Probes a process's health worker until the process is replaced or
@@ -574,7 +597,7 @@ impl Manager {
             if slot.live.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)) { slot.live.take() } else { None }
         };
         if let Some(live) = taken {
-            live.stop(Duration::ZERO).await;
+            live.stop(Duration::ZERO, "hung").await;
         }
     }
 
@@ -607,11 +630,11 @@ impl Manager {
             // A request arriving meanwhile starts a new process, unless local
             // Durable Object files make it wait for this one to stop.
             if live.local_do {
-                live.stop(DRAIN_GRACE).await;
+                live.stop(DRAIN_GRACE, "idle").await;
                 drop(start);
             } else {
                 drop(start);
-                tokio::spawn(async move { live.stop(DRAIN_GRACE).await });
+                tokio::spawn(async move { live.stop(DRAIN_GRACE, "idle").await });
             }
         }
     }
@@ -622,7 +645,7 @@ impl Manager {
         let mut stops = Vec::new();
         for state in states {
             if let Some(live) = state.slot.lock().await.live.take() {
-                stops.push(tokio::spawn(async move { live.stop(DRAIN_GRACE).await }));
+                stops.push(tokio::spawn(async move { live.stop(DRAIN_GRACE, "shutdown").await }));
             }
         }
         for s in stops {
@@ -652,7 +675,7 @@ impl Manager {
 async fn stop_current(state: &AccountState) {
     let old = state.slot.lock().await.live.take();
     if let Some(old) = old {
-        tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
+        tokio::spawn(async move { old.stop(DRAIN_GRACE, "removed").await });
     }
 }
 

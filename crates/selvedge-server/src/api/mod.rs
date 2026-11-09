@@ -68,6 +68,7 @@ pub fn router(state: State) -> Router {
         .fallback(no_route)
         .method_not_allowed_fallback(no_method)
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD))
+        .layer(axum::middleware::from_fn(|r, n| crate::metrics::layer("api", r, n)))
         .with_state(state)
 }
 

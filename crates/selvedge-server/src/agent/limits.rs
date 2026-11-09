@@ -179,6 +179,7 @@ impl Watchdog {
                 if !s.throttled {
                     tracing::warn!(%account, pid, cpus = format!("{cpus:.2}"), limit = limits.cpus, "account process is over its CPU share; lowering its priority");
                     renice(*pid, NICE_THROTTLED);
+                    crate::metrics::AGENT_CPU_THROTTLED.inc(&[]);
                     s.throttled = true;
                 }
             } else if s.throttled {

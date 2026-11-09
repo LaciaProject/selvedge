@@ -13,6 +13,7 @@ spec:
   template:
     metadata:
       labels: {{- include "selvedge.selector" $c | nindent 8 }}
+      {{- include "selvedge.metricsAnnotations" . | nindent 6 }}
     spec:
       {{- include "selvedge.pod" $c | nindent 6 }}
       containers:
@@ -50,6 +51,9 @@ spec:
               value: "true"
             {{- end }}
           ports:
+            {{- if .Values.metrics.enabled }}
+            - { name: metrics, containerPort: {{ .Values.metrics.port }} }
+            {{- end }}
             - { name: http, containerPort: 8080 }
             {{- if .Values.tls.enabled }}
             - { name: internal, containerPort: 8779 }

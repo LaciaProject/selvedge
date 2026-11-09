@@ -110,6 +110,7 @@ pub fn router(state: Arc<DataState>) -> Router {
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .fallback(dispatch)
         .layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(axum::middleware::from_fn(|r, n| crate::metrics::layer("data", r, n)))
         .with_state(state)
 }
 

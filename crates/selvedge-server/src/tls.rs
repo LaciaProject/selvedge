@@ -43,6 +43,16 @@ impl Role {
     pub const ALL: [Role; 4] = [Role::Api, Role::Data, Role::Gateway, Role::Runner];
 
     /// The DNS name a certificate for this role carries.
+    /// The role's short name, for metric labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Api => "api",
+            Role::Data => "data",
+            Role::Gateway => "gateway",
+            Role::Runner => "runner",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Role::Api => "api.selvedge.internal",

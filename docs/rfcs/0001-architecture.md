@@ -19,7 +19,7 @@ Selvedge 是一个开源、运行在 Kubernetes 上、高可用的 Workers 平�
 **非目标（v1）**
 
 - 多区域、多集群、全球放置。数据模型不为此预留结构。
-- Containers、Workers AI 推理、Browser Rendering、Hyperdrive、Analytics Engine。
+- Containers、Workers AI 推理、Browser Rendering、Hyperdrive、Analytics Engine。Containers 的方案见 [RFC 0002](0002-containers.md)（草案）。
 - 一致性比 Cloudflare 公开的语义更强。只对齐它公开承诺的语义。
 
 ## 2. 已定的约束

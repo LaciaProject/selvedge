@@ -100,3 +100,55 @@ jobs:
           path: |
             result-*.json
             netstack-*.jsonl
+
+  # Kata cannot share a network namespace between containers under Docker
+  # (each is its own VM), so it is tried where it can: one Kubernetes pod.
+  kata-kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Build the app image
+        run: docker build -q -t selvedge-spike-app:1 test/spike/containers/app
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: spike
+          config: test/spike/containers/kata/kind.yaml
+      - uses: azure/setup-helm@v4
+      - name: Install Kata (kata-deploy 4.3.1)
+        run: |
+          kind load docker-image selvedge-spike-app:1 --name spike
+          helm install kata-deploy oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy \
+            --version 4.3.1 --namespace kube-system --wait --timeout 15m
+          for _ in $(seq 1 90); do kubectl get runtimeclass kata-qemu-runtime-rs > /dev/null 2>&1 && break; sleep 5; done
+          kubectl get runtimeclass
+          kubectl get nodes --show-labels | tr ',' '\n' | grep -i kata || true
+      - name: Run the spike
+        run: |
+          test/spike/containers/kata/run.sh > result-kata.json; cat result-kata.json
+          python3 - result-kata.json >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print("### Kata on kind\n")
+          for k in ["pod_ready", "pod_start_seconds", "containers", "ingress_through_sidecar", "guest_kernel", "host_kernel"]:
+              print(f"- {k}: `{r[k]}`")
+          print("\n| Step | Exit | Output |\n| --- | --- | --- |")
+          for s in r["probe"]:
+              print(f"| {s['step']} | {s['exit']} | {s['out'][:100]} |")
+          PY
+      - name: Diagnostics
+        if: always()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl describe pod box | tail -40 || true
+          kubectl logs -n kube-system -l name=kata-deploy --tail=50 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-kata
+          path: result-kata.json

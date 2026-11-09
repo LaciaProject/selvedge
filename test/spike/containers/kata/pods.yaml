@@ -1,0 +1,53 @@
+# workerd's container layout, as one Kubernetes pod under Kata: the
+# proxy-everything sidecar (with workerd's arguments) and the app share the
+# pod's network namespace, as `NetworkMode: container:<sidecar>` does in
+# Docker.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: box
+spec:
+  runtimeClassName: kata-qemu-runtime-rs
+  hostAliases:
+    - ip: 192.0.2.1
+      hostnames: [host.docker.internal]
+  containers:
+    - name: sidecar
+      image: cloudflare/proxy-everything:main
+      args: [--http-egress-port, "18491", --http-ingress-address, "0.0.0.0:39001",
+             --docker-gateway-cidr, 10.244.0.0/16, --dns-enabled, --tls-intercept, --disable-ipv6]
+      securityContext:
+        capabilities: { add: [NET_ADMIN] }
+    - name: app
+      image: selvedge-spike-app:1
+      imagePullPolicy: Never
+---
+# The network setup steps a transparent proxy needs, under Kata.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+spec:
+  runtimeClassName: kata-qemu-runtime-rs
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: alpine:3.20
+      command: [sh, -c]
+      args: ["$(SCRIPT)"]
+      env:
+        - name: SCRIPT
+          valueFrom: { configMapKeyRef: { name: probe, key: script } }
+      securityContext:
+        capabilities: { add: [NET_ADMIN] }
+---
+# A client outside the sandbox, as workerd would be.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: [sleep, "3600"]

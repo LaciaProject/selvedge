@@ -1,13 +1,14 @@
 # workerd's container layout, as one Kubernetes pod under Kata: the
 # proxy-everything sidecar (with workerd's arguments) and the app share the
 # pod's network namespace, as `NetworkMode: container:<sidecar>` does in
-# Docker.
+# Docker. Uses the Go runtime (kata-qemu): runtime-rs sets up cgroups through
+# systemd over D-Bus, which kind nodes do not run.
 apiVersion: v1
 kind: Pod
 metadata:
   name: box
 spec:
-  runtimeClassName: kata-qemu-runtime-rs
+  runtimeClassName: kata-qemu
   hostAliases:
     - ip: 192.0.2.1
       hostnames: [host.docker.internal]
@@ -28,7 +29,7 @@ kind: Pod
 metadata:
   name: probe
 spec:
-  runtimeClassName: kata-qemu-runtime-rs
+  runtimeClassName: kata-qemu
   restartPolicy: Never
   containers:
     - name: probe

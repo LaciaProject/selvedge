@@ -78,21 +78,14 @@ jobs:
         if: always()
         run: |
           test/spike/containers/probe-netstack.sh | tee "netstack-${{ matrix.runtime }}.jsonl"
-          {
-            echo "### Network setup steps under ${{ matrix.runtime }}"
-            echo
-            python3 -c '
+          python3 - "netstack-${{ matrix.runtime }}.jsonl" "${{ matrix.runtime }}" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, sys
-          for l in open(sys.argv[1]):
-              r = json.loads(l)
+          print(f"### Network setup steps under {sys.argv[2]}\n")
+          for line in open(sys.argv[1]):
+              r = json.loads(line)
               if "step" in r:
-                  print(f"- `{r[\"step\"]}`: exit {r[\"exit\"]} {r[\"out\"][:100]}")
-              else:
-                  print(f"\nproxy-everything ({r[\"binary\"]}):\n")
-                  for c in r["commands"]:
-                      print(f"    {c}")
-          ' "netstack-${{ matrix.runtime }}.jsonl"
-          } >> "$GITHUB_STEP_SUMMARY"
+                  print(f"- `{r['step']}`: exit {r['exit']} {r['out'][:100]}")
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -125,7 +118,7 @@ jobs:
           kind load docker-image selvedge-spike-app:1 --name spike
           helm install kata-deploy oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy \
             --version 4.3.1 --namespace kube-system --wait --timeout 15m
-          for _ in $(seq 1 90); do kubectl get runtimeclass kata-qemu-runtime-rs > /dev/null 2>&1 && break; sleep 5; done
+          for _ in $(seq 1 90); do kubectl get runtimeclass kata-qemu > /dev/null 2>&1 && break; sleep 5; done
           kubectl get runtimeclass
           kubectl get nodes --show-labels | tr ',' '\n' | grep -i kata || true
       - name: Run the spike

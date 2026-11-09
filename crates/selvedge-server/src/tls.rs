@@ -431,7 +431,11 @@ impl Listener {
         tokio::spawn(async move {
             loop {
                 let (stream, peer) = match listener.accept().await {
-                    Ok(a) => a,
+                    Ok(a) => {
+                        // Small responses must not wait for an ACK (Nagle).
+                        let _ = a.0.set_nodelay(true);
+                        a
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "accept failed");
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -29,6 +29,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_GRACE: Duration = Duration::from_secs(30);
 /// How long a process over its limits may take to drain before SIGKILL.
 const LIMIT_GRACE: Duration = Duration::from_secs(3);
+/// How often the agent probes each process's health worker.
+const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A running account process.
 pub struct Live {
@@ -372,6 +374,9 @@ impl Manager {
             slot.checked_at = Some(Instant::now());
             slot.live.replace(live.clone())
         };
+        if let Some(timeout) = self.cfg.hang_timeout {
+            tokio::spawn(self.clone().monitor(account.clone(), live.clone(), timeout));
+        }
         if let Some(old) = old {
             tokio::spawn(async move { old.stop(DRAIN_GRACE).await });
         }
@@ -487,6 +492,58 @@ impl Manager {
             if let Some(live) = live {
                 live.stop(LIMIT_GRACE).await;
             }
+        }
+    }
+
+    /// Probes a process's health worker until the process is replaced or
+    /// stopped. workerd runs all of a process's Workers on one thread and does
+    /// not limit CPU time, so a request stuck in a loop stops every Worker of
+    /// the account, and SIGTERM with them. A process that has not answered for
+    /// `timeout` is killed; the next request starts a new one.
+    async fn monitor(self: Arc<Self>, account: AccountId, live: Arc<Live>, timeout: Duration) {
+        let Some(socket) = live.sockets.get(selvedge_workerd::render::HEALTH_SERVICE).cloned() else {
+            return;
+        };
+        let mut answered = Instant::now();
+        loop {
+            tokio::time::sleep(PROBE_INTERVAL).await;
+            if !self.is_current(&account, &live).await || !live.alive().await {
+                return;
+            }
+            // Waits up to the deadline, so a process busy with long but finite
+            // work is not mistaken for a hung one.
+            let left = timeout.saturating_sub(answered.elapsed());
+            if tokio::time::timeout(left, selvedge_workerd::supervisor::probe(&socket)).await == Ok(true) {
+                answered = Instant::now();
+            } else if answered.elapsed() >= timeout {
+                tracing::warn!(%account, generation = live.generation, ?timeout, "account process stopped responding; killing it");
+                self.kill_hung(&account, &live).await;
+                return;
+            }
+        }
+    }
+
+    async fn is_current(&self, account: &AccountId, live: &Arc<Live>) -> bool {
+        let state = self.accounts.lock().expect("poisoned").get(account).cloned();
+        match state {
+            Some(state) => state.slot.lock().await.live.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)),
+            None => false,
+        }
+    }
+
+    /// Kills a hung process at once: it cannot drain, since draining needs the
+    /// thread that is stuck. In cluster mode its Durable Objects move once
+    /// their lease expires. Does nothing if `live` was replaced meanwhile.
+    async fn kill_hung(&self, account: &AccountId, live: &Arc<Live>) {
+        let state = self.accounts.lock().expect("poisoned").get(account).cloned();
+        let Some(state) = state else { return };
+        let _start = state.start.lock().await;
+        let taken = {
+            let mut slot = state.slot.lock().await;
+            if slot.live.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)) { slot.live.take() } else { None }
+        };
+        if let Some(live) = taken {
+            live.stop(Duration::ZERO).await;
         }
     }
 

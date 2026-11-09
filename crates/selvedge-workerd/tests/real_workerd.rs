@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use selvedge_core::assets::{ManifestEntry, ScriptAssets, UploadConfig, UploadManifest, encode_manifest};
 use selvedge_core::{AccountBundle, Binding, BundleScript, HexId, Module, ModuleKind};
+use selvedge_workerd::supervisor::probe;
 use selvedge_workerd::{RenderOptions, WorkerdProcess, render, workerd_max_date};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -255,4 +256,63 @@ export default {
     let missing = get(&site_sock, "/missing").await;
     assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
     proc.stop(Duration::from_secs(5)).await;
+}
+
+/// A request stuck in a loop blocks the whole process, health worker included,
+/// which is what the agent's hang detection relies on.
+#[tokio::test]
+async fn a_busy_loop_stops_the_health_worker() {
+    let Some(bin) = workerd() else {
+        eprintln!("SELVEDGE_WORKERD not set; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let code = b"export default { fetch(req) { if (new URL(req.url).pathname === '/hang') for (;;) {} return new Response('ok'); } };";
+    let bundle = AccountBundle {
+        account_id: HexId::random(),
+        generation: 1,
+        scripts: vec![BundleScript {
+            name: "spin".into(),
+            version_id: selvedge_core::new_version_id(),
+            main_module: "s.js".into(),
+            compatibility_date: "2025-01-01".into(),
+            compatibility_flags: vec![],
+            modules: vec![Module {
+                name: "s.js".into(),
+                kind: ModuleKind::EsModule,
+                sha256: selvedge_core::sha256_hex(code),
+            }],
+            bindings: vec![],
+            assets: None,
+            canary: None,
+        }],
+        d1_databases: vec![],
+        workflows: vec![],
+    };
+    let opts = RenderOptions {
+        dir: dir.path().join("cfg"),
+        socket_dir: dir.path().join("s"),
+        binding_socket: dir.path().join("b.sock"),
+        max_compatibility_date: workerd_max_date(&bin).await.unwrap(),
+        do_storage_dir: dir.path().join("do"),
+        cluster: None,
+    };
+    let src = |_: &str| Ok(code.to_vec());
+    let rendered = render(&bundle, &opts, &src).unwrap();
+    let mut proc =
+        WorkerdProcess::start(&bin, &rendered, &[], "test", Duration::from_secs(20)).await.unwrap();
+    let health = proc.health_socket().unwrap().to_owned();
+    assert!(probe(&health).await);
+
+    let spin = proc.socket("spin").unwrap().to_owned();
+    let hung = tokio::spawn(async move { get(&spin, "/hang").await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(tokio::time::timeout(Duration::from_secs(2), probe(&health)).await.is_err());
+    hung.abort();
+    proc.kill_now();
+    let started = std::time::Instant::now();
+    while proc.alive() {
+        assert!(started.elapsed() < Duration::from_secs(5), "workerd survived SIGKILL");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

@@ -102,6 +102,9 @@ pub struct AgentConfig {
     pub account_uids: Option<std::ops::Range<u32>>,
     /// CPU, memory and process limits per account process.
     pub limits: Option<limits::Limits>,
+    /// Kill an account process that has not answered a health probe for this
+    /// long (a request stuck in a loop blocks the whole process).
+    pub hang_timeout: Option<Duration>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {

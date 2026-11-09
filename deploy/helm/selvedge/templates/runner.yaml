@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.runner.idleTimeoutSeconds | quote }}
             - name: SELVEDGE_DRAIN_DELAY
               value: {{ .Values.runner.drainDelaySeconds | quote }}
+            - name: SELVEDGE_HANG_TIMEOUT
+              value: {{ .Values.runner.hangTimeoutSeconds | quote }}
             - name: SELVEDGE_ASSET_CACHE_MB
               value: {{ .Values.runner.assetCacheMB | quote }}
             - name: SELVEDGE_ACCOUNT_MEMORY_MB

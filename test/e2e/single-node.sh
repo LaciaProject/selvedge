@@ -32,6 +32,8 @@ export SELVEDGE_R2_S3_LISTEN=127.0.0.1:$S3_PORT
 export SELVEDGE_GC_INTERVAL_SECS=1 SELVEDGE_ASSET_GC_GRACE_SECS=2
 # Per-account limits, low enough for a test to cross.
 export SELVEDGE_ACCOUNT_MEMORY_MB=384 SELVEDGE_ACCOUNT_CPUS=0.5
+# Kill a hung account process after 8 s, not 30.
+export SELVEDGE_HANG_TIMEOUT=8
 
 "$BIN" all > "$WORK/selvedge.log" 2>&1 &
 PID=$!
@@ -548,6 +550,16 @@ for _ in $(seq 1 30); do
 done
 wait "${SPINNERS[@]}"
 check "a process over its CPU share is niced" "10" "$nice_value"
+# A request in an endless loop blocks the whole process; the agent kills it.
+hog / > /dev/null
+hung_pid=$(hog_pid)
+check "a hung request does not answer" "000" "$(curl -s -o /dev/null -w '%{http_code}' -m 2 -H "Host: hog.$SUB2.workers.test" "http://127.0.0.1:$GATEWAY_PORT/hang")"
+check "the hung process does not answer either" "" "$(curl -s -m 2 -H "Host: hog.$SUB2.workers.test" "http://127.0.0.1:$GATEWAY_PORT/")"
+for _ in $(seq 1 20); do
+  [[ "$(curl -s -m 5 -H "Host: hog.$SUB2.workers.test" "http://127.0.0.1:$GATEWAY_PORT/")" =~ ^[0-9]+$ ]] && break
+  sleep 1
+done
+check "a hung process is replaced by a fresh one" "yes" "$([ -n "$(hog_pid)" ] && [ "$(hog_pid)" != "$hung_pid" ] && echo yes)"
 
 # Experimental workerd flags would be live in processes running with
 # --experimental (cluster mode), so uploads may not use them.

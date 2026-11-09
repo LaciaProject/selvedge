@@ -105,7 +105,9 @@ jobs:
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
+          # Kata's runtime reaches the agent in the VM over vsock.
+          sudo modprobe vhost_vsock && sudo modprobe vhost_net
+          ls -l /dev/kvm /dev/vhost-vsock /dev/vhost-net
       - name: Build the app image
         run: docker build -q -t selvedge-spike-app:1 test/spike/containers/app
       - uses: helm/kind-action@v1

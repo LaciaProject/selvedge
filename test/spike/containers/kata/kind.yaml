@@ -6,3 +6,8 @@ nodes:
     extraMounts:
       - hostPath: /dev/kvm
         containerPath: /dev/kvm
+      # The runtime talks to the agent in the VM over vsock.
+      - hostPath: /dev/vhost-vsock
+        containerPath: /dev/vhost-vsock
+      - hostPath: /dev/vhost-net
+        containerPath: /dev/vhost-net

@@ -27,8 +27,15 @@ const GENERATION_TTL: Duration = Duration::from_secs(30);
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_GRACE: Duration = Duration::from_secs(30);
-/// How long a process over its limits may take to drain before SIGKILL.
+/// How long a process over its limits may take to drain before SIGKILL, when
+/// it has no Durable Objects to hand off.
 const LIMIT_GRACE: Duration = Duration::from_secs(3);
+/// workerd's `stopTimeoutMs` in cluster mode: from SIGTERM, it hands each
+/// Durable Object to a peer, letting requests in flight finish, then leaves the
+/// cluster and exits. Killing it sooner leaves objects for the lease (20 s).
+const STOP_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a cluster-mode process gets past its own stop timeout.
+const STOP_MARGIN: Duration = Duration::from_secs(2);
 /// How often the agent probes each process's health worker.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -42,11 +49,25 @@ pub struct Live {
     render_dir: PathBuf,
     socket_dir: PathBuf,
     do_dir: Option<PathBuf>,
+    /// Durable Objects in local files: no other process may start until this
+    /// one has stopped.
+    local_do: bool,
+    /// A workerd cluster member, which hands its objects off when it stops.
+    clustered: bool,
 }
 
 impl Live {
     async fn alive(&self) -> bool {
         self.process.lock().await.as_mut().is_some_and(WorkerdProcess::alive)
+    }
+
+    /// How long to give the process to stop after its limits were crossed.
+    fn limit_grace(&self) -> Duration {
+        if self.clustered { STOP_TIMEOUT + STOP_MARGIN } else { LIMIT_GRACE }
+    }
+
+    async fn pid(&self) -> Option<u32> {
+        self.process.lock().await.as_ref().and_then(WorkerdProcess::pid)
     }
 
     async fn stop(&self, grace: Duration) {
@@ -368,6 +389,8 @@ impl Manager {
             render_dir: opts.dir.clone(),
             socket_dir: opts.socket_dir.clone(),
             do_dir: (!local_do).then_some(do_dir),
+            local_do,
+            clustered: rendered.experimental,
         });
         let old = {
             let mut slot = state.slot.lock().await;
@@ -409,6 +432,7 @@ impl Manager {
             address: format!("{}:0", c.bind_host),
             advertise: None,
             key_hex: hex::encode(h.finalize()),
+            stop_timeout_ms: STOP_TIMEOUT.as_millis() as u32,
         })
     }
 
@@ -478,21 +502,28 @@ impl Manager {
         out
     }
 
-    /// Restarts an account's process that went over its limits: SIGTERM, then
-    /// SIGKILL after [`LIMIT_GRACE`]; the next request starts a new one. In
-    /// cluster mode the drain deregisters the instance, so its Durable Objects
-    /// move at once instead of after the cluster lease (20 seconds). Starts
-    /// wait meanwhile, so a new process never shares local SQLite files with
-    /// the old one.
-    pub async fn restart_over_limit(&self, account: &AccountId) {
-        let state = self.accounts.lock().expect("poisoned").get(account).cloned();
-        if let Some(state) = state {
-            let _start = state.start.lock().await;
-            let live = state.slot.lock().await.live.take();
-            if let Some(live) = live {
-                live.stop(LIMIT_GRACE).await;
-            }
+    /// Restarts an account's process that went over its limits, if `pid` is
+    /// still its process: SIGTERM, then SIGKILL after a grace period; the next
+    /// request starts a new one. In cluster mode the old process hands its
+    /// Durable Objects off meanwhile, and the new one takes each over as it is
+    /// released, so starts need not wait. With local Durable Objects they do,
+    /// since two processes cannot share the SQLite files.
+    pub async fn restart_over_limit(&self, account: &AccountId, pid: u32) {
+        let Some(state) = self.accounts.lock().expect("poisoned").get(account).cloned() else { return };
+        let start = state.start.lock().await;
+        let live = {
+            let mut slot = state.slot.lock().await;
+            let current = match &slot.live {
+                Some(live) => live.pid().await == Some(pid),
+                None => false,
+            };
+            if current { slot.live.take() } else { None }
+        };
+        let Some(live) = live else { return };
+        if !live.local_do {
+            drop(start);
         }
+        live.stop(live.limit_grace()).await;
     }
 
     /// Probes a process's health worker until the process is replaced or
@@ -559,21 +590,28 @@ impl Manager {
             .collect();
         for account in idle {
             let state = self.account(&account);
-            let _start = state.start.lock().await;
-            let mut slot = state.slot.lock().await;
-            // Re-check under the lock: a request may have just used it.
-            let still_idle = self
-                .last_used
-                .lock()
-                .expect("poisoned")
-                .get(&account)
-                .is_some_and(|t| t.elapsed() > self.cfg.idle_timeout);
-            if still_idle {
-                if let Some(live) = slot.live.take() {
-                    tracing::info!(%account, "stopping idle account process");
-                    live.stop(DRAIN_GRACE).await;
+            let start = state.start.lock().await;
+            let live = {
+                let mut slot = state.slot.lock().await;
+                // Re-check under the lock: a request may have just used it.
+                let mut last_used = self.last_used.lock().expect("poisoned");
+                let still_idle = last_used.get(&account).is_some_and(|t| t.elapsed() > self.cfg.idle_timeout);
+                if !still_idle {
+                    continue;
                 }
-                self.last_used.lock().expect("poisoned").remove(&account);
+                last_used.remove(&account);
+                slot.live.take()
+            };
+            let Some(live) = live else { continue };
+            tracing::info!(%account, "stopping idle account process");
+            // A request arriving meanwhile starts a new process, unless local
+            // Durable Object files make it wait for this one to stop.
+            if live.local_do {
+                live.stop(DRAIN_GRACE).await;
+                drop(start);
+            } else {
+                drop(start);
+                tokio::spawn(async move { live.stop(DRAIN_GRACE).await });
             }
         }
     }

@@ -1,6 +1,6 @@
 # RFC 0002：Containers 支持
 
-- 状态：**草案**，待讨论
+- 状态：**草案**，待讨论（P0 的第一轮实测已完成，见 §11）
 - 日期：2026-11-09
 - 依赖：[RFC 0001](0001-architecture.md) §7（Durable Objects 集群模式）、§8（多租户隔离）
 - 依据：workerd `v1.20261109.1` 源码（`src/workerd/server/container-client.c++`、`docker-api.capnp`、`workerd.capnp`、`src/workerd/api/container.h`），wrangler 4.158.0
@@ -93,7 +93,9 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
   1. NetworkPolicy：容器 Pod 只能连到"自己所属账号的 runner Pod"的出站端口，以及 DNS；不能直接上公网。所有出站都必须经过 workerd，也就受到 workerd 现有的 `deny private/local` 规则限制。
   2. agent 在 runner Pod 里做一层中转：workerd 实际监听在回环地址上，外部连接先到 agent，agent 核对来源 IP 是否属于该账号的容器 Pod，再转给 workerd。
 - **入向限制**：容器 Pod 只接受所属 runner Pod 的连接，彼此之间、跨账号之间都不通。
-- **边车权限**：`NET_ADMIN` 只在 Pod 自己的网络命名空间里有效。gVisor 的网络栈对 iptables/TPROXY 的支持需要先验证（§9）；如果不行，就改用 Kata（真实的客户机内核），或者自己写一个不依赖 TPROXY 的边车，但它必须兼容 workerd 期望的 `proxy-everything` 协议，这会增加维护负担。
+- **边车权限**：`NET_ADMIN` 只在 Pod 自己的网络命名空间里有效。**实测（§11）表明 `proxy-everything` 不能在 gVisor 下运行**：它依赖 gVisor 不支持的策略路由和 TPROXY。可选的做法有两种：
+  - 改用 Kata：它是真实的客户机内核，同一个 Pod 的容器共享一台虚拟机；
+  - 自己写一个基于 nat `REDIRECT` 的边车，配合 `runsc --net-raw`，并兼容 workerd 期望的 `proxy-everything` 协议。这会带来长期维护负担。
 
 ### 4.4 镜像仓库
 
@@ -148,6 +150,8 @@ GPU；持久磁盘；选择地域或位置；SSH 到实例（`/instances/{id}/ss
 
 ## 10. 分阶段与工作量估计
 
+（下表是实测前的估计；§11 的结果会改变 P1 的范围，见该节的"下一步"。）
+
 | 阶段 | 内容 | 粗估 |
 | --- | --- | --- |
 | P0 spike | §9 中的 1–3 项，结论写回本 RFC | 1–2 周 |
@@ -156,3 +160,48 @@ GPU；持久磁盘；选择地域或位置；SSH 到实例（`/instances/{id}/ss
 | P3 | 快照，或者正式宣布不支持 | 待定 |
 
 决策点：P0 的结论决定是否进入 P1。如果 gVisor 跑不了 `proxy-everything`，而 Kata 又跑不了，就需要自己写边车，P1 的工作量和长期维护成本都会明显增加。到那时应当重新评估要不要做。
+
+## 11. 实测结果（2026-11-09）
+
+在 GitHub Actions 的 Ubuntu 机器上，用 workerd `1.20261109.1` 自带的容器后端（`containerEngine.localDocker`）对接 Docker，分别以 runc、gVisor（`release-20261102.0`）以及开启 `--net-raw` 的 gVisor 作为 Docker 的默认运行时。代码在 `spike/containers` 分支的 `test/spike/containers/` 下，由 `containers spike` 工作流运行。
+
+**runc（不带沙箱，作为基线）**：功能全部正常。
+
+| 步骤 | 结果 | 耗时 |
+| --- | --- | --- |
+| 冷启动（镜像已在本地，含边车） | `getTcpPort(8080).fetch()` 成功 | 0.77–1.12 s |
+| 热请求 | 成功 | 11 ms |
+| 销毁后重新启动 | 成功 | 0.41 s |
+| 默认出站（未开启 `enableInternet`） | DNS 解析失败，不能上公网 | |
+| `enableInternet: true` 时出站 HTTP/HTTPS | 200 | 55–61 ms |
+| 出站访问 `169.254.169.254` | 被 workerd 拒绝（400） | |
+| `interceptOutboundHttp` | 容器发出的请求交给了 Worker | 12 ms |
+
+**gVisor：`proxy-everything` 启动即退出**，报错 `RTNETLINK answers: Not supported`，开启 `--net-raw` 也一样。workerd 随后报 `Container ingress proxy is not running`。逐条探测透明代理需要的网络配置：
+
+| 操作 | runc | gVisor | gVisor `--net-raw` |
+| --- | --- | --- | --- |
+| 回环地址别名（`ip addr add 127.0.0.3`） | 支持 | 支持 | 支持 |
+| 策略路由（`ip rule fwmark`、`local` 路由表），TPROXY 依赖它 | 支持 | **不支持** | **不支持** |
+| nftables 后端的 iptables | 支持 | 不支持 | 不支持 |
+| 传统 iptables 的 nat `REDIRECT` | 支持 | nat 表不存在 | **支持，端到端验证有效** |
+| 传统 iptables 的 owner 匹配 | 支持 | 不支持 | 支持 |
+| `TPROXY` 目标 | 支持 | 不支持 | **不支持** |
+
+**Docker API 契约**（这次实测的场景中 workerd 实际发出的调用，不包括 exec 和快照）：`GET /volumes?filters`、`GET /networks/bridge`、`POST /containers/create`（边车和应用各一次，HostConfig 中带资源限制、`CapAdd`、`Dns`、`ExtraHosts`、`NetworkMode`、`AutoRemove` 等字段）、`POST /containers/{id}/start`、`GET /containers/{id}/json`、`POST /containers/{id}/wait`（带和不带 `condition`）、`DELETE /containers/{id}?force`。`docker-recorder.py` 可以复用为 §9 第 4 点的契约测试。
+
+**结论**
+
+1. 在不带沙箱的 runc 下，workerd 的容器后端完全可用，冷启动约 1 秒。§4.2 的接口映射可以照着录到的调用清单来做。
+2. **现成的 `proxy-everything` 不能在 gVisor 下运行，这是确定的。** 原因是 gVisor 的网络栈不支持策略路由和 TPROXY，与配置无关。
+3. gVisor 加 `--net-raw` 后，传统 iptables 的 `REDIRECT` 可用，所以一个基于 `REDIRECT` 的边车理论上可行。代价有两个：
+   - 要自己维护一个兼容 workerd 协议的边车，包括入站 CONNECT、出站 CONNECT 加主机名提示、DNS 和 TLS 拦截用的 CA；
+   - 沙箱里会开放原始套接字，需要做安全评估。
+4. Kata 无法在 Docker 下验证：Docker 中每个 Kata 容器各自是一台虚拟机，不支持 workerd 依赖的 `--net=container:`。到了 Kubernetes 里，同一个 Pod 的容器共享一台虚拟机，这个问题就不存在了。
+
+**下一步**
+
+- 在 kind 中用 Kata 的 RuntimeClass 跑同样的测试。需要 GitHub 托管机器提供 `/dev/kvm`，并在 kind 节点里配置 Kata。
+- 如果 Kata 可行，P1 就以 Kata 为默认沙箱，不需要自己写边车，gVisor 不作为选项。
+- 如果 Kata 在目标环境中不可用，再评估自写 REDIRECT 边车的成本，或者重新讨论是否支持容器。
+

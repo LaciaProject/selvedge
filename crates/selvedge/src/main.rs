@@ -339,6 +339,10 @@ async fn serve_axum(
     let listener =
         tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
     tracing::info!(addr = %listen, "listening");
+    // Small responses must not wait for an ACK (Nagle); axum leaves it on.
+    let listener = axum::serve::ListenerExt::tap_io(listener, |s: &mut tokio::net::TcpStream| {
+        let _ = s.set_nodelay(true);
+    });
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
     Ok(())
 }

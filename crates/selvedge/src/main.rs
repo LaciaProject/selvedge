@@ -179,6 +179,10 @@ struct AgentArgs {
     /// Local disk for cached static assets, in MiB.
     #[arg(long, env = "SELVEDGE_ASSET_CACHE_MB", default_value_t = 1024)]
     asset_cache_mb: u64,
+    /// Kill an account process that has not answered a health probe for this
+    /// many seconds, e.g. one stuck in an endless loop (0: never).
+    #[arg(long, env = "SELVEDGE_HANG_TIMEOUT", default_value_t = 30)]
+    hang_timeout: u64,
 }
 
 #[derive(Args, Clone)]
@@ -250,6 +254,9 @@ struct AllArgs {
     /// CPUs an account process may use.
     #[arg(long, env = "SELVEDGE_ACCOUNT_CPUS", default_value_t = 1.0)]
     account_cpus: f64,
+    /// Kill a hung account process after this many seconds (see `agent --help`).
+    #[arg(long, env = "SELVEDGE_HANG_TIMEOUT", default_value_t = 30)]
+    hang_timeout: u64,
 }
 
 #[derive(Subcommand)]
@@ -400,6 +407,7 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
             cpus: a.account_cpus,
             pids: a.account_pids,
         }),
+        hang_timeout: (a.hang_timeout > 0).then(|| Duration::from_secs(a.hang_timeout)),
     })
 }
 
@@ -674,6 +682,7 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         account_memory_mb: args.account_memory_mb,
         account_cpus: args.account_cpus,
         account_pids: 1024,
+        hang_timeout: args.hang_timeout,
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(

@@ -15,7 +15,9 @@
 //!   and router worker (`router-<script>`). The script's socket points at the
 //!   router, which serves an asset or calls the script (`w-<script>`, absent for
 //!   a Worker that only has assets). Asset bytes come from `selvedge-assets-kv`,
-//!   a KV-protocol service on the agent's binding socket.
+//!   a KV-protocol service on the agent's binding socket;
+//! - `selvedge-health`, which the agent probes. All of a process's Workers run
+//!   on one thread, so a busy loop in tenant code stops it answering, too.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -103,6 +105,10 @@ pub fn uses_durable_objects(bundle: &AccountBundle) -> bool {
             .iter()
             .any(|s| s.bindings.iter().any(|b| matches!(b, Binding::DurableObjectNamespace { .. })))
 }
+
+/// The system worker the agent probes to find a hung process.
+pub const HEALTH_SERVICE: &str = "selvedge-health";
+const HEALTH_WORKER: &str = "export default { fetch() { return new Response('ok'); } };";
 
 const MISSING_SERVICE: &str = "selvedge-missing";
 const MISSING_WORKER: &str = "export default { fetch() { return new Response(\
@@ -541,6 +547,19 @@ pub fn render(bundle: &AccountBundle, opts: &RenderOptions, modules: &dyn Module
             quote(&opts.do_storage_dir.display().to_string()),
         ));
     }
+    services.push(format!(
+        "(name = {}, worker = (modules = [(name = \"health.js\", esModule = {})], compatibilityDate = \"2024-01-01\"))",
+        quote(HEALTH_SERVICE),
+        quote(HEALTH_WORKER),
+    ));
+    let socket = opts.socket_dir.join("health.sock");
+    sockets_cfg.push(format!(
+        "(name = {}, address = {}, http = (), service = {})",
+        quote(HEALTH_SERVICE),
+        quote(&format!("unix:{}", socket.display())),
+        quote(HEALTH_SERVICE),
+    ));
+    sockets.push((HEALTH_SERVICE.to_owned(), socket));
     services.push(
         "(name = \"internet\", network = (allow = [\"public\"], deny = [\"private\", \"local\"], \
          tlsOptions = (trustBrowserCas = true)))"
@@ -840,7 +859,10 @@ mod tests {
         assert!(text.contains("service = \"selvedge-missing\""));
         assert!(text.contains("hi \\\"there\\\""));
         assert!(!r.experimental);
-        // The script and the events system worker.
-        assert_eq!(r.sockets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["hello", EVENTS_SERVICE]);
+        // The script and the events and health system workers.
+        assert_eq!(
+            r.sockets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["hello", EVENTS_SERVICE, HEALTH_SERVICE]
+        );
     }
 }

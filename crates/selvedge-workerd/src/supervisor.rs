@@ -113,6 +113,11 @@ impl WorkerdProcess {
         let _ = self.child.start_kill();
     }
 
+    /// The socket of the health worker the agent probes, if rendered.
+    pub fn health_socket(&self) -> Option<&Path> {
+        self.socket(crate::render::HEALTH_SERVICE)
+    }
+
     /// Asks workerd to drain (SIGTERM), then kills it after `grace`. In cluster
     /// mode a drain deregisters the instance so peers take its objects at once.
     pub async fn stop(mut self, grace: Duration) {
@@ -124,6 +129,18 @@ impl WorkerdProcess {
             let _ = self.child.kill().await;
         }
     }
+}
+
+/// Whether an HTTP server on `socket` answers a GET with a 2xx. Waits as long
+/// as the server takes; callers bound it with a timeout.
+pub async fn probe(socket: &Path) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(mut s) = tokio::net::UnixStream::connect(socket).await else { return false };
+    if s.write_all(b"GET / HTTP/1.1\r\nHost: health\r\nConnection: close\r\n\r\n").await.is_err() {
+        return false;
+    }
+    let mut status = [0u8; 10];
+    s.read_exact(&mut status).await.is_ok() && status.starts_with(b"HTTP/1.1 2")
 }
 
 fn forward_logs(child: &mut Child, label: &str) {

@@ -117,6 +117,10 @@ runner:
   idleTimeoutSeconds: 600
   # Seconds to keep serving, unhealthy, before draining on shutdown.
   drainDelaySeconds: 5
+  # Kill an account process that has not answered a health probe for this
+  # many seconds (a request stuck in an endless loop blocks the whole
+  # process; workerd does not limit CPU time). 0 turns it off.
+  hangTimeoutSeconds: 30
   # Local disk (the pod's state emptyDir) for cached static assets.
   assetCacheMB: 1024
   # Limits per account process. In Kubernetes the agent enforces them (memory:

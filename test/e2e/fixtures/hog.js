@@ -1,4 +1,5 @@
-// Uses as much memory or CPU as it is asked to, to test per-account limits.
+// Uses as much memory or CPU as it is asked to, or hangs, to test per-account
+// limits and hang detection.
 const kept = [];
 let served = 0;
 export default {
@@ -7,6 +8,9 @@ export default {
     if (path === "/grow") {
       kept.push(new Uint8Array(64 << 20).fill(1));
       return new Response(String(kept.length));
+    }
+    if (path === "/hang") {
+      for (;;) {}
     }
     if (path === "/spin") {
       const end = Date.now() + 1000;

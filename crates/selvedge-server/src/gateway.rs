@@ -22,7 +22,7 @@ use selvedge_store::Route;
 use sha2::{Digest, Sha256};
 
 use crate::agent::{ACCOUNT_HEADER, SCRIPT_HEADER, TOKEN_HEADER};
-use crate::proxy::{self, Body, Target};
+use crate::proxy::{self, Body};
 
 #[derive(Clone, Debug)]
 pub enum Runners {
@@ -438,20 +438,18 @@ async fn handle(
     let first = rand::random_range(0..set);
     ranked[..set].rotate_left(first);
 
+    let mut req = req;
     for addr in &ranked {
-        match proxy::connect(Target::Tcp(addr, crate::tls::Role::Runner)).await {
-            Ok(sender) => {
-                return match proxy::send(sender, req).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(runner = %addr, error = %e, "runner request failed");
-                        proxy::full(StatusCode::BAD_GATEWAY, "Worker unavailable")
-                    }
-                };
+        match proxy::POOL.request(addr, crate::tls::Role::Runner, req).await {
+            Ok(r) => return r,
+            Err(proxy::Failed::Sent(e)) => {
+                tracing::warn!(runner = %addr, error = %e, "runner request failed");
+                return proxy::full(StatusCode::BAD_GATEWAY, "Worker unavailable");
             }
-            Err(e) => {
+            Err(proxy::Failed::NotSent(r, e)) => {
                 tracing::warn!(runner = %addr, error = %e, "runner unreachable; trying the next");
                 shared.healthy.write().expect("poisoned").retain(|r| r != addr);
+                req = *r;
             }
         }
     }

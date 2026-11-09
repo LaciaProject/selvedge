@@ -113,6 +113,7 @@ cargo test                                  # unit tests
 SELVEDGE_WORKERD=/path/to/workerd cargo test  # plus tests against the real workerd
 test/e2e/single-node.sh                     # wrangler against `selvedge all` (needs PostgreSQL)
 test/e2e/cluster.sh                         # Durable Object failover on two runners (needs S3)
+test/bench/bench.sh                         # request-path throughput and latency, with mTLS
 ```
 
 The multi-node Kubernetes tests (`test/k8s/`) run on GitHub Actions: push a branch named `ci/...`.

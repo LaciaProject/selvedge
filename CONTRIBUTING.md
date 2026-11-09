@@ -34,6 +34,10 @@ This adds a `Signed-off-by: Your Name <you@example.com>` line. There is no CLA.
    as SeaweedFS). CI runs them on every pull request.
 4. Large tests (multi-node Kubernetes, chaos, upgrades) run on GitHub Actions only. Push a branch
    named `ci/<topic>` or run the `kubernetes` workflow by hand.
+5. For changes on the request path, compare throughput and latency. `test/bench/bench.sh` measures
+   a Worker, a KV read and a Durable Object call through the gateway and a runner, with mTLS. The
+   `bench` workflow runs it for `main` and your commit on the same machine (push `ci/<topic>`) and
+   puts a comparison in the job summary. Local numbers only compare runs on one machine.
 
 ## Releases
 

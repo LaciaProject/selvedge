@@ -1,0 +1,89 @@
+name: bench
+
+# Request-path throughput and latency (test/bench/bench.sh). Hosted runners
+# vary, so a run measures main (the base) and this commit on the same machine
+# and compares them in the job summary. Pushes to main measure main alone.
+on:
+  push:
+    branches: [main, "ci/**"]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Ref to compare against
+        default: main
+      seconds:
+        description: Seconds per scenario
+        default: "15"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: pg
+          POSTGRES_DB: selvedge
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+      DO_S3_ENDPOINT: http://127.0.0.1:29000
+      BENCH_SECONDS: ${{ inputs.seconds || '15' }}
+      BASE_REF: ${{ inputs.base || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install workerd
+        run: |
+          cd test/e2e && npm install --no-audit --no-fund
+          echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
+      - name: Start SeaweedFS (S3 with conditional writes)
+        run: |
+          docker run -d --name seaweedfs -p 127.0.0.1:29000:8333 chrislusf/seaweedfs:4.50 \
+            server -s3 -dir=/data -master.volumeSizeLimitMB=64 -volume.max=20
+          for _ in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:29000/ && break; sleep 1; done
+          curl -sf -X PUT http://127.0.0.1:29000/selvedge-do
+      - name: Build the base
+        if: github.ref != 'refs/heads/main'
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          (cd "$RUNNER_TEMP/base" && cargo build --release --locked -p selvedge)
+          echo "BASE_BIN=$RUNNER_TEMP/base/target/release/selvedge" >> "$GITHUB_ENV"
+      - name: Measure the base
+        if: github.ref != 'refs/heads/main'
+        run: SELVEDGE_BIN="$BASE_BIN" BENCH_OUT="$RUNNER_TEMP/base.jsonl" test/bench/bench.sh
+      - name: Measure this commit
+        run: BENCH_OUT="$RUNNER_TEMP/head.jsonl" test/bench/bench.sh
+      - name: Summary
+        run: |
+          {
+            echo "### Request path, 16 clients, ${BENCH_SECONDS}s per scenario"
+            echo
+            echo "Base: \`$BASE_REF\` · head: \`${GITHUB_SHA::8}\` · one runner, mTLS between components"
+            echo
+            python3 test/bench/compare.py "$RUNNER_TEMP/base.jsonl" "$RUNNER_TEMP/head.jsonl"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cp "$RUNNER_TEMP"/*.jsonl . 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: "*.jsonl"

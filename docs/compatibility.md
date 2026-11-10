@@ -212,7 +212,7 @@ sandbox off. See [containers.md](containers.md) for running them.
 Differences:
 
 - **Cold starts take seconds**: scheduling the pod, pulling the image the first time on a node, and
-  booting its VM. On GitHub's runners (Kata under nested virtualization), a start took 8–9
+  booting its VM. On GitHub's runners (Kata under nested virtualization), a start took about 8
   seconds with the image already on the node and 10–12 with a pull of a small image; nodes with
   direct KVM should be faster. Without the sandbox (Docker, one node) it is 1–2 seconds.
 - The disk is ephemeral, as on Cloudflare: when an object moves to another runner (a deploy, a

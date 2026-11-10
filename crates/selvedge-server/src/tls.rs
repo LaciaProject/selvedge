@@ -11,6 +11,7 @@
 //! | data                | runner           |
 //! | API internal        | runner, gateway  |
 //! | gateway internal    | API, data        |
+//! | containers          | runner           |
 //!
 //! Runners run tenants' code, so a runner's certificate in particular reaches
 //! no other runner and cannot route requests into account processes. A
@@ -37,10 +38,13 @@ pub enum Role {
     Data,
     Gateway,
     Runner,
+    /// The containers controller (RFC 0002), which holds the cluster's
+    /// credentials for starting container instances.
+    Containers,
 }
 
 impl Role {
-    pub const ALL: [Role; 4] = [Role::Api, Role::Data, Role::Gateway, Role::Runner];
+    pub const ALL: [Role; 5] = [Role::Api, Role::Data, Role::Gateway, Role::Runner, Role::Containers];
 
     /// The DNS name a certificate for this role carries.
     /// The role's short name, for metric labels.
@@ -50,6 +54,7 @@ impl Role {
             Role::Data => "data",
             Role::Gateway => "gateway",
             Role::Runner => "runner",
+            Role::Containers => "containers",
         }
     }
 
@@ -59,6 +64,7 @@ impl Role {
             Role::Data => "data.selvedge.internal",
             Role::Gateway => "gateway.selvedge.internal",
             Role::Runner => "runner.selvedge.internal",
+            Role::Containers => "containers.selvedge.internal",
         }
     }
 
@@ -117,6 +123,7 @@ pub const AGENT_CLIENTS: &[Role] = &[Role::Gateway];
 pub const DATA_CLIENTS: &[Role] = &[Role::Runner];
 pub const API_INTERNAL_CLIENTS: &[Role] = &[Role::Runner, Role::Gateway];
 pub const GATEWAY_INTERNAL_CLIENTS: &[Role] = &[Role::Api, Role::Data];
+pub const CONTAINERS_CLIENTS: &[Role] = &[Role::Runner];
 
 pub struct Tls {
     /// The roles this process's own certificate names.
@@ -155,7 +162,7 @@ pub fn scheme() -> &'static str {
     if get().is_some() { "https" } else { "http" }
 }
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub(crate) fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
@@ -491,11 +498,13 @@ impl axum::serve::Listener for Listener {
 #[derive(Clone, Copy, Debug)]
 pub struct Peer {
     pub health_only: bool,
+    /// The client's address.
+    pub addr: std::net::SocketAddr,
 }
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Listener>> for Peer {
     fn connect_info(stream: axum::serve::IncomingStream<'_, Listener>) -> Self {
-        Peer { health_only: stream.io().health_only() }
+        Peer { health_only: stream.io().health_only(), addr: *stream.remote_addr() }
     }
 }
 
@@ -525,12 +534,13 @@ mod tests {
     }
 
     #[test]
-    fn no_listener_accepts_runners_except_data_and_api() {
+    fn no_listener_accepts_runners_except_data_api_and_containers() {
         for (clients, runner_ok) in [
             (AGENT_CLIENTS, false),
             (GATEWAY_INTERNAL_CLIENTS, false),
             (DATA_CLIENTS, true),
             (API_INTERNAL_CLIENTS, true),
+            (CONTAINERS_CLIENTS, true),
         ] {
             assert_eq!(Roles::of(clients).contains(Role::Runner), runner_ok);
         }

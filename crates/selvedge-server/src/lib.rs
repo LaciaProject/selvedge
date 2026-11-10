@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod containers;
 pub mod data;
 pub mod dispatch;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod queues;
 pub mod r2;
 pub mod r2lifecycle;
 pub mod r2s3;
+pub mod registry;
 pub mod sigv4;
 pub mod tail;
 pub mod tls;

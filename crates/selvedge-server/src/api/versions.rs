@@ -28,7 +28,18 @@ fn worker_not_found() -> ApiError {
     ApiError::new(http::StatusCode::NOT_FOUND, 10007, "This Worker does not exist on your account.")
 }
 
-fn version_json(v: &VersionInfo) -> Value {
+/// A version as the API describes it. Durable Object bindings carry their
+/// namespace's id, which `wrangler` reads to attach a container application
+/// to a class.
+fn version_json(v: &VersionInfo, account: &selvedge_core::AccountId, script: &str) -> Value {
+    let mut bindings = json!(v.bindings);
+    for (b, out) in v.bindings.iter().zip(bindings.as_array_mut().into_iter().flatten()) {
+        if let selvedge_core::Binding::DurableObjectNamespace { class_name, script_name, .. } = b {
+            let host = script_name.as_deref().unwrap_or(script);
+            out["namespace_id"] =
+                json!(selvedge_core::containers::do_namespace_id(account.as_str(), host, class_name));
+        }
+    }
     json!({
         "id": v.id,
         "number": v.number,
@@ -41,7 +52,7 @@ fn version_json(v: &VersionInfo) -> Value {
         },
         "annotations": { "workers/triggered_by": "upload" },
         "resources": {
-            "bindings": v.bindings,
+            "bindings": bindings,
             "script": { "etag": v.id, "handlers": ["fetch"] },
             "script_runtime": {
                 "compatibility_date": v.compatibility_date,
@@ -62,7 +73,7 @@ async fn list(
         return Err(worker_not_found());
     }
     let versions = state.db.versions(&id, &script).await?;
-    Ok(ok(json!({ "items": versions.iter().map(version_json).collect::<Vec<_>>() })))
+    Ok(ok(json!({ "items": versions.iter().map(|v| version_json(v, &id, &script)).collect::<Vec<_>>() })))
 }
 
 async fn get_version(
@@ -74,7 +85,7 @@ async fn get_version(
     let v = state.db.version(&id, &script, &version).await?.ok_or_else(|| {
         ApiError::new(http::StatusCode::NOT_FOUND, 10220, "The specified version does not exist")
     })?;
-    Ok(ok(version_json(&v)))
+    Ok(ok(version_json(&v, &id, &script)))
 }
 
 /// `wrangler versions upload`: a new version that is not deployed.
@@ -87,7 +98,7 @@ async fn upload(
     let id = script_access(&state, &caller, &account, &script).await?;
     let (version, _, _) = create_version(&state, &id, &script, form, false).await?;
     let v = state.db.version(&id, &script, &version).await?.ok_or_else(worker_not_found)?;
-    let mut out = version_json(&v);
+    let mut out = version_json(&v, &id, &script);
     out["startup_time_ms"] = json!(0);
     Ok(ok(out))
 }

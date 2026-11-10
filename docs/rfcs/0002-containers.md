@@ -1,11 +1,11 @@
 # RFC 0002：Containers 支持
 
-- 状态：**草案**，待讨论（P0 的沙箱实测已完成，结论是用 Kata，见 §11）
+- 状态：**已实现**（P1，2026-11-10）。沙箱实测见 §11，实现与本文初稿的差异见 §12
 - 日期：2026-11-09
 - 依赖：[RFC 0001](0001-architecture.md) §7（Durable Objects 集群模式）、§8（多租户隔离）
 - 依据：workerd `v1.20261109.1` 源码（`src/workerd/server/container-client.c++`、`docker-api.capnp`、`workerd.capnp`、`src/workerd/api/container.h`），wrangler 4.158.0
 
-RFC 0001 把 Containers 列为 v1 的非目标。本文说明不修改 workerd 怎么支持它，结论是**可行，但相当于一个新子系统**，需要先验证几个关键点（§9）再决定做不做。
+RFC 0001 把 Containers 列为 v1 的非目标。本文说明不修改 workerd 怎么支持它，结论是**可行，但相当于一个新子系统**。§1–§11 是实现前的设计和实测，§12 记录最终实现与之不同的地方；运维文档见 [containers.md](../containers.md)。
 
 ## 1. Cloudflare Containers 是什么
 
@@ -51,13 +51,14 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
  │   │ containerEngine.localDocker       │  入站转发   │   ▲ 共享网络命名空间                    │
  │   ▼ unix:<run>/A/docker.sock (0600, a) │──────────▶ │ 应用容器（账号 A 的镜像）               │
  │ agent：Docker API 垫片                 │            └──────────────────────────────────────┘
- │   ├─ 校验镜像、生成 Pod 规格             │                       │ 出站（HTTP CONNECT）
+ │   ├─ 只转交类名、环境变量、命令          │                       │ 出站（HTTP CONNECT）
  │   ├─ 入站：127.0.0.1:N → Pod IP:边车端口 │◀──────────────────────┘
- │   └─ 出站中转：只接受本账号容器的连接     │
+ │   └─ 出站中转：按来源地址找到所属容器     │
  └──────────────┬───────────────────────┘
                 │ mTLS（新角色：containers）
                 ▼
-      selvedge-containers（新组件）：持有 Kubernetes 凭证，创建、删除和监视容器 Pod
+      selvedge containers（新组件）：持有 Kubernetes 凭证，从数据库查镜像和规格，
+      自己生成 Pod 规格，创建、删除和清理容器 Pod
 ```
 
 ### 4.1 组件划分
@@ -67,31 +68,39 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
   - 为什么不让 agent 直接调用 Kubernetes：runner 运行租户代码，一旦 workerd 沙箱被突破，进程能读到的 ServiceAccount token 就会变成集群级别的权限。
   - 通信方式：agent 通过 mTLS 内部接口调用它，新增 `containers` 角色，沿用 PR #9 的按角色校验。
   - 它是 RFC 0001 §4.5 中设想过的 controller 的第一个职责。
+- **校验放在控制组件，不放在 agent**：runner 可能被攻破，所以 agent 里的任何校验都不可信。agent 只转交 workerd 给它的东西：账号、DO 类、环境变量、命令、出站配置；镜像 digest、实例规格、`max_instances`、沙箱、Pod 形状和拉取凭证都由控制组件从 PostgreSQL 和自身配置决定，Worker 代码在 `start()` 里指定的镜像一律拒绝。控制组件还核对调用者：请求里的 runner 名必须是一个 runner Pod，且其 IP 等于 mTLS 连接的对端地址。
 - **容器 Pod**：
-  - 沙箱用 Kata（`runtimeClassName` 由 Helm 配置，默认 `kata-qemu`），所以节点需要 KVM，也就是裸金属机器或开启了嵌套虚拟化的云主机。
+  - 沙箱默认用 Kata（`runtimeClassName` 由 Helm 配置，默认 `kata-qemu`），所以节点需要 KVM，也就是裸金属机器或开启了嵌套虚拟化的云主机。沙箱是可选的：设成空值就用集群默认的 runc，容器和节点共享内核，只适合运行可信镜像（例如只有自己一个租户的部署），启动时会打警告。
   - 放在 release 所在的命名空间，以便用 ownerReference 指向发起它的 runner Pod：runner Pod 被删除时，Kubernetes 会自动回收它的容器 Pod（§6）。
-  - 规格固定：两个容器（边车 + 应用）；不挂载 ServiceAccount token；`hostNetwork: false`；资源上下限按实例规格设定（§5.3）。
+  - 规格固定：边车是 native sidecar（`restartPolicy: Always` 的 init 容器），之后一个 setup 步骤写入出站配置并取回边车的 CA，最后是应用；`restartPolicy: Never`，应用退出即实例结束；不挂载 ServiceAccount token、不注入 Service 环境变量；`hostNetwork: false`；DNS 只用配置的公共解析器；资源上下限按实例规格设定（§5.3）。运营方的 `podTemplate`（nodeSelector、tolerations 等）先合并，控制组件决定的字段覆盖它。
+- **不存状态**：账号、应用、会话和 runner 都写在 Pod 的 label 上，控制组件的每个回答都从 Pod 列表推出来。控制组件或 agent 重启都不会丢失对实例的跟踪，清理只需按 label 找孤儿。
+- **单节点**：`selvedge all --containers-docker-socket` 用 Docker 作为后端，同一套控制逻辑，容器不进沙箱，用于开发和 e2e 测试。
 
 ### 4.2 Docker API 映射
 
 | workerd 调用 | 垫片的处理 |
 | --- | --- |
-| `GET /images/{ref}/json`、`POST /images/create` | 只接受 `<仓库>/<账号 id>/...` 下的镜像，否则返回 404。向仓库查询 digest，用于固定版本。拉取在 Pod 启动时由节点完成。 |
-| `POST /containers/create`（边车） | 记下边车的参数（端口、DNS、命令行）。只认白名单字段，`CapAdd` 只允许边车的 `NET_ADMIN`。 |
-| `POST /containers/create`（应用） | 记下镜像、环境变量、命令和入口端口。丢弃 `privileges` 带来的 `CapAdd`/`Devices`/`SecurityOpt`，Selvedge 也从不渲染 `privileges`。 |
-| `POST /containers/{id}/start` | 第一次 start 时请 `selvedge-containers` 创建 Pod，等它进入 Running 状态。 |
-| `GET /containers/{id}/json` | 把 Pod 状态翻译成 Docker 的字段。边车的 `NetworkSettings.Ports` 填 agent 为它在 runner Pod 回环地址上开的转发端口（§4.3）。 |
-| `POST /containers/{id}/wait`、`stop`、`kill` | `wait` 翻译成 watch Pod；`stop` 是带宽限期删除；`kill` 只支持 SIGKILL（立即删除）和 SIGTERM，其他信号先返回 501（§9）。 |
-| `DELETE /containers/{id}` | 删除 Pod。 |
-| `GET /networks/bridge` | 返回 runner Pod 的 IP 作为"网关"。workerd 会在这个地址上开出站回连端口。 |
-| `/exec/*`、`/archive` | 第二阶段：通过 `selvedge-containers` 代理 Kubernetes 的 exec 子资源。`archive` 用于 TLS 拦截时放入 CA。 |
-| `/commit`、`/volumes/*`（快照） | 返回 501，暂不支持（§7）。 |
+| `GET /volumes` | 返回空列表（不支持快照）。 |
+| `GET /networks/bridge` | 网关报成 `127.0.0.1`：workerd 把每个容器的出站监听开在回环地址上，只有 agent 的出站中转能连到。 |
+| `POST /containers/create`（边车） | 不创建任何东西，只在回环地址上为这个容器开一个入站端口。Pod 的容器在创建时就固定了，所以真正的边车随应用一起启动。 |
+| `POST /containers/create`（应用） | 记下环境变量、命令和出站配置。镜像、`CapAdd`/`Devices`/`SecurityOpt`、资源限制都忽略，由控制组件决定。 |
+| `POST /containers/{id}/start` | 请控制组件创建实例，等应用进入运行状态或失败（超时可配置，默认 300 秒）。失败原因写进 agent 日志，workerd 只告诉 Worker 启动失败。 |
+| `GET /containers/{id}/json` | 把实例状态翻译成 Docker 的字段；边车的入口端口填 agent 开的回环端口。 |
+| `POST /containers/{id}/wait`、`stop`、`kill` | `wait` 等实例结束并返回退出码；`stop` 是带 10 秒宽限期的删除；`kill` 支持 TERM、INT、QUIT、KILL，其他信号返回 501。 |
+| `DELETE /containers/{id}` | 删除实例。 |
+| `PUT /containers/{id}/archive?path=/etc` | 接受并丢弃：workerd 想写入边车的 CA，实例启动时 setup 步骤会取回真正的 CA。 |
+| `POST /containers/{id}/exec`、`/exec/{id}/start`、`/json`、`/resize` | 记下命令；start 时向控制组件开一条升级后的 mTLS 连接，控制组件用 Docker 的 exec 或 Pod 的 `exec` 子资源运行命令。stdin、stdout/stderr、终端尺寸和退出码在这条连接上用 Docker 多路复用流的帧格式传递。Kubernetes 上不支持指定用户。 |
+| 其他 `archive` | 501。 |
+| `/commit`、`/volumes/*`（快照）、`/images/*` | 501。 |
+
+每个 501 都按操作计入 `selvedge_agent_container_unsupported_total`。
 
 ### 4.3 网络与隔离
 
 - **入站**：workerd 连接 `127.0.0.1:N`，agent 把流量转到 `Pod IP:边车入口端口`。runner Pod 里所有账号共享同一个回环地址，所以 agent 收到连接后要通过 `/proc/net/tcp` 找到对端 socket 的 UID，确认它属于这个容器所在的账号；Unix socket 可以用 SO_PEERCRED，TCP 只能这样查。
+- **出站（实现）**：边车把容器的全部出站流量发到 runner 的出站中转端口（默认 8791，`host.docker.internal` 指向 runner Pod IP）。中转按连接的来源地址找到是哪个实例，再转给 workerd 为该容器开在回环地址上的出站监听；来源地址不属于本 runner 的任何实例时直接断开，并计入 `selvedge_agent_container_egress_refused_total`。于是一个容器只能到达它自己那个 DO 的出站处理，由 workerd 按 `enableInternet`、出站拦截和私有地址规则决定去向。
 - **出站**：边车回连 workerd 开在 runner Pod IP 上的端口。这条连接**没有任何认证**：在本地 Docker 网桥上这不是问题，放到集群网络里就是了。措施有两层：
-  1. NetworkPolicy：容器 Pod 只能连到"自己所属账号的 runner Pod"的出站端口，以及 DNS；不能直接上公网。所有出站都必须经过 workerd，也就受到 workerd 现有的 `deny private/local` 规则限制。
+  1. NetworkPolicy：容器 Pod 只能连到 runner Pod 的出站端口，以及配置的公共 DNS 解析器；不能直接上公网，也连不到集群里的其他服务。NetworkPolicy 无法按账号区分 runner，账号之间的隔离由第 2 点的中转按来源地址保证。所有出站都必须经过 workerd，也就受到 workerd 现有的 `deny private/local` 规则限制。
   2. agent 在 runner Pod 里做一层中转：workerd 实际监听在回环地址上，外部连接先到 agent，agent 核对来源 IP 是否属于该账号的容器 Pod，再转给 workerd。
 - **入向限制**：容器 Pod 只接受所属 runner Pod 的连接，彼此之间、跨账号之间都不通。
 - **边车权限**：`NET_ADMIN` 只在 Pod 自己的网络命名空间里有效。**实测（§11）表明 `proxy-everything` 不能在 gVisor 下运行**：它依赖 gVisor 不支持的策略路由和 TPROXY。可选的做法有两种：
@@ -102,7 +111,8 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
 
 - 运营方提供一个 OCI 仓库（Harbor、zot、distribution 均可），使用 Docker Registry v2 的 token 认证，**由 Selvedge API 签发 token**。
 - `POST /containers/registries/{domain}/credentials` 返回一个短期 token，权限只覆盖 `repository:<账号 id>/*:push,pull`。用户用 `CLOUDFLARE_CONTAINER_REGISTRY=<仓库域名>` 运行 `wrangler deploy`，其余流程和在 Cloudflare 上相同。
-- 节点拉取镜像：每个容器 Pod 带一个只读、只能访问该账号路径的 pull secret，由 `selvedge-containers` 生成。
+- 节点拉取镜像：每个容器 Pod 带一个只读、只能访问该账号路径的 pull secret，由控制组件生成并归 Pod 所有，Pod 删除时一起回收。凭证是 API 的 token 服务能验证的短期密码，不是仓库账号。
+- Helm 可以捆绑一个 CNCF distribution 仓库（只信任 API 签发的 token），也可以接运营方自己的仓库；token 的签名密钥和证书由 chart 生成并保留。
 - 垃圾回收：应用删除后，对应的镜像由仓库自己的 GC 清理，Selvedge 只负责删除 tag。
 
 ### 4.5 Containers API 与部署
@@ -125,7 +135,7 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
   - **进程崩溃或被杀**（包括 #24 的卡死检测）：垫片知道这个进程会话下的所有容器，进程退出后由 agent 删除。
   - **agent 或节点宕机**：runner Pod 被删除时，ownerReference 让 Kubernetes 自动回收它的容器 Pod。节点失联但 Pod 对象还在时，由 `selvedge-containers` 定期清理"所属 runner 已不健康"的容器。
 - DO 在别的 runner 上重新被接手后，会在那里启动新的容器。原来容器里磁盘上的数据会丢失，这和 Cloudflare 的语义相同（磁盘是临时的），要在 compatibility.md 里写清楚。
-- 冷启动：要经过 Pod 调度、可能的镜像拉取和 gVisor 启动，预计是秒级，比 Cloudflare 慢。可以考虑可选的预拉取（DaemonSet 按账号的热门镜像预热），放到后续阶段。
+- 冷启动：要经过 Pod 调度、可能的镜像拉取和 Kata 虚拟机启动，是秒级，比 Cloudflare 慢（实测见 §12）。可以考虑可选的预拉取（DaemonSet 按账号的热门镜像预热），放到后续阶段。
 
 ## 7. 不在范围内
 
@@ -156,7 +166,7 @@ GPU；持久磁盘；选择地域或位置；SSH 到实例（`/instances/{id}/ss
 | 阶段 | 内容 | 粗估 |
 | --- | --- | --- |
 | P0 spike | §9 中的 1–3 项，结论写回本 RFC | 1–2 周 |
-| P1 MVP | 仓库 token 签发、Containers API、垫片（生命周期、入站、出站）、`selvedge-containers`、清理、配额、监控指标、Helm、e2e 和 kind 测试 | 4–6 周 |
+| P1 MVP（已完成，§12） | 仓库 token 签发、Containers API、垫片（生命周期、入站、出站）、`selvedge containers`、清理、配额、监控指标、Helm、e2e 和 kind 测试 | 4–6 周 |
 | P2 | `exec`、信号、TLS 拦截（`archive`）、`inspect`、预拉取 | 2–3 周 |
 | P3 | 快照，或者正式宣布不支持 | 待定 |
 
@@ -229,3 +239,31 @@ GitHub 托管的 Ubuntu 机器提供 `/dev/kvm`（嵌套虚拟化），所以这
 2. 出站回连的隔离（§9 第 3 点）：NetworkPolicy 加 agent 中转，验证跨账号的连接会被拒绝。
 3. 把 `docker-recorder.py` 做成契约测试，接进每天的 workerd 升级工作流。
 
+## 12. 实现（2026-11-10）
+
+P1 已经实现，代码在 `crates/selvedge-server/src/{containers,agent/dockershim.rs,api/containers.rs,registry.rs}`。和 §4 的初稿相比有这些变化，都是实测或评审后做的调整：
+
+1. **校验在控制组件里**（§4.1）。初稿让 agent 校验镜像、生成 Pod 规格；但 runner 本来就被假定可能被攻破，在它里面做的校验不能当真。现在 agent 只转交 workerd 给的类名、环境变量、命令和出站配置，其余全部由控制组件从数据库和自身配置决定。`start()` 指定的其他镜像一律拒绝。
+2. **控制组件不存状态**。实例的账号、应用、会话、runner 都在 Pod 的 label 上，回答一律从 Pod 列表推出；控制组件可以多副本运行，配额检查在 PostgreSQL 按账号的 advisory lock 下进行。
+3. **沙箱可选**。`runtimeClassName` 为空时用集群默认运行时，只适合可信镜像，启动时打警告。单节点的 `selvedge all` 用 Docker 后端，同一套控制逻辑。
+4. **边车的形态**。Pod 的容器在创建时就固定了，而 workerd 先建边车、后建应用，所以垫片对 workerd 扮演边车（只开一个回环入站端口），真正的 `proxy-everything` 作为 native sidecar 和应用一起启动，中间的 setup 步骤写入出站配置并取回 CA。workerd 的 `archive` 写 CA 因此被接受并丢弃。
+5. **出站中转按来源地址识别实例**。`GET /networks/bridge` 把网关报成 `127.0.0.1`，workerd 的出站监听只开在回环地址上；边车连 runner 的 8791 端口，中转按来源 IP 找到实例，只交给该实例自己的出站监听。NetworkPolicy 只能做到"只连 runner"，跨账号隔离靠这一层。
+6. **拉取凭证**。控制组件为每个实例生成只读、只覆盖该账号仓库的短期凭证，放进归 Pod 所有的 pull secret。仓库可以用 chart 捆绑的 CNCF distribution，也可以接运营方自己的。
+7. **契约测试**（§9 第 4 点）。没有单独做录制回放：`test/e2e/containers.sh` 用真实的 wrangler 和 workerd 跑完整流程，每天的 workerd 升级工作流会跑它；垫片不认识的调用一律 501 并计入 `selvedge_agent_container_unsupported_total`，workerd 换了用法会直接表现为测试失败。
+8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收。
+9. **`exec()`**（初稿的 P2）：经控制组件代理，runner 依然碰不到实例的运行时。Kubernetes 用 `v5.channel.k8s.io`，可以关闭 stdin；`user` 选项只有 Docker 后端支持。
+10. **没有做的**：快照、TERM/INT/QUIT/KILL 以外的信号返回 501；没有镜像预拉取。
+
+**测试**
+
+- 单节点（CI `e2e`）：wrangler 构建、推送、部署，token 服务的权限范围，启动、入站、环境变量、CA，出站（默认不通、HTTP 和 HTTPS 拦截、`enableInternet`、拒绝链路本地地址），`max_instances` 和拒绝其他镜像，`exec()`（输出、退出码、stdin、环境变量和工作目录、kill、终端），退出码，销毁和重启，换镜像后的 rollout，删除应用及其镜像，监控指标。
+- Kubernetes（CI `kind-containers`，kind 加 kata-deploy 4.3.1，GitHub 托管机器的嵌套虚拟化）：节点用实例自己的凭证从捆绑仓库拉取镜像；实例跑在 `kata-qemu` 里、有自己的内核；不挂 token、归 runner Pod 所有；入站、HTTP 和 HTTPS 出站拦截、`enableInternet`，workerd 拒绝集群地址；`exec()`；NetworkPolicy；runner Pod 删除后实例随之回收，DO 在新 runner 上重新启动容器；删除应用后实例、pull secret 和仓库里的镜像都被清理。
+
+| 冷启动（kind + Kata，嵌套虚拟化，四次运行） | 耗时 |
+| --- | --- |
+| 首次，需要拉取镜像（18 MB）并启动虚拟机 | 10.1–12.0 s |
+| 镜像已在节点上 | 7.7–9.0 s |
+| runner 被删除后，DO 在新 runner 上重新启动容器 | 7.2–7.9 s |
+| `wrangler deploy`（构建并推送） | 4.4–6.1 s |
+
+比 §11.1 量到的 6 秒 Pod 就绪多出的部分，是 native sidecar 和 setup 步骤依次启动、以及 workerd 轮询端口的时间。直接用 KVM 的节点应当更快。

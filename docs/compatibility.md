@@ -32,6 +32,7 @@ compatibility date later than that release supports is lowered to the newest one
 | Queues (producers) | Supported | See below |
 | Static assets (`assets`) | Supported | See below |
 | Workflows (`workflow`) | Supported | See below |
+| Containers (`containers` in wrangler's configuration) | Supported when the operator enables them | See below |
 | Vectorize, AI, Hyperdrive, Analytics Engine, and others | Not yet | An upload using one is rejected |
 
 ## KV
@@ -186,6 +187,40 @@ Differences:
   milliseconds for an in-cluster store).
 - Requires an S3-compatible store that supports conditional writes (`If-None-Match: *` and
   `If-Match`). Tested: SeaweedFS 4.50. workerd refuses to start against a store without them.
+
+## Containers
+
+A Durable Object class can have a container, as on Cloudflare: `wrangler deploy` builds the image,
+pushes it and creates the application, and the object controls its instance with `ctx.container`
+(or the `@cloudflare/containers` library). Set `CLOUDFLARE_CONTAINER_REGISTRY` to the registry the
+operator names. Each instance runs in its own pod, in a Kata VM unless the operator turned the
+sandbox off. See [containers.md](containers.md) for running them.
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| `start()` with `env`, `entrypoint`, `enableInternet` | Supported | `start()` may not name another image: an object runs its application's image only |
+| `getTcpPort(port).fetch()` and `.connect()` | Supported | |
+| `running`, `monitor()` with the exit code, `destroy()`, `setInactivityTimeout()` | Supported | |
+| `signal()` | Partial | SIGTERM, SIGINT, SIGQUIT and SIGKILL stop the instance; other signals fail |
+| `interceptOutboundHttp()`, `interceptOutboundHttps()` | Supported | For HTTPS the container must trust the sidecar's CA, installed at `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
+| `exec()`: output, exit code, stdin, `env`, `cwd`, `pty` and `resize()`, `kill()` | Supported | `user` works with the Docker backend only; on Kubernetes an exec that names a user fails |
+| `snapshotContainer()`, `snapshotDirectory()` | Not supported | Fail with a message naming the operation |
+| `max_instances`, `instance_type` (named or `vcpu`/`memory_mib`/`disk.size_mb`) | Supported | Named types use Cloudflare's sizes; the operator sets the largest allowed |
+| `wrangler deploy` of applications, and the applications API (list, get, modify, delete) | Supported | A rollout applies at once; there are no gradual or regional rollouts. A deploy with nothing changed creates no rollout |
+| Locations, regions, SSH, GPUs, persistent disks, Cloudchamber deployments | Not supported | |
+
+Differences:
+
+- **Cold starts take seconds**: scheduling the pod, pulling the image the first time on a node, and
+  booting its VM. On GitHub's runners (Kata under nested virtualization), a start took about 8
+  seconds with the image already on the node and 10–12 with a pull of a small image; nodes with
+  direct KVM should be faster. Without the sandbox (Docker, one node) it is 1–2 seconds.
+- The disk is ephemeral, as on Cloudflare: when an object moves to another runner (a deploy, a
+  runner restart, a failover), its container starts afresh there.
+- Containers reach only what workerd lets them: by default nothing, with `enableInternet` public
+  addresses only. DNS goes to the operator's public resolvers even without `enableInternet`.
+- An application's instances count against an account limit and an installation limit set by the
+  operator, besides `max_instances`. A refused start fails like any other; the runner's log says why.
 
 ## Cron Triggers
 

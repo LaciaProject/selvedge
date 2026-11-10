@@ -46,6 +46,34 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: master-key } }
             - name: SELVEDGE_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: admin-token } }
+            {{- if .Values.containers.enabled }}
+            # Containers: the API serves wrangler's endpoints and is the
+            # registry's token service.
+            - name: SELVEDGE_REGISTRY_HOST
+              value: {{ include "selvedge.registryHost" . | quote }}
+            {{- $registryUrl := .Values.containers.registry.url }}
+            {{- if and (not $registryUrl) .Values.containers.registry.bundled }}
+            {{- $registryUrl = printf "http://%s-registry:%v" (include "selvedge.name" .) .Values.containers.registry.service.port }}
+            {{- end }}
+            {{- with $registryUrl }}
+            - name: SELVEDGE_REGISTRY_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: SELVEDGE_REGISTRY_TOKEN_KEY
+              value: /etc/selvedge/registry/tls.key
+            - name: SELVEDGE_REGISTRY_TOKEN_CERT
+              value: /etc/selvedge/registry/tls.crt
+            - name: SELVEDGE_REGISTRY_TOKEN_ISSUER
+              value: {{ .Values.containers.registry.tokenIssuer | quote }}
+            - name: SELVEDGE_REGISTRY_TOKEN_SERVICE
+              value: {{ .Values.containers.registry.tokenService | quote }}
+            - name: SELVEDGE_CONTAINER_MAX_VCPU
+              value: {{ .Values.containers.maxInstance.vcpu | quote }}
+            - name: SELVEDGE_CONTAINER_MAX_MEMORY_MIB
+              value: {{ .Values.containers.maxInstance.memoryMiB | quote }}
+            - name: SELVEDGE_CONTAINER_MAX_DISK_MB
+              value: {{ .Values.containers.maxInstance.diskMB | quote }}
+            {{- end }}
           ports:
             {{- if .Values.metrics.enabled }}
             - { name: metrics, containerPort: {{ .Values.metrics.port }} }
@@ -58,12 +86,17 @@ spec:
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
-          {{- if .Values.tls.enabled }}
-          volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
-          {{- end }}
-      {{- if .Values.tls.enabled }}
-      volumes: {{- include "selvedge.tlsVolume" (dict "root" . "role" "api") | nindent 8 }}
-      {{- end }}
+          volumeMounts:
+            {{- include "selvedge.tlsMount" . | nindent 12 }}
+            {{- if .Values.containers.enabled }}
+            - { name: registry-token, mountPath: /etc/selvedge/registry, readOnly: true }
+            {{- end }}
+      volumes:
+        {{- include "selvedge.tlsVolume" (dict "root" . "role" "api") | nindent 8 }}
+        {{- if .Values.containers.enabled }}
+        - name: registry-token
+          secret: { secretName: {{ include "selvedge.registryTokenSecret" . }}, defaultMode: 0444 }
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

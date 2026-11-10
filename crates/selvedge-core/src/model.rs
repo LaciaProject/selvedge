@@ -199,6 +199,9 @@ pub struct AccountBundle {
     /// Workflows registered for the account (`PUT /workflows/:name`).
     #[serde(default)]
     pub workflows: Vec<WorkflowDef>,
+    /// Durable Object classes with a container application.
+    #[serde(default)]
+    pub containers: Vec<crate::containers::ContainerDef>,
 }
 
 /// A Workflow: the `WorkflowEntrypoint` class that runs it, and its script.

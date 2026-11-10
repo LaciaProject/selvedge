@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1910,6 +1910,7 @@ dependencies = [
  "selvedge-core",
  "selvedge-server",
  "selvedge-store",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1917,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-bench"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1932,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -1945,9 +1946,10 @@ dependencies = [
 
 [[package]]
 name = "selvedge-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -1965,6 +1967,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.5",
  "reqwest",
+ "ring",
  "rustix",
  "rustls",
  "rustls-pki-types",
@@ -1980,13 +1983,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "selvedge-store"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2014,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "selvedge-workerd"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hex",

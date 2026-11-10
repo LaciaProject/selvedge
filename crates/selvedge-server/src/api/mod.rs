@@ -3,6 +3,7 @@
 
 mod accounts;
 mod assets;
+pub mod containers;
 mod d1;
 mod domains;
 mod internal;
@@ -42,6 +43,8 @@ pub struct ApiState {
     pub gateway_url: Option<String>,
     pub http: reqwest::Client,
     pub tails: std::sync::Arc<crate::tail::Hub>,
+    /// The registry and limits, if containers are enabled (RFC 0002).
+    pub containers: Option<containers::ContainersConfig>,
 }
 
 pub type State = Arc<ApiState>;
@@ -64,6 +67,7 @@ pub fn router(state: State) -> Router {
         .merge(notifications::routes())
         .merge(d1::routes())
         .merge(queues::routes())
+        .merge(containers::routes())
         .merge(internal::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(no_method)

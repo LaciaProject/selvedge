@@ -1,0 +1,12 @@
+{
+  "name": "container-app",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+    "containers": [
+    { "name": "container-app-box", "class_name": "Box", "image": "./Dockerfile", "max_instances": 2,
+      // Half a CPU: the smallest instance types take ten seconds to start Python.
+      "instance_type": { "vcpu": 0.5, "memory_mib": 256, "disk_mb": 2000 } }
+  ],
+  "durable_objects": { "bindings": [{ "name": "BOX", "class_name": "Box" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Box"] }]
+}

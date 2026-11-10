@@ -5,6 +5,7 @@
 
 pub mod assets;
 pub mod blobs;
+pub mod containers;
 pub mod cron;
 pub mod d1transfer;
 pub mod db;
@@ -19,6 +20,7 @@ pub mod workflows;
 pub mod zones;
 
 pub use blobs::Blobs;
+pub use containers::{ContainerApp, ContainerAppFields};
 pub use db::Db;
 pub use repo::{
     Account, D1Info, KvEntry, KvKey, KvNamespace, NewVersion, Principal, Route, ScriptInfo, VersionInfo,

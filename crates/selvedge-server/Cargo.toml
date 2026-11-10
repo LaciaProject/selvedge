@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -23,6 +24,7 @@ rustls.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -31,6 +33,7 @@ md-5.workspace = true
 multer.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
+ring.workspace = true
 reqwest.workspace = true
 url.workspace = true
 selvedge-core.workspace = true

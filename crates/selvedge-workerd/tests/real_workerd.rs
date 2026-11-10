@@ -90,6 +90,7 @@ export default {
         ],
         d1_databases: vec!["db-1".into()],
         workflows: vec![],
+        containers: vec![],
     };
     let opts = RenderOptions {
         dir: dir.path().join("cfg"),
@@ -98,6 +99,7 @@ export default {
         max_compatibility_date: workerd_max_date(&bin).await.unwrap(),
         do_storage_dir: dir.path().join("do"),
         cluster: None,
+        containers: None,
     };
     let src = |sha: &str| {
         blobs
@@ -212,6 +214,7 @@ export default {
         ],
         d1_databases: vec![],
         workflows: vec![],
+        containers: vec![],
     };
     serve_assets(
         &dir.path().join("b.sock"),
@@ -224,6 +227,7 @@ export default {
         max_compatibility_date: workerd_max_date(&bin).await.unwrap(),
         do_storage_dir: dir.path().join("do"),
         cluster: None,
+        containers: None,
     };
     let blobs = [app.to_vec(), encoded];
     let src = |sha: &str| {
@@ -288,6 +292,7 @@ async fn a_busy_loop_stops_the_health_worker() {
         }],
         d1_databases: vec![],
         workflows: vec![],
+        containers: vec![],
     };
     let opts = RenderOptions {
         dir: dir.path().join("cfg"),
@@ -296,6 +301,7 @@ async fn a_busy_loop_stops_the_health_worker() {
         max_compatibility_date: workerd_max_date(&bin).await.unwrap(),
         do_storage_dir: dir.path().join("do"),
         cluster: None,
+        containers: None,
     };
     let src = |_: &str| Ok(code.to_vec());
     let rendered = render(&bundle, &opts, &src).unwrap();

@@ -214,6 +214,30 @@ pub static AGENT_BINDING_REQUESTS: Family = Family::counter(
     "Binding calls from workerd sent to the data service, by binding and status class.",
     &["binding", "code"],
 );
+pub static CONTAINER_INSTANCES: Family =
+    Family::gauge("selvedge_container_instances", "Container instances, by state.", &["state"]);
+pub static CONTAINER_STARTS: Family = Family::counter(
+    "selvedge_container_starts_total",
+    "Container instance start requests, by result (created, limit, error).",
+    &["result"],
+);
+pub static CONTAINER_STOPS: Family =
+    Family::counter("selvedge_container_stops_total", "Container instances removed, by reason.", &["reason"]);
+pub static AGENT_CONTAINER_START_DURATION: Family = Family::histogram(
+    "selvedge_agent_container_start_duration_seconds",
+    "From workerd asking for a container to its application running.",
+    &["result"],
+);
+pub static AGENT_CONTAINER_UNSUPPORTED: Family = Family::counter(
+    "selvedge_agent_container_unsupported_total",
+    "Docker API calls from workerd that Selvedge does not implement, by operation.",
+    &["operation"],
+);
+pub static AGENT_CONTAINER_EGRESS_REFUSED: Family = Family::counter(
+    "selvedge_agent_container_egress_refused_total",
+    "Connections to the egress relay from addresses that are not this runner's containers.",
+    &[],
+);
 
 static ALL: &[&Family] = &[
     &HTTP_REQUESTS,
@@ -228,6 +252,12 @@ static ALL: &[&Family] = &[
     &AGENT_PROCESS_EXITS,
     &AGENT_CPU_THROTTLED,
     &AGENT_BINDING_REQUESTS,
+    &CONTAINER_INSTANCES,
+    &CONTAINER_STARTS,
+    &CONTAINER_STOPS,
+    &AGENT_CONTAINER_START_DURATION,
+    &AGENT_CONTAINER_UNSUPPORTED,
+    &AGENT_CONTAINER_EGRESS_REFUSED,
 ];
 
 /// A status's class label: `2xx`, `4xx`, ...

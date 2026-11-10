@@ -2,8 +2,8 @@ apiVersion: v2
 name: selvedge
 description: A highly available, Workers-compatible platform for Kubernetes, on the official workerd runtime
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.2.0
+appVersion: "0.2.0"
 license: Apache-2.0
 home: https://github.com/LaciaProject/selvedge
 sources:

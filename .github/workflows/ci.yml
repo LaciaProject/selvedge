@@ -86,6 +86,11 @@ jobs:
           # The run directory goes under /tmp: the runner user's XDG_RUNTIME_DIR is 0700.
           sudo --preserve-env=SELVEDGE_DATABASE_URL env "PATH=$PATH" XDG_RUNTIME_DIR= SELVEDGE_WORKERD=/usr/local/bin/workerd \
             SELVEDGE_ACCOUNT_UIDS=10000-59999 PORT_BASE=28400 test/e2e/single-node.sh
+      - name: Containers on one node (Docker backend, wrangler build and push)
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+          PORT_BASE: "28500"
+        run: test/e2e/containers.sh
       - name: Start SeaweedFS (S3 with conditional writes)
         run: |
           docker run -d --name seaweedfs -p 127.0.0.1:29000:8333 chrislusf/seaweedfs:4.50 \

@@ -635,9 +635,23 @@ async fn put_schedules(
     })))
 }
 
-async fn do_namespaces(caller: Caller, Path(_account): Path<String>) -> Response {
-    let _ = caller;
-    ok(json!([]))
+/// The account's Durable Object namespaces: one per class a script binds.
+/// `wrangler` looks a container's class up here when the class is not among
+/// the deployed script's own bindings.
+async fn do_namespaces(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path(account): Path<String>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let list: Vec<_> = super::containers::do_namespaces(&state, &id)
+        .await?
+        .into_iter()
+        .map(|(ns, script, class)| {
+            json!({ "id": ns, "name": format!("{script}_{class}"), "script": script, "class": class, "use_sqlite": true })
+        })
+        .collect();
+    Ok(ok(json!(list)))
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- if not (kindIs "invalid" $explicit) -}}
 {{- $explicit -}}
 {{- else if eq .root.Values.profile "ha" -}}
-{{- index (dict "api" 2 "data" 3 "gateway" 3 "runner" 3) .component -}}
+{{- index (dict "api" 2 "data" 3 "gateway" 3 "runner" 3 "containers" 2) .component -}}
 {{- else -}}
 1
 {{- end -}}
@@ -78,7 +78,7 @@ topologySpreadConstraints:
 - name: SELVEDGE_INTERNAL_TOKEN
   valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: internal-token } }
 - name: RUST_LOG
-  value: info
+  value: {{ .Values.logLevel | default "info" | quote }}
 {{- if .Values.metrics.enabled }}
 - name: SELVEDGE_METRICS_LISTEN
   value: 0.0.0.0:{{ .Values.metrics.port }}
@@ -206,4 +206,26 @@ livenessProbe:
 readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: {{ .failureThreshold | default 3 }} }
 livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
 {{- end }}
+{{- end -}}
+
+{{- /* The containers controller, as runners reach it. */}}
+{{- define "selvedge.containersUrl" -}}
+{{- if .Values.tls.enabled -}}
+https://{{ include "selvedge.name" . }}-containers:8792
+{{- else -}}
+http://{{ include "selvedge.name" . }}-containers:8792
+{{- end -}}
+{{- end -}}
+
+{{- /* The Secret with the key and certificate of registry tokens. */}}
+{{- define "selvedge.registryTokenSecret" -}}
+{{- .Values.containers.registry.tokenSecret | default (printf "%s-registry-token" (include "selvedge.name" .)) -}}
+{{- end -}}
+
+{{- define "selvedge.registryHost" -}}
+{{- required "containers.registry.host is required with containers.enabled: the registry's host as clients and nodes reach it" .Values.containers.registry.host -}}
+{{- end -}}
+
+{{- define "selvedge.registryTokenRealm" -}}
+{{- required "containers.registry.tokenRealm is required with containers.enabled: the API's public URL followed by /registry/token" .Values.containers.registry.tokenRealm -}}
 {{- end -}}

@@ -148,6 +148,30 @@ pub struct RenderOptions {
     /// Directory for Durable Object storage (`localDisk`).
     pub do_storage_dir: PathBuf,
     pub cluster: Option<ClusterOptions>,
+    /// Give Durable Object classes that have a container application their
+    /// container. Without it, `ctx.container` is undefined.
+    pub containers: Option<ContainerOptions>,
+}
+
+/// How an account process reaches its containers (RFC 0002).
+#[derive(Clone, Debug)]
+pub struct ContainerOptions {
+    /// The agent's Docker API socket for this process.
+    pub socket: PathBuf,
+    /// The egress sidecar's image, as workerd names it to the agent.
+    pub interceptor_image: String,
+    /// Names this process's containers: workerd puts it in each one's name.
+    pub session: String,
+}
+
+/// The account's Durable Object classes that have a container: workerd's
+/// `uniqueKey` of each, and its definition.
+pub fn container_classes(bundle: &AccountBundle) -> Vec<(String, &selvedge_core::ContainerDef)> {
+    bundle
+        .containers
+        .iter()
+        .map(|c| (durable_object_key(bundle.account_id.as_str(), &c.script_name, &c.class_name), c))
+        .collect()
 }
 
 /// A rendered configuration and where each script listens.
@@ -229,7 +253,7 @@ fn r2_service(bucket: &str) -> String {
 /// A Durable Object `uniqueKey`: stable per account, script and class, and one
 /// path component as cluster mode requires.
 pub fn durable_object_key(account: &str, script: &str, class: &str) -> String {
-    let digest = selvedge_core::sha256_hex(format!("{account}\0{script}\0{class}").as_bytes());
+    let digest = selvedge_core::containers::do_namespace_digest(account, script, class);
     format!("do-{}", &digest[..40])
 }
 
@@ -766,17 +790,36 @@ fn render_worker(
     ];
     let hosted: Vec<_> = do_classes.iter().filter(|(s, _)| *s == script.name).collect();
     if !hosted.is_empty() {
+        let image_of = |class: &str| {
+            opts.containers.as_ref()?;
+            bundle.containers.iter().find(|c| c.script_name == script.name && c.class_name == class)
+        };
         let ns: Vec<_> = hosted
             .iter()
             .map(|(_, class)| {
+                let container = image_of(class)
+                    .map(|c| format!(", container = (imageName = {})", quote(&c.image)))
+                    .unwrap_or_default();
                 format!(
-                    "(className = {}, uniqueKey = {}, enableSql = true)",
+                    "(className = {}, uniqueKey = {}, enableSql = true{container})",
                     quote(class),
                     quote(&durable_object_key(bundle.account_id.as_str(), &script.name, class))
                 )
             })
             .collect();
         fields.push(format!("durableObjectNamespaces = [{}]", ns.join(", ")));
+        if let Some(c) =
+            opts.containers.as_ref().filter(|_| hosted.iter().any(|(_, class)| image_of(class).is_some()))
+        {
+            // Not a Docker daemon: the agent's socket, which runs only the
+            // account's own applications (RFC 0002).
+            fields.push(format!(
+                "containerEngine = (localDocker = (socketPath = {}, containerEgressInterceptorImage = {}, sessionId = {}))",
+                quote(&format!("unix:{}", c.socket.display())),
+                quote(&c.interceptor_image),
+                quote(&c.session)
+            ));
+        }
         fields.push("durableObjectStorage = (localDisk = \"do-storage\")".to_owned());
     }
     Ok((format!("({})", fields.join(", ")), kvs, missing))
@@ -844,6 +887,7 @@ mod tests {
             }],
             d1_databases: vec![],
             workflows: vec![],
+            containers: vec![],
         };
         let opts = RenderOptions {
             dir: dir.path().join("g1"),
@@ -852,6 +896,7 @@ mod tests {
             max_compatibility_date: "2026-11-06".into(),
             do_storage_dir: dir.path().join("do"),
             cluster: None,
+            containers: None,
         };
         let src = |sha: &str| Ok(format!("// {sha}").into_bytes());
         let r = render(&bundle, &opts, &src).unwrap();
@@ -898,6 +943,7 @@ mod tests {
             }],
             d1_databases: vec![],
             workflows: vec![],
+            containers: vec![],
         };
         let opts = RenderOptions {
             dir: dir.path().join("g1"),
@@ -913,6 +959,7 @@ mod tests {
                 key_hex: "ab".repeat(32),
                 stop_timeout_ms: 8000,
             }),
+            containers: None,
         };
         let src = |sha: &str| Ok(format!("// {sha}").into_bytes());
         let r = render(&bundle, &opts, &src).unwrap();
@@ -920,5 +967,73 @@ mod tests {
         assert!(r.experimental);
         assert!(text.contains("cluster = (bucket = \"s3://b/do/acct\""), "{text}");
         assert!(text.contains("stopTimeoutMs = 8000"), "{text}");
+    }
+    #[test]
+    fn containers() {
+        use selvedge_core::ContainerDef;
+        let dir = tempfile::tempdir().unwrap();
+        let account: selvedge_core::AccountId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let script = |name: &str, class: &str| BundleScript {
+            name: name.into(),
+            version_id: selvedge_core::new_version_id(),
+            main_module: "worker.js".into(),
+            compatibility_date: "2026-10-01".into(),
+            compatibility_flags: vec![],
+            modules: vec![Module {
+                name: "worker.js".into(),
+                kind: ModuleKind::EsModule,
+                sha256: "aa".into(),
+            }],
+            bindings: vec![Binding::DurableObjectNamespace {
+                name: "DO".into(),
+                class_name: class.into(),
+                script_name: None,
+            }],
+            assets: None,
+            canary: None,
+        };
+        let bundle = AccountBundle {
+            account_id: account.clone(),
+            generation: 1,
+            scripts: vec![script("boxes", "Box"), script("plain", "Room")],
+            d1_databases: vec![],
+            workflows: vec![],
+            containers: vec![ContainerDef {
+                script_name: "boxes".into(),
+                class_name: "Box".into(),
+                image: "registry.test/acct/app@sha256:00".into(),
+            }],
+        };
+        let mut opts = RenderOptions {
+            dir: dir.path().join("g1"),
+            socket_dir: dir.path().join("s"),
+            binding_socket: dir.path().join("b.sock"),
+            max_compatibility_date: "2026-11-06".into(),
+            do_storage_dir: dir.path().join("do"),
+            cluster: None,
+            containers: Some(ContainerOptions {
+                socket: "/run/s/d.sock".into(),
+                interceptor_image: "selvedge/container-egress".into(),
+                session: "ab12-0123456789ab-g1-1".into(),
+            }),
+        };
+        let src = |sha: &str| Ok(format!("// {sha}").into_bytes());
+        let text = std::fs::read_to_string(render(&bundle, &opts, &src).unwrap().config_path).unwrap();
+        // The class with an application gets its container; its script, the engine.
+        assert!(text.contains("container = (imageName = \"registry.test/acct/app@sha256:00\")"), "{text}");
+        assert_eq!(
+            text.matches("containerEngine = (localDocker = (socketPath = \"unix:/run/s/d.sock\"").count(),
+            1
+        );
+        assert!(text.contains("sessionId = \"ab12-0123456789ab-g1-1\""));
+        assert_eq!(text.matches("container = (").count(), 1);
+        let classes = container_classes(&bundle);
+        assert_eq!(classes[0].0, durable_object_key(account.as_str(), "boxes", "Box"));
+
+        // An agent that does not run containers renders none.
+        opts.dir = dir.path().join("g2");
+        opts.containers = None;
+        let text = std::fs::read_to_string(render(&bundle, &opts, &src).unwrap().config_path).unwrap();
+        assert!(!text.contains("containerEngine") && !text.contains("imageName"));
     }
 }

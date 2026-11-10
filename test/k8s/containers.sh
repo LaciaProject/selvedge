@@ -133,6 +133,8 @@ T0=$(date +%s.%N)
 check "the object starts its container again on the new runner" "hello again v1" "$(get '/start?name=a&msg=again')"
 echo "     (restart on another runner: $(since "$T0") s)"
 
+blobs() { $K exec deploy/slv-registry -c gc -- sh -c 'ls /var/lib/registry/docker/registry/v2/blobs/sha256/*/ 2>/dev/null | grep -c . || true'; }
+BLOBS=$(blobs)
 ID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/containers/applications" | json '["result"][0]["id"]')
 curl -sf -X DELETE -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/containers/applications/$ID" > /dev/null
 wait_count 0 120
@@ -147,6 +149,11 @@ tags() {
 }
 for _ in $(seq 1 30); do [ "$(tags)" = 0 ] && break; sleep 1; done
 check "and its images in the bundled registry" "0" "$(tags)"
+# The registry's garbage collection then frees their layers.
+for _ in $(seq 1 90); do [ "$(blobs)" -lt "$BLOBS" ] && break; sleep 1; done
+AFTER=$(blobs)
+[ "$AFTER" -lt "$BLOBS" ] && echo "ok   garbage collection freed $((BLOBS - AFTER)) of $BLOBS blobs" \
+  || { echo "FAIL garbage collection freed nothing ($BLOBS blobs before, $AFTER after)"; $K logs deploy/slv-registry -c gc --tail=30; exit 1; }
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

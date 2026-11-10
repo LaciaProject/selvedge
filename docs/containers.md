@@ -155,7 +155,8 @@ own Durable Object.
   canary for a workerd upgrade that changes how workerd drives containers; the end-to-end tests in
   CI, which the workerd update workflow runs, cover the same.
 - **Images.** Deleting an application deletes its repository's manifests (unless another of the
-  account's applications uses the same repository), so its tags are gone at once. Layers stay
-  on disk until the registry's garbage collection runs (`registry garbage-collect
-  --delete-untagged`); schedule it. With your own registry, allow deletes and set
+  account's applications uses the same repository), so its tags are gone at once. The bundled
+  registry's garbage collection then frees the layers, once a day by default
+  (`containers.registry.gc`); a push that overlaps a run can fail and is retried by the client.
+  With your own registry, allow deletes, run its garbage collection, and set
   `containers.registry.url` if the API cannot reach it at `https://<host>`.

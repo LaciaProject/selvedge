@@ -250,7 +250,7 @@ P1 已经实现，代码在 `crates/selvedge-server/src/{containers,agent/docker
 5. **出站中转按来源地址识别实例**。`GET /networks/bridge` 把网关报成 `127.0.0.1`，workerd 的出站监听只开在回环地址上；边车连 runner 的 8791 端口，中转按来源 IP 找到实例，只交给该实例自己的出站监听。NetworkPolicy 只能做到"只连 runner"，跨账号隔离靠这一层。
 6. **拉取凭证**。控制组件为每个实例生成只读、只覆盖该账号仓库的短期凭证，放进归 Pod 所有的 pull secret。仓库可以用 chart 捆绑的 CNCF distribution，也可以接运营方自己的。
 7. **契约测试**（§9 第 4 点）。没有单独做录制回放：`test/e2e/containers.sh` 用真实的 wrangler 和 workerd 跑完整流程，每天的 workerd 升级工作流会跑它；垫片不认识的调用一律 501 并计入 `selvedge_agent_container_unsupported_total`，workerd 换了用法会直接表现为测试失败。
-8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收。
+8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收：捆绑的仓库在同一个 Pod 里每天跑一次 `garbage-collect --delete-untagged`。
 9. **`exec()`**（初稿的 P2）：经控制组件代理，runner 依然碰不到实例的运行时。Kubernetes 用 `v5.channel.k8s.io`，可以关闭 stdin；`user` 选项只有 Docker 后端支持。
 10. **信号**：有了 exec 之后，SIGKILL 以外的信号都在容器里送给 PID 1（容器内不能给 init 发 SIGKILL，所以它仍是删除实例）。
 11. **没有做的**：快照返回 501；没有镜像预拉取。

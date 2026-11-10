@@ -194,6 +194,29 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /var/lib/registry }
             - { name: token, mountPath: /etc/registry/token, readOnly: true }
+        {{- with .Values.containers.registry.gc }}
+        {{- if .enabled }}
+        - name: gc
+          image: {{ $.Values.containers.registry.image }}
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                sleep {{ int .intervalSeconds }}
+                echo "garbage collection: start"
+                registry garbage-collect --delete-untagged /etc/docker/registry/config.yml 2>&1 | grep -v '^[a-z0-9/_-]*: marking' || true
+                echo "garbage collection: done"
+              done
+          env:
+            - { name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY, value: /var/lib/registry }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+          securityContext: {{- toYaml $.Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+        {{- end }}
+        {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: {{ $name }}-registry }

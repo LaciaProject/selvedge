@@ -1,4 +1,7 @@
 {{- if .Values.containers.enabled }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "containers.enabled needs networkPolicy.enabled (and a CNI that enforces NetworkPolicies): an instance reaches its runner pod's other ports without them" }}
+{{- end }}
 {{- $name := include "selvedge.name" . -}}
 {{- $c := dict "root" . "component" "containers" -}}
 # The containers controller: the only component with Kubernetes credentials.

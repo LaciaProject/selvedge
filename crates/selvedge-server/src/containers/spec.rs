@@ -187,6 +187,9 @@ pub fn pod(spec: &InstanceSpec, s: &PodSettings) -> Value {
         "hostPID": false,
         "hostIPC": false,
         "shareProcessNamespace": false,
+        // Docker applies its default seccomp profile; Kubernetes does not
+        // unless the kubelet is told to.
+        "securityContext": { "seccompProfile": { "type": "RuntimeDefault" } },
         "terminationGracePeriodSeconds": 10,
         "hostAliases": [{ "ip": spec.runner.gateway, "hostnames": [GATEWAY_HOST] }],
         "dnsPolicy": "None",
@@ -307,6 +310,7 @@ mod tests {
         assert_eq!(s["automountServiceAccountToken"], false);
         assert!(s.get("serviceAccountName").is_none());
         assert_eq!(s["restartPolicy"], "Never");
+        assert_eq!(s["securityContext"]["seccompProfile"]["type"], "RuntimeDefault");
         assert_eq!(s["hostAliases"][0]["ip"], "10.0.0.7");
         let app = &s["containers"][0];
         assert_eq!(app["args"], json!(["serve"]));

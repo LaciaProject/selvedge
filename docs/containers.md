@@ -56,7 +56,10 @@ runner pod                              instance pod (RuntimeClass kata-qemu)
 - **The API's token endpoint**, `<API URL>/registry/token`, reachable by clients and nodes: the
   registry sends both there for a token.
 - Kubernetes 1.29 or later (instances use native sidecar containers) and a CNI that enforces
-  NetworkPolicy.
+  NetworkPolicy, egress included (Calico, Cilium, ...; kind's default kindnet does not). The
+  chart refuses `containers.enabled` without `networkPolicy.enabled`. The policies are what keep
+  an instance from its runner pod's other ports: the sidecar passes traffic to its runner's
+  address through, and an application can rewrite its own sidecar's configuration.
 
 ### Without a sandbox
 
@@ -118,7 +121,8 @@ selvedge all --containers-docker-socket /var/run/docker.sock \
   --registry-token-key token.key --registry-token-cert token.crt
 ```
 
-There is no sandbox: use it for development and trusted code. `test/e2e/containers.sh` shows a
+There is no sandbox and no network policy: an instance reaches any port the Docker host listens
+on at its bridge address. Use it for development and trusted code. `test/e2e/containers.sh` shows a
 complete setup, registry included.
 
 ## Network
@@ -129,6 +133,9 @@ With `networkPolicy.enabled` the chart adds:
   runners' egress port (8791) and to the resolvers in `containers.dns` (port 53), and to nothing
   else: not each other, not the cluster's services, not the internet directly.
 - The controller accepts connections from runners only.
+
+Instance pods also run with the `RuntimeDefault` seccomp profile, as Docker containers do by
+default.
 
 The NetworkPolicy cannot tell one account's runner from another's; the egress relay can. It
 identifies the instance by the connection's source address and hands it only to that instance's

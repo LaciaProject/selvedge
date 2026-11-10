@@ -138,6 +138,7 @@ struct Exec {
 
 #[derive(Default)]
 struct ExecState {
+    created: Option<Instant>,
     started: bool,
     /// What inspect reports as its PID once started. workerd waits for a
     /// non-zero one; the process's real PID is the container's business
@@ -152,6 +153,10 @@ struct ExecState {
 
 /// How long a finished exec stays inspectable.
 const EXEC_KEEP: Duration = Duration::from_secs(300);
+/// How long a created exec may wait to be started.
+const EXEC_UNSTARTED: Duration = Duration::from_secs(60);
+/// Most execs a session may have that have not finished.
+const EXEC_LIMIT: usize = 64;
 /// The exit code of an exec that could not run.
 const EXEC_FAILED: i32 = 126;
 
@@ -618,15 +623,30 @@ impl Shim {
         let id = hex::encode(rand::random::<[u8; 32]>());
         let mut execs = self.execs.lock().expect("poisoned");
         execs.retain(|_, e| {
-            e.state.lock().expect("poisoned").finished.is_none_or(|f| f.elapsed() < EXEC_KEEP)
+            let st = e.state.lock().expect("poisoned");
+            match (st.started, st.finished) {
+                (_, Some(f)) => f.elapsed() < EXEC_KEEP,
+                (false, None) => st.created.is_some_and(|c| c.elapsed() < EXEC_UNSTARTED),
+                (true, None) => true,
+            }
         });
+        let open = execs
+            .values()
+            .filter(|e| e.session == session.id && e.state.lock().expect("poisoned").finished.is_none())
+            .count();
+        if open >= EXEC_LIMIT {
+            return docker_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("at most {EXEC_LIMIT} execs at once"),
+            );
+        }
         execs.insert(
             id.clone(),
             Arc::new(Exec {
                 session: session.id.clone(),
                 container: container.to_owned(),
                 spec,
-                state: Mutex::new(ExecState::default()),
+                state: Mutex::new(ExecState { created: Some(Instant::now()), ..Default::default() }),
             }),
         );
         docker_json(StatusCode::CREATED, json!({ "Id": id }))

@@ -483,7 +483,10 @@ fn authorized(state: &State, headers: &http::HeaderMap) -> bool {
 
 /// The caller's address, when the listener records it (mTLS).
 fn peer(extensions: &http::Extensions) -> Option<IpAddr> {
-    extensions.get::<axum::extract::ConnectInfo<crate::tls::Peer>>().map(|c| c.0.addr.ip())
+    extensions
+        .get::<axum::extract::ConnectInfo<crate::tls::Peer>>()
+        .map(|c| c.0.addr.ip())
+        .or_else(|| extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()))
 }
 
 async fn start(

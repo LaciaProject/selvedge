@@ -1,6 +1,6 @@
 # 项目进度、功能与局限
 
-截至 2026-11-07。
+截至 2026-11-10。
 
 Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用 `wrangler` 部署的 Worker 不用改代码，就能在自己的 Kubernetes 集群上运行。规划中的主要产品都已实现，并通过了单节点、多 runner 集群和 3 可用区 Kubernetes 高可用测试。设计细节见 [RFC 0001](rfcs/0001-architecture.md)，逐项兼容性差异见 [compatibility.md](compatibility.md)。
 
@@ -43,7 +43,8 @@ CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请�
 
 - `rust`：单元测试；
 - `e2e`：单节点、双 runner 集群、root 模式（每个账号切换到独立用户运行）、开启 mTLS 的集群；
-- `kind-ha`：3 可用区 Kubernetes 高可用测试。
+- `kind-ha`：3 可用区 Kubernetes 高可用测试；
+- `kind-containers`：容器跑在 Kata 虚拟机里的 Kubernetes 测试，覆盖镜像推送和拉取、出站隔离、NetworkPolicy、随 runner 回收。单节点的 Docker 版容器测试在 `e2e` 里。
 
 ## 已实现功能
 
@@ -65,6 +66,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Static Assets | `html_handling`、SPA 和 404 页、`run_worker_first`、`_headers`、`_redirects`，只上传有变化的文件，自动回收不再用的文件 | 未修改的 Cloudflare asset worker 和 router worker |
 | Workflows | `step.do`、`sleep`、`sleepUntil`、`waitForEvent`，实例管理，`wrangler workflows` 全部子命令 | 未修改的 Cloudflare Workflows 引擎，每个实例一个 Durable Object |
 | `wrangler tail` | pretty 和 json 两种格式及全部过滤器，包括 console 日志与异常 | tail worker 加 PostgreSQL `LISTEN/NOTIFY` |
+| Containers | DO 通过 `ctx.container` 控制容器：`start`、`getTcpPort().fetch()`、`monitor`、`destroy`、出站拦截、`enableInternet`；`wrangler deploy` 构建、推送镜像并创建应用；`max_instances` 和实例规格 | 运营方开启后可用。每个实例是一个跑在 Kata 虚拟机里的 Pod，由唯一持有集群凭证的控制组件创建；镜像仓库用 API 签发的 token 认证。见 [containers.md](containers.md) |
 | 服务绑定、环境变量、密钥 | 支持命名入口点；密钥用 AES-256-GCM 加密存储 | 只能在同一账号内使用 |
 
 ## 高可用与安全
@@ -95,6 +97,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 - **出站限制**：拒绝访问私有地址、回环地址和链路本地地址。
 - **禁用 experimental 标志**：上传时拒绝 workerd 的 experimental 兼容标志，与 Cloudflare 一致。
 - **`request.cf` 不可伪造**：由网关设置，客户端无法自己指定。
+- **容器**：runner 不持有集群凭证，只能请求启动本账号已部署的应用镜像，镜像、规格、沙箱和拉取凭证都由控制组件决定。实例默认跑在 Kata 虚拟机里，不挂 ServiceAccount token，NetworkPolicy 只允许它连 runner 的出站中转和公共 DNS；中转按来源地址把流量交给所属 DO 的 workerd。
 
 ## 已知局限
 
@@ -114,6 +117,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |
 | 运行时与 API | 不支持 service-worker 语法和 Global API key |
+| Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持 `exec()`、快照和 TERM/INT/QUIT/KILL 以外的信号；rollout 立即生效；删除应用不删镜像 |
 
 **不在范围内**：Workers AI、Vectorize、Hyperdrive 和 Analytics Engine 是 Cloudflare 自己托管的服务，不属于基础设施，使用这些绑定的上传会被拒绝。跨地域多集群也不在当前范围内。
 

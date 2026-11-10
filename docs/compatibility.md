@@ -201,7 +201,7 @@ sandbox off. See [containers.md](containers.md) for running them.
 | `start()` with `env`, `entrypoint`, `enableInternet` | Supported | `start()` may not name another image: an object runs its application's image only |
 | `getTcpPort(port).fetch()` and `.connect()` | Supported | |
 | `running`, `monitor()` with the exit code, `destroy()`, `setInactivityTimeout()` | Supported | |
-| `signal()` | Partial | SIGTERM, SIGINT, SIGQUIT and SIGKILL stop the instance; other signals fail |
+| `signal()` | Supported | Delivered to the container's PID 1, as Docker does: the kernel delivers only signals that process handles. SIGKILL stops the instance. Other signals need `/bin/sh` in the image; without one, SIGTERM, SIGINT and SIGQUIT stop the instance and the rest fail |
 | `interceptOutboundHttp()`, `interceptOutboundHttps()` | Supported | For HTTPS the container must trust the sidecar's CA, installed at `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
 | `exec()`: output, exit code, stdin, `env`, `cwd`, `pty` and `resize()`, `kill()` | Supported | `user` works with the Docker backend only; on Kubernetes an exec that names a user fails |
 | `snapshotContainer()`, `snapshotDirectory()` | Not supported | Fail with a message naming the operation |

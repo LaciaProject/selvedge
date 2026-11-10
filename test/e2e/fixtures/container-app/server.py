@@ -1,8 +1,20 @@
 # The e2e container: answers on :8080, makes outbound requests on demand and
 # exits when told to.
-import http.server, os, ssl, sys, threading, urllib.parse, urllib.request
+import http.server, os, signal, ssl, sys, threading, urllib.parse, urllib.request
 
 CA = "/etc/cloudflare/certs/cloudflare-containers-ca.crt"
+
+# Signals the application handles: SIGHUP is counted, SIGUSR1 ends it with 42.
+hups = 0
+
+
+def on_hup(*_):
+    global hups
+    hups += 1
+
+
+signal.signal(signal.SIGHUP, on_hup)
+signal.signal(signal.SIGUSR1, lambda *_: os._exit(42))
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -32,6 +44,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.answer(200, f"failed {type(e).__name__}")
         elif url.path == "/ca":
             self.answer(200, "present" if os.path.exists(CA) and "BEGIN CERTIFICATE" in open(CA).read() else "absent")
+        elif url.path == "/hups":
+            self.answer(200, str(hups))
         elif url.path == "/args":
             self.answer(200, " ".join(sys.argv[1:]))
         elif url.path == "/exit":

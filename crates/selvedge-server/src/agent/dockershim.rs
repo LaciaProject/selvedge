@@ -1015,33 +1015,84 @@ impl Shim {
     /// `signal()`: an instance can be stopped, at once or with time to
     /// finish, but no other signal can be delivered into a pod.
     async fn kill(&self, base: &str, signal: &str) -> Response<Body> {
-        let running = self.find(base).is_some_and(|b| {
-            b.inner.lock().expect("poisoned").app.as_ref().is_some_and(|a| a.state == AppState::Running)
+        let instance = self.find(base).and_then(|b| {
+            let inner = b.inner.lock().expect("poisoned");
+            inner.app.as_ref().filter(|a| a.state == AppState::Running).and_then(|a| a.instance.clone())
         });
-        if !running {
+        let Some(id) = instance else {
             return docker_error(StatusCode::CONFLICT, "the container is not running");
-        }
-        let grace = match signal.trim_start_matches("SIG") {
-            "KILL" | "9" => 0,
-            "TERM" | "15" | "INT" | "2" | "QUIT" | "3" => 10,
-            _ => {
-                crate::metrics::AGENT_CONTAINER_UNSUPPORTED.inc(&["signal"]);
-                return docker_error(
-                    StatusCode::NOT_IMPLEMENTED,
-                    format!(
-                        "Selvedge delivers only SIGTERM, SIGINT, SIGQUIT and SIGKILL to a container, not {signal}"
-                    ),
-                );
-            }
         };
-        // The instance stops with its application; `monitor()` reports it.
-        let instance = self
-            .find(base)
-            .and_then(|b| b.inner.lock().expect("poisoned").app.as_ref().and_then(|a| a.instance.clone()));
-        if let Some(id) = instance {
-            self.remove_instance(&id, grace, "signal").await;
+        let Some(number) = signal_number(signal) else {
+            crate::metrics::AGENT_CONTAINER_UNSUPPORTED.inc(&["signal"]);
+            return docker_error(StatusCode::BAD_REQUEST, format!("unknown signal {signal}"));
+        };
+        // SIGKILL ends the instance. A process cannot send it to its own
+        // namespace's init, so it is not delivered from inside.
+        if number == 9 {
+            self.remove_instance(&id, 0, "signal").await;
+            return empty(StatusCode::NO_CONTENT);
         }
-        empty(StatusCode::NO_CONTENT)
+        // Any other signal goes to the application's PID 1 from inside the
+        // container, as Docker delivers it; the kernel applies the same rule
+        // to init either way (only signals it handles arrive).
+        let cmd = vec!["/bin/sh".to_owned(), "-c".to_owned(), format!("kill -{number} 1")];
+        match self.simple_exec(&id, cmd).await {
+            Ok(0) => empty(StatusCode::NO_CONTENT),
+            result => {
+                let why = match result {
+                    Ok(code) => format!("kill exited with {code}"),
+                    Err(e) => format!("{e:#}"),
+                };
+                // Without a shell in the image, the stop signals still stop it.
+                if matches!(number, 2 | 3 | 15) {
+                    tracing::debug!(instance = %id, signal, %why, "delivering a signal failed; stopping the container");
+                    self.remove_instance(&id, 10, "signal").await;
+                    return empty(StatusCode::NO_CONTENT);
+                }
+                docker_error(StatusCode::INTERNAL_SERVER_ERROR, format!("delivering {signal} failed: {why}"))
+            }
+        }
+    }
+
+    /// Runs a command in an instance with no input or output, as this
+    /// runner, and answers its exit code.
+    async fn simple_exec(&self, instance: &str, cmd: Vec<String>) -> Result<i32> {
+        use crate::containers::exec;
+        use base64::Engine;
+        let spec = exec::ExecSpec { cmd, ..Default::default() };
+        let resp = self
+            .exec_http
+            .post(format!("{}/internal/v1/containers/{instance}/exec", self.cfg.controller_url))
+            .bearer_auth(&self.internal_token)
+            .query(&[("runner", self.cfg.runner.as_str())])
+            .header(http::header::CONNECTION, "upgrade")
+            .header(http::header::UPGRADE, exec::PROTOCOL)
+            .header(
+                exec::SPEC_HEADER,
+                base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&spec)?),
+            )
+            .send()
+            .await?;
+        anyhow::ensure!(
+            resp.status() == StatusCode::SWITCHING_PROTOCOLS,
+            "the containers controller answered {}",
+            resp.status()
+        );
+        let mut stream = resp.upgrade().await?;
+        exec::write_frame(&mut stream, exec::CLOSE_STDIN, &[]).await?;
+        let run = async {
+            while let Some((kind, payload)) = exec::read_frame(&mut stream).await? {
+                if kind == exec::EXIT {
+                    let exit: exec::Exit = serde_json::from_slice(&payload)?;
+                    return match exit {
+                        exec::Exit { exit_code: Some(code), .. } => Ok(code),
+                        exec::Exit { error, .. } => Err(anyhow::anyhow!(error.unwrap_or_default())),
+                    };
+                }
+            }
+            anyhow::bail!("the exec connection ended")
+        };
+        tokio::time::timeout(Duration::from_secs(30), run).await.context("the exec timed out")?
     }
 
     /// `POST /containers/<app>/wait`: `monitor()` waits for the application
@@ -1254,6 +1305,20 @@ impl Shim {
     }
 }
 
+/// A signal's number on Linux, from a name (`SIGHUP`, `HUP`) or a number.
+fn signal_number(signal: &str) -> Option<u32> {
+    const NAMES: [&str; 31] = [
+        "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE",
+        "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ",
+        "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS",
+    ];
+    if let Ok(n) = signal.parse::<u32>() {
+        return (1..=64).contains(&n).then_some(n);
+    }
+    let name = signal.trim_start_matches("SIG");
+    NAMES.iter().position(|n| *n == name).map(|i| i as u32 + 1)
+}
+
 /// Carries a started exec between workerd's hijacked connection
 /// (`downstream`, absent when detached) and the controller's (`upstream`),
 /// and records how it ended.
@@ -1383,6 +1448,17 @@ async fn bridge_exec<U, D>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signals() {
+        assert_eq!(signal_number("SIGHUP"), Some(1));
+        assert_eq!(signal_number("SIGTERM"), Some(15));
+        assert_eq!(signal_number("USR1"), Some(10));
+        assert_eq!(signal_number("SIGSYS"), Some(31));
+        assert_eq!(signal_number("9"), Some(9));
+        assert_eq!(signal_number("SIGNOPE"), None);
+        assert_eq!(signal_number("0"), None);
+    }
 
     fn session() -> Session {
         Session {

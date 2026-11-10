@@ -74,7 +74,19 @@ export class Box extends DurableObject {
         }
         case "/signal":
           c.signal(Number(q.get("s")));
+          // signal() does not wait for delivery.
+          await new Promise((r) => setTimeout(r, 1000));
           return new Response("sent");
+        case "/hups":
+          return await this.inside("/hups");
+        case "/signal-exit": {
+          const done = c.monitor().then(
+            () => "exited 0",
+            (e) => `exited: ${e.message}`,
+          );
+          c.signal(Number(q.get("s")));
+          return new Response(await done);
+        }
         case "/destroy":
           await c.destroy();
           return new Response("destroyed");

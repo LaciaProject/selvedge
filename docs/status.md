@@ -125,7 +125,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |
 | 运行时与 API | 不支持 service-worker 语法和 Global API key |
-| Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持快照和 TERM/INT/QUIT/KILL 以外的信号，Kubernetes 上 `exec()` 不能指定用户；rollout 立即生效；删除应用后镜像层要等仓库 GC 回收 |
+| Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持快照；SIGKILL 以外的信号要求镜像里有 `/bin/sh`；Kubernetes 上 `exec()` 不能指定用户；rollout 立即生效；删除应用后镜像层要等仓库 GC 回收 |
 
 **不在范围内**：Workers AI、Vectorize、Hyperdrive 和 Analytics Engine 是 Cloudflare 自己托管的服务，不属于基础设施，使用这些绑定的上传会被拒绝。跨地域多集群也不在当前范围内。
 

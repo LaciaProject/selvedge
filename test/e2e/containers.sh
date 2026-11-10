@@ -169,6 +169,12 @@ check "exec() takes stdin" "ping 0" "$(get '/exec-stdin?name=a')"
 check "exec() sets the environment and working directory" "hi there /tmp" "$(get '/exec-env?name=a')"
 contains "an exec process can be killed" "killed 143" "$(get '/exec-kill?name=a')"
 check "exec() can allocate a terminal" "terminal 0" "$(get '/exec-pty?name=a')"
+check "signal() delivers a signal the application handles" "sent 1" "$(get '/signal?name=a&s=1') $(get '/hups?name=a')"
+contains "and one that ends it reports its exit code" "42" "$(get '/signal-exit?name=a&s=10')"
+# The exited instance goes (b's is left), and the object can start another.
+for _ in $(seq 1 30); do [ "$(instances | wc -l)" = 1 ] && break; sleep 0.5; done
+check "the exited instance is removed" "1" "$(instances | wc -l | tr -d ' ')"
+check "the object starts its container again" "hello after v1" "$(get '/start?name=a&msg=after')"
 # A call the shim does not implement, straight on an account process's socket.
 SOCKET=$(find "$SELVEDGE_RUN_DIR" -name d.sock | head -1)
 check "the shim answers what it does not implement with 501" "501" \

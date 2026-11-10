@@ -79,6 +79,11 @@ check "exec() takes stdin" "ping 0" "$(get '/exec-stdin?name=a')"
 check "exec() sets the environment and working directory" "hi there /tmp" "$(get '/exec-env?name=a')"
 contains "an exec process can be killed" "killed 143" "$(get '/exec-kill?name=a')"
 check "exec() can allocate a terminal" "terminal 0" "$(get '/exec-pty?name=a')"
+check "signal() delivers a signal the application handles" "sent 1" "$(get '/signal?name=a&s=1') $(get '/hups?name=a')"
+contains "and one that ends it reports its exit code" "42" "$(get '/signal-exit?name=a&s=10')"
+wait_count 0 60
+check "the exited instance is removed" "0" "$(count)"
+check "the object starts its container again" "hello after v1" "$(get '/start?name=a&msg=after')"
 
 # ---- Egress: through workerd only.
 contains "outbound requests fail without enableInternet" "failed" "$(get '/out?name=a&u=http://example.com/')"

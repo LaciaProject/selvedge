@@ -253,8 +253,8 @@ P1 已经实现，代码在 `crates/selvedge-server/src/{containers,agent/docker
 
 **测试**
 
-- 单节点（CI `e2e`）：wrangler 构建、推送、部署，token 服务的权限范围，启动、入站、环境变量、CA，出站（默认不通、拦截、`enableInternet`、拒绝链路本地地址），`max_instances` 和拒绝其他镜像，退出码，销毁和重启，换镜像后的 rollout，删除应用，监控指标。
-- Kubernetes（CI `kind-containers`，kind 加 kata-deploy 4.3.1，GitHub 托管机器的嵌套虚拟化）：节点用实例自己的凭证从捆绑仓库拉取镜像；实例跑在 `kata-qemu` 里、有自己的内核；不挂 token、归 runner Pod 所有；入站、出站拦截、`enableInternet`，workerd 拒绝集群地址；NetworkPolicy；runner Pod 删除后实例随之回收，DO 在新 runner 上重新启动容器；删除应用后实例和 pull secret 都被清理。
+- 单节点（CI `e2e`）：wrangler 构建、推送、部署，token 服务的权限范围，启动、入站、环境变量、CA，出站（默认不通、HTTP 和 HTTPS 拦截、`enableInternet`、拒绝链路本地地址），`max_instances` 和拒绝其他镜像，退出码，销毁和重启，换镜像后的 rollout，删除应用，监控指标。
+- Kubernetes（CI `kind-containers`，kind 加 kata-deploy 4.3.1，GitHub 托管机器的嵌套虚拟化）：节点用实例自己的凭证从捆绑仓库拉取镜像；实例跑在 `kata-qemu` 里、有自己的内核；不挂 token、归 runner Pod 所有；入站、HTTP 和 HTTPS 出站拦截、`enableInternet`，workerd 拒绝集群地址；NetworkPolicy；runner Pod 删除后实例随之回收，DO 在新 runner 上重新启动容器；删除应用后实例和 pull secret 都被清理。
 
 | 冷启动（kind + Kata，嵌套虚拟化，三次运行） | 耗时 |
 | --- | --- |

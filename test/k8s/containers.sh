@@ -78,6 +78,7 @@ check "the sidecar's CA is in the container" "present" "$(get '/ca?name=a')"
 # ---- Egress: through workerd only.
 contains "outbound requests fail without enableInternet" "failed" "$(get '/out?name=a&u=http://example.com/')"
 check "interceptOutboundHttp sends the container's request to the Worker" "200 intercepted /x" "$(get '/intercept?name=a')"
+check "interceptOutboundHttps does the same for HTTPS, trusted through the sidecar's CA" "200 intercepted /y" "$(get '/intercept-https?name=a')"
 T0=$(date +%s.%N)
 check "a second object gets its own instance" "hello two v1" "$(get '/start?name=b&msg=two&internet=1')"
 COLD=$(since "$T0")

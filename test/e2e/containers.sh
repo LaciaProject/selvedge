@@ -145,6 +145,7 @@ check "one instance runs" "1" "$(instances | wc -l | tr -d ' ')"
 # ---- Egress: nothing by default, interception, the internet when asked for.
 contains "outbound requests fail without enableInternet" "failed" "$(get '/out?name=a&u=http://example.com/')"
 check "interceptOutboundHttp sends the container's request to the Worker" "200 intercepted /x" "$(get '/intercept?name=a')"
+check "interceptOutboundHttps does the same for HTTPS, trusted through the sidecar's CA" "200 intercepted /y" "$(get '/intercept-https?name=a')"
 T0=$(date +%s.%N)
 check "a second object gets its own instance, with an entrypoint" "hello two v1" "$(get '/start?name=b&msg=two&internet=1&args=extra')"
 echo "     (cold start, image present: $(python3 -c "import time; print(round(time.time() - $T0, 1))") s)"

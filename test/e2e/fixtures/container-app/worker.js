@@ -59,6 +59,9 @@ export class Box extends DurableObject {
         case "/intercept":
           await c.interceptOutboundHttp("intercepted.test", this.ctx.exports.Echo({}));
           return await this.inside(`/out?u=${encodeURIComponent("http://intercepted.test/x")}`);
+        case "/intercept-https":
+          await c.interceptOutboundHttps("secure.test", this.ctx.exports.Echo({}));
+          return await this.inside(`/out?u=${encodeURIComponent("https://secure.test/y")}`);
         case "/running":
           return new Response(String(c.running));
         case "/exit": {

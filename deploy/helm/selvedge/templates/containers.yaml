@@ -1,0 +1,217 @@
+{{- if .Values.containers.enabled }}
+{{- $name := include "selvedge.name" . -}}
+{{- $c := dict "root" . "component" "containers" -}}
+# The containers controller: the only component with Kubernetes credentials.
+# It creates each instance's pod from the application in the database; a
+# runner supplies only the environment and command (RFC 0002 §4.1).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-containers
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-containers
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+rules:
+  # Instances, and runner pods (read only) to check who is asking.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  # Each instance's image pull secret, owned by its pod.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-containers
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-containers
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-containers
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-containers
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: containers
+spec:
+  replicas: {{ include "selvedge.replicas" $c }}
+  selector:
+    matchLabels: {{- include "selvedge.selector" $c | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $c | nindent 8 }}
+      {{- include "selvedge.metricsAnnotations" . | nindent 6 }}
+    spec:
+      {{- include "selvedge.pod" $c | nindent 6 }}
+      serviceAccountName: {{ $name }}-containers
+      containers:
+        - name: containers
+          image: {{ include "selvedge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [containers]
+          env:
+            {{- include "selvedge.commonEnv" . | nindent 12 }}
+            {{- include "selvedge.databaseEnv" . | nindent 12 }}
+            {{- include "selvedge.tlsEnv" . | nindent 12 }}
+            - name: SELVEDGE_CONTAINERS_LISTEN
+              value: 0.0.0.0:8792
+            - name: SELVEDGE_CONTAINERS_BACKEND
+              value: kubernetes
+            - name: SELVEDGE_INSTANCE
+              value: {{ .Release.Name | quote }}
+            - name: SELVEDGE_REGISTRY_HOST
+              value: {{ include "selvedge.registryHost" . | quote }}
+            - name: SELVEDGE_CONTAINERS_RUNTIME_CLASS
+              value: {{ .Values.containers.runtimeClassName | quote }}
+            - name: SELVEDGE_CONTAINERS_POD_TEMPLATE
+              value: {{ .Values.containers.podTemplate | default dict | toJson | quote }}
+            - name: SELVEDGE_CONTAINERS_RUNNER_SELECTOR
+              value: app.kubernetes.io/name=selvedge,app.kubernetes.io/component=runner
+            - name: SELVEDGE_CONTAINERS_DNS
+              value: {{ join "," .Values.containers.dns | quote }}
+            - name: SELVEDGE_CONTAINERS_ACCOUNT_INSTANCES
+              value: {{ .Values.containers.accountInstances | quote }}
+            - name: SELVEDGE_CONTAINERS_TOTAL_INSTANCES
+              value: {{ .Values.containers.totalInstances | quote }}
+            {{- with .Values.containers.sidecarImage }}
+            - name: SELVEDGE_CONTAINERS_SIDECAR_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.containers.setupImage }}
+            - name: SELVEDGE_CONTAINERS_SETUP_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - { name: http, containerPort: 8792 }
+            {{- if .Values.metrics.enabled }}
+            - { name: metrics, containerPort: {{ .Values.metrics.port }} }
+            {{- end }}
+          {{- include "selvedge.probes" (dict "root" . "role" "containers" "port" 8792) | nindent 10 }}
+          resources: {{- toYaml .Values.containers.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts: {{- include "selvedge.tlsMount" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes: {{- include "selvedge.tlsVolume" (dict "root" . "role" "containers") | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-containers
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: http, port: 8792, targetPort: http }]
+{{- if .Values.containers.registry.bundled }}
+{{- $r := dict "root" . "component" "registry" }}
+---
+# The image registry (CNCF distribution). It accepts only tokens the API
+# signs, which cover one account's repositories.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-registry
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.containers.registry.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.containers.registry.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-registry
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: {{- include "selvedge.selector" $r | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "selvedge.selector" $r | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      {{- with .Values.containers.registry.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.containers.registry.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: registry
+          image: {{ .Values.containers.registry.image }}
+          env:
+            - { name: REGISTRY_HTTP_ADDR, value: "0.0.0.0:5000" }
+            - { name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY, value: /var/lib/registry }
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
+            - { name: REGISTRY_AUTH, value: token }
+            - { name: REGISTRY_AUTH_TOKEN_REALM, value: {{ include "selvedge.registryTokenRealm" . | quote }} }
+            - { name: REGISTRY_AUTH_TOKEN_SERVICE, value: {{ .Values.containers.registry.tokenService | quote }} }
+            - { name: REGISTRY_AUTH_TOKEN_ISSUER, value: {{ .Values.containers.registry.tokenIssuer | quote }} }
+            - { name: REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE, value: /etc/registry/token/tls.crt }
+          ports: [{ name: http, containerPort: 5000 }]
+          # /v2/ answers 401 without a token; the port is what matters.
+          readinessProbe: { tcpSocket: { port: http }, periodSeconds: 5 }
+          livenessProbe: { tcpSocket: { port: http }, periodSeconds: 20 }
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+            - { name: token, mountPath: /etc/registry/token, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: {{ $name }}-registry }
+        # The certificate only: the key stays with the API.
+        - name: token
+          secret:
+            secretName: {{ include "selvedge.registryTokenSecret" . }}
+            items: [{ key: tls.crt, path: tls.crt }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-registry
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+  {{- with .Values.containers.registry.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.containers.registry.service.type }}
+  selector: {{- include "selvedge.selector" $r | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.containers.registry.service.port }}
+      targetPort: http
+      {{- with .Values.containers.registry.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+{{- end }}
+{{- end }}

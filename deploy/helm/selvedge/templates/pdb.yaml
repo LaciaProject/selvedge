@@ -1,5 +1,7 @@
 {{- if eq .Values.profile "ha" }}
-{{- range $component := list "api" "data" "gateway" "runner" }}
+{{- $components := list "api" "data" "gateway" "runner" }}
+{{- if .Values.containers.enabled }}{{ $components = append $components "containers" }}{{ end }}
+{{- range $component := $components }}
 {{- $c := dict "root" $ "component" $component }}
 ---
 apiVersion: policy/v1

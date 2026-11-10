@@ -1,0 +1,29 @@
+# One node with KVM for Kata, and the ports a developer machine (wrangler,
+# docker push) and the node itself (image pulls) share: the registry and the
+# API's token endpoint, both at localhost.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+# Calico instead of kindnet, which does not enforce egress NetworkPolicies:
+# the test checks what instances can reach.
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16
+containerdConfigPatches:
+  # Registry hosts from /etc/containerd/certs.d: the test registry is HTTP.
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 30500, hostPort: 30500, listenAddress: 127.0.0.1 } # registry
+      - { containerPort: 30787, hostPort: 30787, listenAddress: 127.0.0.1 } # API
+    extraMounts:
+      # Kata runs each pod in a VM; its runtime reaches the VM's agent over
+      # vsock.
+      - { hostPath: /dev/kvm, containerPath: /dev/kvm }
+      - { hostPath: /dev/vhost-vsock, containerPath: /dev/vhost-vsock }
+      - { hostPath: /dev/vhost-net, containerPath: /dev/vhost-net }
+      # Guest memory is a file in /dev/shm (shared for virtio-fs); a node
+      # container's own /dev/shm is 64 MiB.
+      - { hostPath: /dev/shm, containerPath: /dev/shm }

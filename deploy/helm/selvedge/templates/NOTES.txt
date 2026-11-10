@@ -16,3 +16,18 @@ Deploy with wrangler:
 
 Workers are served by the {{ include "selvedge.name" . }}-gateway Service at
 <script>.<account subdomain>.{{ .Values.workersDevZone }} and at attached custom domains.
+{{- if .Values.containers.enabled }}
+
+Containers are on. Deploy applications with their images through the registry:
+  CLOUDFLARE_CONTAINER_REGISTRY={{ .Values.containers.registry.host }} wrangler deploy
+{{- if .Values.containers.registry.bundled }}
+The bundled registry is the {{ include "selvedge.name" . }}-registry Service; it must be reachable
+as {{ .Values.containers.registry.host }} by clients and by every node, with TLS the nodes trust.
+{{- end }}
+{{- if .Values.containers.runtimeClassName }}
+Instances run in the RuntimeClass {{ .Values.containers.runtimeClassName }}: install it (kata-deploy) on nodes with KVM.
+{{- else }}
+WARNING: containers.runtimeClassName is empty, so instances share their node's kernel.
+Run only images you trust.
+{{- end }}
+{{- end }}

@@ -17,6 +17,7 @@ replicas:
   data: null       # ha: 3
   gateway: null    # ha: 3
   runner: null     # ha: 3
+  containers: null # ha: 2 (with containers.enabled)
 
 # Hostnames `<script>.<account subdomain>.<zone>` route to scripts with
 # workers.dev enabled. Point a wildcard DNS record at the gateway.
@@ -146,6 +147,67 @@ runner:
   # a supporting runtime): root in the container is then unprivileged on the
   # node. Recommended with accountUsers.
   hostUsers: null
+
+# Durable Objects' containers (RFC 0002, docs/containers.md). Off by default:
+# they need an image registry that clients and nodes reach under one name,
+# and, for tenants you do not trust, nodes with KVM for the Kata sandbox.
+containers:
+  enabled: false
+  # The sandbox between tenants' containers and the node. kata-qemu needs
+  # Kata Containers on the nodes (kata-deploy) and KVM. Empty runs instances
+  # with the cluster's default runtime, sharing the node's kernel: only for
+  # images you trust.
+  runtimeClassName: kata-qemu
+  # Merged into every instance's pod spec, e.g. to keep instances on the KVM
+  # nodes: { nodeSelector: { katacontainers.io/kata-runtime: "true" } }.
+  # What Selvedge sets itself (runtime, security, networking) wins.
+  podTemplate: {}
+  # Most instances an account may run at once, and in the whole installation
+  # (0: no limit). An application's max_instances applies too.
+  accountInstances: 20
+  totalInstances: 0
+  # The largest instance type an application may ask for.
+  maxInstance: { vcpu: 4, memoryMiB: 12288, diskMB: 20000 }
+  # Resolvers for containers' DNS queries (public: instances reach nothing
+  # private).
+  dns: [1.1.1.1, 8.8.8.8]
+  # Seconds a runner waits for an instance to start (scheduling, image pull,
+  # VM boot).
+  startTimeoutSeconds: 300
+  # Empty: the versions this release of Selvedge was tested with.
+  sidecarImage: ""   # cloudflare/proxy-everything
+  setupImage: ""     # an image with sh and curl
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+  registry:
+    # The registry's host (and port) as image names carry it. wrangler pushes
+    # there (CLOUDFLARE_CONTAINER_REGISTRY=<host>) and nodes pull from there,
+    # so it must resolve, with a certificate the nodes trust, from both.
+    host: ""
+    # The API's token endpoint, as clients and nodes reach it: the API's
+    # public URL followed by /registry/token.
+    tokenRealm: ""
+    # The registry's auth.token.issuer and auth.token.service.
+    tokenIssuer: selvedge
+    tokenService: selvedge-registry
+    # A Secret with the ECDSA P-256 key (tls.key) that signs registry tokens
+    # and its certificate (tls.crt). Empty: generated on install and kept.
+    tokenSecret: ""
+    # A registry in the release (CNCF distribution) that authenticates
+    # through the API. Expose its Service under `host`, with TLS, yourself;
+    # or set false and point your own registry's token auth at `tokenRealm`
+    # with the certificate from the token Secret.
+    bundled: true
+    image: registry:2.8.3
+    storage: 20Gi
+    storageClass: ""
+    service:
+      type: ClusterIP
+      port: 5000
+      nodePort: null
+      annotations: {}
+    nodeSelector: {}
+    tolerations: []
 
 # Spread replicas over zones (on by default in `ha`).
 topologySpread:

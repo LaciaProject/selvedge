@@ -39,6 +39,8 @@ enum Command {
     Agent(AgentArgs),
     /// Route requests by hostname to runners.
     Gateway(GatewayArgs),
+    /// Start and stop container instances for runners (RFC 0002).
+    Containers(Box<ContainersArgs>),
     /// Run every role in one process (the minimal profile).
     All(Box<AllArgs>),
     /// Apply database migrations and exit.
@@ -95,6 +97,138 @@ struct ApiArgs {
     /// The gateway, for API requests into account processes (D1 queries).
     #[arg(long, env = "SELVEDGE_GATEWAY_URL")]
     gateway_url: Option<String>,
+    #[command(flatten)]
+    registry: RegistryArgs,
+}
+
+/// Containers in the API: the image registry it is the token service of.
+#[derive(Args, Clone)]
+struct RegistryArgs {
+    /// The container image registry's host (and port), as image names carry
+    /// it. Enables the containers API; images live under <host>/<account id>/.
+    #[arg(long, env = "SELVEDGE_REGISTRY_HOST")]
+    registry_host: Option<String>,
+    /// PEM file with the ECDSA P-256 key that signs registry tokens.
+    #[arg(long, env = "SELVEDGE_REGISTRY_TOKEN_KEY")]
+    registry_token_key: Option<PathBuf>,
+    /// PEM file with that key's certificate; the registry trusts it
+    /// (`auth.token.rootcertbundle`).
+    #[arg(long, env = "SELVEDGE_REGISTRY_TOKEN_CERT")]
+    registry_token_cert: Option<PathBuf>,
+    /// `auth.token.issuer` in the registry's configuration.
+    #[arg(long, env = "SELVEDGE_REGISTRY_TOKEN_ISSUER", default_value = "selvedge")]
+    registry_token_issuer: String,
+    /// `auth.token.service` in the registry's configuration.
+    #[arg(long, env = "SELVEDGE_REGISTRY_TOKEN_SERVICE", default_value = "selvedge-registry")]
+    registry_token_service: String,
+    /// The most vCPUs one container instance may ask for.
+    #[arg(long, env = "SELVEDGE_CONTAINER_MAX_VCPU", default_value_t = 4.0)]
+    container_max_vcpu: f64,
+    /// The most memory one container instance may ask for, in MiB.
+    #[arg(long, env = "SELVEDGE_CONTAINER_MAX_MEMORY_MIB", default_value_t = 12288)]
+    container_max_memory_mib: u64,
+    /// The most disk one container instance may ask for, in MB.
+    #[arg(long, env = "SELVEDGE_CONTAINER_MAX_DISK_MB", default_value_t = 20000)]
+    container_max_disk_mb: u64,
+}
+
+#[derive(Args, Clone)]
+struct ContainersArgs {
+    #[command(flatten)]
+    db: DbArgs,
+    #[command(flatten)]
+    internal: InternalArgs,
+    #[arg(long, env = "SELVEDGE_CONTAINERS_LISTEN", default_value = "0.0.0.0:8792")]
+    listen: SocketAddr,
+    #[command(flatten)]
+    instances: InstanceArgs,
+    /// Where instances run: `kubernetes` (pods in this pod's namespace) or
+    /// `docker` (a local daemon; one node, no sandbox).
+    #[arg(long, env = "SELVEDGE_CONTAINERS_BACKEND", default_value = "kubernetes")]
+    backend: String,
+    #[arg(long, env = "SELVEDGE_CONTAINERS_DOCKER_SOCKET", default_value = "/var/run/docker.sock")]
+    docker_socket: PathBuf,
+    /// The RuntimeClass instances run in: the sandbox between tenants'
+    /// containers and the node. Empty uses the cluster's default runtime,
+    /// which shares the node's kernel: only for images you trust.
+    #[arg(long, env = "SELVEDGE_CONTAINERS_RUNTIME_CLASS", default_value = "kata-qemu")]
+    runtime_class: String,
+    /// An image with `sh` and `curl`, for an instance's setup step.
+    #[arg(long, env = "SELVEDGE_CONTAINERS_SETUP_IMAGE", default_value = "curlimages/curl:8.11.1")]
+    setup_image: String,
+    /// JSON merged into every instance's pod spec (nodeSelector,
+    /// tolerations, priorityClassName, ...). What Selvedge sets wins.
+    #[arg(long, env = "SELVEDGE_CONTAINERS_POD_TEMPLATE")]
+    pod_template: Option<String>,
+    /// Labels a pod must carry to be accepted as a runner, `k=v,k=v`.
+    #[arg(
+        long,
+        env = "SELVEDGE_CONTAINERS_RUNNER_SELECTOR",
+        default_value = "app.kubernetes.io/component=runner"
+    )]
+    runner_selector: String,
+}
+
+/// What both ways of running the controller share.
+#[derive(Args, Clone)]
+struct InstanceArgs {
+    /// The container image registry's host, as for the API.
+    #[arg(
+        id = "containers_registry_host",
+        long = "containers-registry-host",
+        env = "SELVEDGE_REGISTRY_HOST"
+    )]
+    registry_host: Option<String>,
+    /// The egress sidecar every instance runs (cloudflare/proxy-everything).
+    #[arg(
+        long = "containers-sidecar-image",
+        env = "SELVEDGE_CONTAINERS_SIDECAR_IMAGE",
+        default_value = "cloudflare/proxy-everything:main@sha256:0e2e951e947d3ec57f29afdb873dde0530fdf3f719bdca2a6a4d65b8e7fe0a41"
+    )]
+    sidecar_image: String,
+    /// Resolvers for containers' DNS queries.
+    #[arg(
+        long = "containers-dns",
+        env = "SELVEDGE_CONTAINERS_DNS",
+        value_delimiter = ',',
+        default_value = "1.1.1.1,8.8.8.8"
+    )]
+    dns: Vec<String>,
+    /// Names this installation's instances (the Helm release).
+    #[arg(long = "containers-instance", env = "SELVEDGE_INSTANCE", default_value = "selvedge")]
+    instance: String,
+    /// Most container instances an account may run at once.
+    #[arg(
+        long = "containers-account-instances",
+        env = "SELVEDGE_CONTAINERS_ACCOUNT_INSTANCES",
+        default_value_t = 20
+    )]
+    account_instances: usize,
+    /// Most container instances in the installation (0: no limit).
+    #[arg(
+        long = "containers-total-instances",
+        env = "SELVEDGE_CONTAINERS_TOTAL_INSTANCES",
+        default_value_t = 0
+    )]
+    total_instances: usize,
+}
+
+/// Containers in the agent.
+#[derive(Args, Clone)]
+struct AgentContainerArgs {
+    /// The containers controller. Enables Durable Objects' containers.
+    #[arg(long, env = "SELVEDGE_CONTAINERS_URL")]
+    containers_url: Option<String>,
+    /// Where the agent takes containers' outbound connections; instances
+    /// must reach this port on the runner.
+    #[arg(long, env = "SELVEDGE_CONTAINER_EGRESS_LISTEN", default_value = "0.0.0.0:8791")]
+    container_egress_listen: SocketAddr,
+    /// This runner's name: its pod's name on Kubernetes.
+    #[arg(long, env = "SELVEDGE_RUNNER_NAME")]
+    runner_name: Option<String>,
+    /// Seconds a container instance may take to start.
+    #[arg(long, env = "SELVEDGE_CONTAINER_START_TIMEOUT", default_value_t = 300)]
+    container_start_timeout: u64,
 }
 
 #[derive(Args, Clone)]
@@ -186,6 +320,8 @@ struct AgentArgs {
     /// many seconds, e.g. one stuck in an endless loop (0: never).
     #[arg(long, env = "SELVEDGE_HANG_TIMEOUT", default_value_t = 30)]
     hang_timeout: u64,
+    #[command(flatten)]
+    containers: AgentContainerArgs,
 }
 
 #[derive(Args, Clone)]
@@ -260,6 +396,19 @@ struct AllArgs {
     /// Kill a hung account process after this many seconds (see `agent --help`).
     #[arg(long, env = "SELVEDGE_HANG_TIMEOUT", default_value_t = 30)]
     hang_timeout: u64,
+    /// Run Durable Objects' containers on this Docker daemon. Containers
+    /// share the host's kernel: only for images you trust. Needs
+    /// --registry-host.
+    #[arg(long, env = "SELVEDGE_CONTAINERS_DOCKER_SOCKET")]
+    containers_docker_socket: Option<PathBuf>,
+    #[arg(long, env = "SELVEDGE_CONTAINERS_LISTEN", default_value = "127.0.0.1:8792")]
+    containers_listen: SocketAddr,
+    /// Where containers' outbound connections arrive: an address the Docker
+    /// bridge reaches.
+    #[arg(long, env = "SELVEDGE_CONTAINER_EGRESS_LISTEN", default_value = "0.0.0.0:8791")]
+    container_egress_listen: SocketAddr,
+    #[command(flatten)]
+    instances: InstanceArgs,
 }
 
 #[derive(Subcommand)]
@@ -324,6 +473,7 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         workers_dev_zone: args.workers_dev_zone.clone(),
         r2_dev_zone: args.r2_dev_zone.clone(),
         gateway_url: args.gateway_url.as_ref().map(|u| u.trim_end_matches('/').to_owned()),
+        containers: containers_config(&args.registry, &args.internal.internal_token)?,
         http: selvedge_server::tls::reqwest(
             reqwest::Client::builder(),
             &[selvedge_server::tls::Role::Gateway],
@@ -332,6 +482,65 @@ async fn api_state(args: &ApiArgs) -> Result<Arc<ApiState>> {
         .timeout(Duration::from_secs(60))
         .build()?,
     }))
+}
+
+/// The API's part in containers, if a registry is configured.
+fn containers_config(
+    a: &RegistryArgs,
+    internal_token: &str,
+) -> Result<Option<selvedge_server::api::containers::ContainersConfig>> {
+    use selvedge_server::registry::{Credentials, TokenSigner};
+    let Some(host) = a.registry_host.clone().filter(|h| !h.is_empty()) else { return Ok(None) };
+    let signer = match (&a.registry_token_key, &a.registry_token_cert) {
+        (Some(key), Some(cert)) => Some(TokenSigner::load(
+            &std::fs::read_to_string(key).with_context(|| format!("reading {}", key.display()))?,
+            &std::fs::read_to_string(cert).with_context(|| format!("reading {}", cert.display()))?,
+            a.registry_token_issuer.clone(),
+            a.registry_token_service.clone(),
+        )?),
+        (None, None) => {
+            tracing::warn!(
+                "--registry-host is set without --registry-token-key and --registry-token-cert: \
+                 the registry cannot authenticate pushes and pulls through this API"
+            );
+            None
+        }
+        _ => anyhow::bail!("--registry-token-key and --registry-token-cert go together"),
+    };
+    Ok(Some(selvedge_server::api::containers::ContainersConfig {
+        registry_host: host,
+        signer,
+        credentials: Credentials::new(internal_token),
+        max_instance: selvedge_core::containers::Resources {
+            vcpu: a.container_max_vcpu,
+            memory_mib: a.container_max_memory_mib,
+            disk_mb: a.container_max_disk_mb,
+        },
+    }))
+}
+
+/// The containers controller over `backend`.
+fn containers_controller(
+    db: Db,
+    backend: Arc<dyn selvedge_server::containers::Backend>,
+    a: &InstanceArgs,
+    internal_token: &str,
+) -> Result<Arc<selvedge_server::containers::Controller>> {
+    let registry_host = a
+        .registry_host
+        .clone()
+        .filter(|h| !h.is_empty())
+        .context("containers need the image registry's host (--registry-host, SELVEDGE_REGISTRY_HOST)")?;
+    Ok(selvedge_server::containers::Controller::new(
+        db,
+        backend,
+        selvedge_server::containers::Settings {
+            registry_host,
+            account_instances: a.account_instances,
+            total_instances: a.total_instances,
+        },
+        internal_token.to_owned(),
+    ))
 }
 
 async fn serve_axum(
@@ -415,6 +624,21 @@ fn agent_config(a: &AgentArgs) -> Result<AgentConfig> {
             pids: a.account_pids,
         }),
         hang_timeout: (a.hang_timeout > 0).then(|| Duration::from_secs(a.hang_timeout)),
+        containers: a.containers.containers_url.as_ref().filter(|u| !u.is_empty()).map(|url| {
+            selvedge_server::agent::dockershim::ContainersConfig {
+                controller_url: url.trim_end_matches('/').to_owned(),
+                egress_listen: a.containers.container_egress_listen,
+                interceptor_image: "selvedge/container-egress".to_owned(),
+                runner: a
+                    .containers
+                    .runner_name
+                    .clone()
+                    .or_else(|| std::env::var("HOSTNAME").ok())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "runner".to_owned()),
+                start_timeout: Duration::from_secs(a.containers.container_start_timeout),
+            }
+        }),
     })
 }
 
@@ -565,6 +789,61 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::Containers(args) => {
+            use selvedge_server::containers::{docker, kube, spec};
+            let db = open_db(&args.db).await?;
+            let i = &args.instances;
+            let backend: Arc<dyn selvedge_server::containers::Backend> = match args.backend.as_str() {
+                "kubernetes" => {
+                    let template = match &args.pod_template {
+                        Some(t) if !t.trim().is_empty() => {
+                            serde_json::from_str(t).context("--pod-template is not JSON")?
+                        }
+                        _ => serde_json::Value::Null,
+                    };
+                    let mut selector: Vec<(String, String)> = args
+                        .runner_selector
+                        .split(',')
+                        .filter_map(|kv| kv.split_once('='))
+                        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+                        .collect();
+                    selector.push(("app.kubernetes.io/instance".to_owned(), i.instance.clone()));
+                    if args.runtime_class.is_empty() {
+                        tracing::warn!(
+                            "no RuntimeClass for container instances: they share their node's kernel. \
+                             Run only images you trust, or set --runtime-class (e.g. kata-qemu)"
+                        );
+                    }
+                    Arc::new(kube::KubeBackend::in_cluster(
+                        spec::PodSettings {
+                            runtime_class: args.runtime_class.clone(),
+                            sidecar_image: i.sidecar_image.clone(),
+                            setup_image: args.setup_image.clone(),
+                            dns: i.dns.clone(),
+                            template,
+                            instance: i.instance.clone(),
+                        },
+                        selector,
+                    )?)
+                }
+                "docker" => Arc::new(docker::DockerBackend::new(docker::DockerSettings {
+                    socket: args.docker_socket.clone(),
+                    sidecar_image: i.sidecar_image.clone(),
+                    dns: i.dns.clone(),
+                    instance: i.instance.clone(),
+                })),
+                other => anyhow::bail!("unknown --backend `{other}` (kubernetes or docker)"),
+            };
+            let controller = containers_controller(db, backend, i, &args.internal.internal_token)?;
+            tokio::spawn(controller.clone().run());
+            serve_axum_internal(
+                args.listen,
+                selvedge_server::tls::CONTAINERS_CLIENTS,
+                selvedge_server::containers::router(controller),
+                shutdown_signal(),
+            )
+            .await?;
+        }
         Command::All(args) => run_all(*args).await?,
     }
     Ok(())
@@ -671,11 +950,40 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     );
     tokio::spawn(queues.run());
     let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state), stop(&tx)));
+    tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state.clone()), stop(&tx)));
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));
     if let Some(addr) = args.r2_s3_listen {
         tasks.spawn(serve_axum(addr, selvedge_server::r2s3::router(s3_state), stop(&tx)));
     }
+    let (containers_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    // Containers on the local Docker daemon, if asked for.
+    let containers_url = match &args.containers_docker_socket {
+        Some(socket) => {
+            use selvedge_server::containers::docker;
+            let mut instances = args.instances.clone();
+            instances.registry_host = instances.registry_host.or(args.api.registry.registry_host.clone());
+            let backend = Arc::new(docker::DockerBackend::new(docker::DockerSettings {
+                socket: socket.clone(),
+                sidecar_image: instances.sidecar_image.clone(),
+                dns: instances.dns.clone(),
+                instance: instances.instance.clone(),
+            }));
+            let controller = containers_controller(state.db.clone(), backend, &instances, &token)?;
+            tokio::spawn(controller.clone().run());
+            // Stopped last: the agent removes its containers as it drains.
+            let serving = tokio::spawn(serve_axum(
+                args.containers_listen,
+                selvedge_server::containers::router(controller),
+                stop(&containers_tx),
+            ));
+            Some((format!("http://{}", loopback(args.containers_listen)), serving))
+        }
+        None => None,
+    };
+    let (containers_url, containers_task) = match containers_url {
+        Some((url, task)) => (Some(url), Some(task)),
+        None => (None, None),
+    };
     let agent = agent_config(&AgentArgs {
         internal: args.api.internal.clone(),
         listen: args.agent_listen,
@@ -697,6 +1005,12 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
         account_cpus: args.account_cpus,
         account_pids: 1024,
         hang_timeout: args.hang_timeout,
+        containers: AgentContainerArgs {
+            containers_url,
+            container_egress_listen: args.container_egress_listen,
+            runner_name: None,
+            container_start_timeout: 300,
+        },
     })?;
     tasks.spawn(selvedge_server::agent::run(agent, stop(&tx)));
     tasks.spawn(selvedge_server::gateway::run(
@@ -723,6 +1037,10 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     let _ = tx.send(());
     while let Some(r) = tasks.join_next().await {
         r??;
+    }
+    let _ = containers_tx.send(());
+    if let Some(task) = containers_task {
+        task.await??;
     }
     Ok(())
 }

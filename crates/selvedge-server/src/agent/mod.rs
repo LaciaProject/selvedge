@@ -6,6 +6,7 @@
 //! request reaches tenant code.
 
 mod bindings;
+pub mod dockershim;
 pub mod limits;
 mod manager;
 pub mod s3proxy;
@@ -105,6 +106,8 @@ pub struct AgentConfig {
     /// Kill an account process that has not answered a health probe for this
     /// long (a request stuck in a loop blocks the whole process).
     pub hang_timeout: Option<Duration>,
+    /// Run Durable Objects' containers (RFC 0002).
+    pub containers: Option<dockershim::ContainersConfig>,
 }
 
 pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -145,7 +148,15 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
         Some(limits::Mode::Cgroup(d)) => Some(d.clone()),
         _ => None,
     };
-    let manager = Manager::new(cfg.clone(), max_date, s3_proxy, cgroup_dir)?;
+    let shim = match &cfg.containers {
+        Some(c) => {
+            let shim = dockershim::Shim::new(c.clone(), cfg.internal_token.clone());
+            shim.start().await?;
+            Some(shim)
+        }
+        None => None,
+    };
+    let manager = Manager::new(cfg.clone(), max_date, s3_proxy, cgroup_dir, shim)?;
     let watchdog = match (&cfg.limits, &limit_mode) {
         (Some(l), Some(limits::Mode::Watchdog)) => {
             let (manager, l) = (manager.clone(), l.clone());

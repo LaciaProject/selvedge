@@ -718,6 +718,20 @@ impl Db {
                 class_name: r.get(2),
             })
             .collect();
+        let containers = tx
+            .query(
+                "SELECT script_name, class_name, image FROM container_applications
+                 WHERE account_id = $1 ORDER BY script_name, class_name",
+                &[&account.as_str()],
+            )
+            .await?
+            .iter()
+            .map(|r| selvedge_core::ContainerDef {
+                script_name: r.get(0),
+                class_name: r.get(1),
+                image: r.get(2),
+            })
+            .collect();
         tx.commit().await?;
         // A version row (columns from `at`: id, main module, date, flags,
         // modules, bindings, assets) as the script `name`, secrets filled in.
@@ -767,6 +781,7 @@ impl Db {
             scripts,
             d1_databases,
             workflows,
+            containers,
         }))
     }
 

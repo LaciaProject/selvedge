@@ -56,6 +56,8 @@ pub struct Live {
     clustered: bool,
     /// The process was found exited on its own (counted in metrics once).
     exited: std::sync::atomic::AtomicBool,
+    /// The process's containers: ended with it.
+    containers: Option<(Arc<super::dockershim::Shim>, String)>,
 }
 
 impl Live {
@@ -91,6 +93,11 @@ impl Live {
                 crate::metrics::AGENT_PROCESS_STOPS.inc(&[reason]);
             }
             p.stop(grace).await;
+        }
+        // After the process: workerd stops its containers itself as it hands
+        // its Durable Objects off; this removes whatever is left.
+        if let Some((shim, session)) = &self.containers {
+            shim.end_session(session).await;
         }
         let _ = std::fs::remove_dir_all(&self.render_dir);
         let _ = std::fs::remove_dir_all(&self.socket_dir);
@@ -136,6 +143,10 @@ pub struct Manager {
     s3_proxy: Option<std::net::SocketAddr>,
     /// Where account cgroups go, when the cgroup tree is writable.
     cgroup_dir: Option<PathBuf>,
+    /// Durable Objects' containers, if this agent runs them.
+    shim: Option<Arc<super::dockershim::Shim>>,
+    /// Distinguishes this agent's container sessions from other runners'.
+    agent_id: String,
 }
 
 pub enum Lookup {
@@ -150,6 +161,7 @@ impl Manager {
         max_date: String,
         s3_proxy: Option<std::net::SocketAddr>,
         cgroup_dir: Option<PathBuf>,
+        shim: Option<Arc<super::dockershim::Shim>>,
     ) -> Result<Arc<Self>> {
         let uids = cfg
             .account_uids
@@ -160,6 +172,8 @@ impl Manager {
             uids,
             s3_proxy,
             cgroup_dir,
+            shim,
+            agent_id: hex::encode(rand::random::<[u8; 4]>()),
             cfg,
             http: crate::tls::reqwest(reqwest::Client::builder(), &[crate::tls::Role::Api])
                 .connect_timeout(Duration::from_secs(2))
@@ -369,7 +383,19 @@ impl Manager {
             max_compatibility_date: self.max_date.clone(),
             do_storage_dir: do_dir.clone(),
             cluster,
+            containers: match &self.shim {
+                Some(shim) if !bundle.containers.is_empty() => Some(selvedge_workerd::ContainerOptions {
+                    socket: self.account_run_dir(account).join(&tag).join("d.sock"),
+                    interceptor_image: shim.config().interceptor_image.clone(),
+                    // Unique to this process, on this runner.
+                    session: format!("{}-{}-{tag}", self.agent_id, &account.as_str()[..12]),
+                }),
+                _ => None,
+            },
         };
+        if self.shim.is_none() && !bundle.containers.is_empty() {
+            tracing::warn!(%account, "the account has container applications, but this agent does not run containers (--containers-url)");
+        }
         self.fetch_blobs(&bundle).await?;
         let blob_dir = self.cfg.state_dir.join("blobs");
         let source = move |sha: &str| -> Result<Vec<u8>> {
@@ -384,6 +410,35 @@ impl Manager {
                 super::uids::own_tree(&do_dir, uid)?;
             }
         }
+        // The process's Docker API socket: the agent's, not a daemon's.
+        let containers = match (&self.shim, &opts.containers) {
+            (Some(shim), Some(c)) => {
+                std::fs::create_dir_all(&opts.socket_dir)?;
+                shim.serve(
+                    super::dockershim::Session {
+                        account: account.clone(),
+                        id: c.session.clone(),
+                        uid,
+                        classes: render::container_classes(&bundle)
+                            .into_iter()
+                            .map(|(key, def)| {
+                                (
+                                    key,
+                                    super::dockershim::ClassInfo {
+                                        script: def.script_name.clone(),
+                                        class: def.class_name.clone(),
+                                        image: def.image.clone(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                    &c.socket,
+                )?;
+                Some((shim.clone(), c.session.clone()))
+            }
+            _ => None,
+        };
         let label = format!("{account}/{tag}");
         let process = WorkerdProcess::start_as(
             &self.cfg.workerd,
@@ -393,7 +448,16 @@ impl Manager {
             READY_TIMEOUT,
             uid,
         )
-        .await?;
+        .await;
+        let process = match process {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some((shim, session)) = &containers {
+                    shim.end_session(session).await;
+                }
+                return Err(e);
+            }
+        };
         if let (Some(dir), Some(limits), Some(pid)) = (&self.cgroup_dir, &self.cfg.limits, process.pid()) {
             if let Err(e) = super::limits::place(dir, account, pid, limits) {
                 tracing::warn!(%account, error = %e, "placing the account process in its cgroup failed");
@@ -414,6 +478,7 @@ impl Manager {
             local_do,
             clustered: rendered.experimental,
             exited: std::sync::atomic::AtomicBool::new(false),
+            containers,
         });
         let old = {
             let mut slot = state.slot.lock().await;

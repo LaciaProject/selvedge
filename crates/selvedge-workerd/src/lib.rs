@@ -16,5 +16,7 @@ pub fn is_experimental_flag(flag: &str) -> bool {
     EXPERIMENTAL_FLAGS.lines().any(|l| !l.starts_with('#') && l.trim() == flag)
 }
 
-pub use render::{ClusterOptions, ModuleSource, RenderOptions, Rendered, render, workerd_max_date};
+pub use render::{
+    ClusterOptions, ContainerOptions, ModuleSource, RenderOptions, Rendered, render, workerd_max_date,
+};
 pub use supervisor::WorkerdProcess;

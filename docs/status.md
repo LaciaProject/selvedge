@@ -66,7 +66,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Static Assets | `html_handling`、SPA 和 404 页、`run_worker_first`、`_headers`、`_redirects`，只上传有变化的文件，自动回收不再用的文件 | 未修改的 Cloudflare asset worker 和 router worker |
 | Workflows | `step.do`、`sleep`、`sleepUntil`、`waitForEvent`，实例管理，`wrangler workflows` 全部子命令 | 未修改的 Cloudflare Workflows 引擎，每个实例一个 Durable Object |
 | `wrangler tail` | pretty 和 json 两种格式及全部过滤器，包括 console 日志与异常 | tail worker 加 PostgreSQL `LISTEN/NOTIFY` |
-| Containers | DO 通过 `ctx.container` 控制容器：`start`、`getTcpPort().fetch()`、`monitor`、`destroy`、出站拦截、`enableInternet`；`wrangler deploy` 构建、推送镜像并创建应用；`max_instances` 和实例规格 | 运营方开启后可用。每个实例是一个跑在 Kata 虚拟机里的 Pod，由唯一持有集群凭证的控制组件创建；镜像仓库用 API 签发的 token 认证。见 [containers.md](containers.md) |
+| Containers | DO 通过 `ctx.container` 控制容器：`start`、`getTcpPort().fetch()`、`monitor`、`destroy`、出站拦截、`enableInternet`、`exec()`；`wrangler deploy` 构建、推送镜像并创建应用；`max_instances` 和实例规格 | 运营方开启后可用。每个实例是一个跑在 Kata 虚拟机里的 Pod，由唯一持有集群凭证的控制组件创建；镜像仓库用 API 签发的 token 认证。见 [containers.md](containers.md) |
 | 服务绑定、环境变量、密钥 | 支持命名入口点；密钥用 AES-256-GCM 加密存储 | 只能在同一账号内使用 |
 
 ## 高可用与安全
@@ -117,7 +117,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |
 | 运行时与 API | 不支持 service-worker 语法和 Global API key |
-| Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持 `exec()`、快照和 TERM/INT/QUIT/KILL 以外的信号；rollout 立即生效；删除应用后镜像层要等仓库 GC 回收 |
+| Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持快照和 TERM/INT/QUIT/KILL 以外的信号，Kubernetes 上 `exec()` 不能指定用户；rollout 立即生效；删除应用后镜像层要等仓库 GC 回收 |
 
 **不在范围内**：Workers AI、Vectorize、Hyperdrive 和 Analytics Engine 是 Cloudflare 自己托管的服务，不属于基础设施，使用这些绑定的上传会被拒绝。跨地域多集群也不在当前范围内。
 

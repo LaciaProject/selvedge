@@ -128,6 +128,112 @@ impl Inner {
         Ok((status, body))
     }
 
+    /// Runs a command in an instance's application container with Docker's
+    /// exec API, as workerd itself would.
+    async fn exec(&self, id: &str, spec: &super::exec::ExecSpec, io: super::exec::ExecIo) -> Result<i32> {
+        use super::exec::{self, Input};
+        use tokio::io::AsyncWriteExt;
+        if !id.starts_with("slvc-") || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("not an instance id");
+        }
+        let mut create = json!({
+            "AttachStdin": spec.stdin,
+            "AttachStdout": spec.stdout,
+            "AttachStderr": spec.stderr,
+            "Tty": spec.tty,
+            "Cmd": spec.cmd,
+            "Env": spec.env,
+        });
+        if let Some(dir) = spec.working_dir.as_deref().filter(|d| !d.is_empty()) {
+            create["WorkingDir"] = json!(dir);
+        }
+        if let Some(user) = spec.user.as_deref().filter(|u| !u.is_empty()) {
+            create["User"] = json!(user);
+        }
+        let (status, created) =
+            self.docker_json(http::Method::POST, &format!("/containers/{id}/exec"), Some(&create)).await?;
+        let Some(exec_id) =
+            created.get("Id").and_then(Value::as_str).map(str::to_owned).filter(|_| status == 201)
+        else {
+            bail!("creating the exec: {status} {created}");
+        };
+        // Start it on a connection of its own, which Docker hijacks.
+        let stream = tokio::net::UnixStream::connect(&self.settings.socket)
+            .await
+            .with_context(|| format!("connecting to Docker at {}", self.settings.socket.display()))?;
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await?;
+        tokio::spawn(async move {
+            let _ = conn.with_upgrades().await;
+        });
+        let mut start = json!({ "Detach": false, "Tty": spec.tty });
+        if spec.tty && (spec.cols > 0 || spec.rows > 0) {
+            start["ConsoleSize"] = json!([spec.rows, spec.cols]);
+        }
+        let body = Bytes::from(start.to_string());
+        let req = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("/exec/{exec_id}/start"))
+            .header("host", "docker")
+            .header("connection", "Upgrade")
+            .header("upgrade", "tcp")
+            .header("content-type", "application/json")
+            .header("content-length", body.len())
+            .body(Full::new(body))?;
+        let resp = sender.send_request(req).await.context("starting the exec")?;
+        if resp.status() != http::StatusCode::SWITCHING_PROTOCOLS {
+            let status = resp.status();
+            let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            bail!("starting the exec: {status} {}", String::from_utf8_lossy(&body));
+        }
+        let upgraded = hyper_util::rt::TokioIo::new(hyper::upgrade::on(resp).await?);
+        let (mut r, mut w) = tokio::io::split(upgraded);
+        let super::exec::ExecIo { mut input, output } = io;
+        let tty = spec.tty;
+        let out = async move {
+            let result =
+                if tty { exec::copy_raw(&mut r, &output).await } else { exec::demux(&mut r, &output).await };
+            drop(output);
+            result
+        };
+        let inp = async {
+            while let Some(i) = input.recv().await {
+                match i {
+                    Input::Stdin(b) => {
+                        if w.write_all(&b).await.is_err() {
+                            break;
+                        }
+                    }
+                    Input::CloseStdin => {
+                        let _ = w.shutdown().await;
+                    }
+                    Input::Resize { cols, rows } => {
+                        let path = format!("/exec/{exec_id}/resize?h={rows}&w={cols}");
+                        let _ = self.docker(http::Method::POST, &path, None, &[]).await;
+                    }
+                }
+            }
+        };
+        // Output ends when the command does; input may go on forever.
+        tokio::select! {
+            r = out => r?,
+            () = async { inp.await; std::future::pending::<()>().await } => {}
+        }
+        // The exit code: Docker's inspect may lag the stream's end slightly.
+        for _ in 0..100 {
+            let (status, info) =
+                self.docker_json(http::Method::GET, &format!("/exec/{exec_id}/json"), None).await?;
+            if status != 200 {
+                bail!("inspecting the exec: {status} {info}");
+            }
+            if info.get("Running").and_then(Value::as_bool) == Some(false) {
+                return Ok(info.get("ExitCode").and_then(Value::as_i64).unwrap_or(0) as i32);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        bail!("the exec's stream ended but it is still running")
+    }
+
     async fn docker_json(
         &self,
         method: http::Method,
@@ -294,6 +400,10 @@ fn exit_code(status: &str) -> Option<i32> {
 
 #[async_trait::async_trait]
 impl Backend for DockerBackend {
+    async fn exec(&self, id: &str, spec: &super::exec::ExecSpec, io: super::exec::ExecIo) -> Result<i32> {
+        self.inner.exec(id, spec, io).await
+    }
+
     async fn list(&self) -> Result<Vec<Instance>> {
         let filters = json!({ "label": [
             format!("{}={}", spec::LABEL_COMPONENT, spec::COMPONENT),

@@ -33,6 +33,9 @@ runner pod                              instance pod (RuntimeClass kata-qemu)
 - Instances are ordinary pods in the release's namespace, owned by the runner pod that asked for
   them: if the runner goes, Kubernetes removes them. Their labels are the only state; the
   controller derives everything from listing them.
+- `exec()` runs through the controller too: the agent opens an upgraded mTLS connection to it for
+  each command, and the controller runs the command with Docker's exec or the pod's `exec`
+  subresource. Runners never reach an instance's runtime.
 - All of an instance's outbound traffic goes through its sidecar to the agent's egress relay, which
   hands it to the owning account's workerd. workerd applies the object's rules: nothing by
   default, public addresses with `enableInternet`, and `interceptOutboundHttp` handlers.

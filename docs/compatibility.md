@@ -203,7 +203,8 @@ sandbox off. See [containers.md](containers.md) for running them.
 | `running`, `monitor()` with the exit code, `destroy()`, `setInactivityTimeout()` | Supported | |
 | `signal()` | Partial | SIGTERM, SIGINT, SIGQUIT and SIGKILL stop the instance; other signals fail |
 | `interceptOutboundHttp()`, `interceptOutboundHttps()` | Supported | For HTTPS the container must trust the sidecar's CA, installed at `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
-| `exec()`, `snapshotContainer()`, `snapshotDirectory()` | Not supported | Fail with a message naming the operation |
+| `exec()`: output, exit code, stdin, `env`, `cwd`, `pty` and `resize()`, `kill()` | Supported | `user` works with the Docker backend only; on Kubernetes an exec that names a user fails |
+| `snapshotContainer()`, `snapshotDirectory()` | Not supported | Fail with a message naming the operation |
 | `max_instances`, `instance_type` (named or `vcpu`/`memory_mib`/`disk.size_mb`) | Supported | Named types use Cloudflare's sizes; the operator sets the largest allowed |
 | `wrangler deploy` of applications, and the applications API (list, get, modify, delete) | Supported | A rollout applies at once; there are no gradual or regional rollouts. A deploy with nothing changed creates no rollout |
 | Locations, regions, SSH, GPUs, persistent disks, Cloudchamber deployments | Not supported | |

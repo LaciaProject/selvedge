@@ -164,7 +164,15 @@ contains "max_instances stops a third instance" "failed to start" "$(get '/start
 contains "and the log says why" "already runs its maximum of 2 instances" "$(cat "$WORK/selvedge.log")"
 contains "start() with another image is refused" "error" "$(get '/start?name=d&msg=x&image=docker.io/library/alpine:3.20')"
 check "and started nothing" "2" "$(instances | wc -l | tr -d ' ')"
-contains "exec() fails with a clear message" "does not support" "$(get '/exec?name=a')"
+check "exec() returns stdout, stderr and the exit code" "[out] [err] 3" "$(get '/exec?name=a')"
+check "exec() takes stdin" "ping 0" "$(get '/exec-stdin?name=a')"
+check "exec() sets the environment and working directory" "hi there /tmp" "$(get '/exec-env?name=a')"
+contains "an exec process can be killed" "killed 143" "$(get '/exec-kill?name=a')"
+check "exec() can allocate a terminal" "terminal 0" "$(get '/exec-pty?name=a')"
+# A call the shim does not implement, straight on an account process's socket.
+SOCKET=$(find "$SELVEDGE_RUN_DIR" -name d.sock | head -1)
+check "the shim answers what it does not implement with 501" "501" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCKET" -X POST http://docker/commit)"
 
 # ---- Exit codes, destroy, restart.
 contains "monitor() reports the exit code" "3" "$(get '/exit?name=b&code=3')"
@@ -211,5 +219,5 @@ check "and its images" "0" "$(tags)"
 METRICS=$(curl -s "http://$SELVEDGE_METRICS_LISTEN/metrics")
 contains "container starts are counted" 'selvedge_container_starts_total{result="created"}' "$METRICS"
 contains "refused starts are counted" 'selvedge_container_starts_total{result="limit"}' "$METRICS"
-contains "unsupported calls are counted" 'selvedge_agent_container_unsupported_total{operation="exec"}' "$METRICS"
+contains "unsupported calls are counted" 'selvedge_agent_container_unsupported_total{operation="snapshot"}' "$METRICS"
 echo "containers e2e passed"

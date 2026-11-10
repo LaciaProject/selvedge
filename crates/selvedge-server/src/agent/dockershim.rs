@@ -127,11 +127,39 @@ struct ContainerBox {
     op: tokio::sync::Mutex<()>,
 }
 
+/// An exec workerd created in a container.
+struct Exec {
+    /// The session and container it belongs to.
+    session: String,
+    container: String,
+    spec: crate::containers::exec::ExecSpec,
+    state: Mutex<ExecState>,
+}
+
+#[derive(Default)]
+struct ExecState {
+    started: bool,
+    running: bool,
+    exit_code: Option<i32>,
+    finished: Option<Instant>,
+    /// To the controller, while it runs.
+    input: Option<tokio::sync::mpsc::Sender<crate::containers::exec::Input>>,
+}
+
+/// How long a finished exec stays inspectable.
+const EXEC_KEEP: Duration = Duration::from_secs(300);
+/// The exit code of an exec that could not run.
+const EXEC_FAILED: i32 = 126;
+
 pub struct Shim {
     cfg: ContainersConfig,
     internal_token: String,
     /// To the controller.
     http: reqwest::Client,
+    /// To the controller, for execs: upgraded connections that last as long
+    /// as the command.
+    exec_http: reqwest::Client,
+    execs: Mutex<HashMap<String, Arc<Exec>>>,
     /// To instances' sidecars.
     sidecars: reqwest::Client,
     boxes: Mutex<HashMap<String, Arc<ContainerBox>>>,
@@ -219,6 +247,12 @@ impl Shim {
                 .timeout(Duration::from_secs(70))
                 .build()
                 .expect("HTTP client"),
+            exec_http: crate::tls::reqwest(reqwest::Client::builder(), &[crate::tls::Role::Containers])
+                .connect_timeout(Duration::from_secs(2))
+                .pool_max_idle_per_host(0)
+                .build()
+                .expect("HTTP client"),
+            execs: Mutex::new(HashMap::new()),
             // The sidecar closes a connection after each answer.
             sidecars: reqwest::Client::builder()
                 .pool_max_idle_per_host(0)
@@ -476,15 +510,214 @@ impl Shim {
                         empty(StatusCode::OK)
                     }
                     (_, ["archive"], _) => unsupported("archive"),
+                    (&Method::POST, ["exec"], false) => {
+                        let body = match http_body_util::Limited::new(req.into_body(), MAX_BODY)
+                            .collect()
+                            .await
+                        {
+                            Ok(b) => b.to_bytes(),
+                            Err(_) => return docker_error(StatusCode::BAD_REQUEST, "request body too large"),
+                        };
+                        let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+                            return docker_error(StatusCode::BAD_REQUEST, "invalid JSON");
+                        };
+                        self.create_exec(session, base, &body)
+                    }
                     (_, ["exec"], _) => unsupported("exec"),
                     _ => unsupported("container"),
                 }
             }
-            (_, ["exec", ..]) => unsupported("exec"),
+            (_, ["exec", id, rest @ ..]) => {
+                let Some(e) = self.execs.lock().expect("poisoned").get(*id).cloned() else {
+                    return docker_error(StatusCode::NOT_FOUND, format!("No such exec instance: {id}"));
+                };
+                if e.session != session.id {
+                    return docker_error(StatusCode::NOT_FOUND, format!("No such exec instance: {id}"));
+                }
+                match (&method, rest) {
+                    (&Method::POST, ["start"]) => self.start_exec(id, e, req).await,
+                    (&Method::GET, ["json"]) => {
+                        let st = e.state.lock().expect("poisoned");
+                        docker_json(
+                            StatusCode::OK,
+                            json!({
+                                "ID": id,
+                                "ContainerID": e.container,
+                                "Running": st.running,
+                                "ExitCode": st.exit_code,
+                                "Pid": 0,
+                            }),
+                        )
+                    }
+                    (&Method::POST, ["resize"]) => {
+                        let size = |k: &str| query.get(k).and_then(|v| v.parse::<u16>().ok()).unwrap_or(0);
+                        let input = e.state.lock().expect("poisoned").input.clone();
+                        if let Some(tx) = input {
+                            let _ = tx
+                                .send(crate::containers::exec::Input::Resize {
+                                    cols: size("w"),
+                                    rows: size("h"),
+                                })
+                                .await;
+                        }
+                        empty(StatusCode::OK)
+                    }
+                    _ => unsupported("exec"),
+                }
+            }
             (_, ["commit"]) | (_, ["volumes", ..]) => unsupported("snapshot"),
             (_, ["images", ..]) => unsupported("image"),
             _ => unsupported("other"),
         }
+    }
+
+    // ---- exec ----
+
+    /// The instance a container's application runs as, if it runs.
+    fn running_instance(&self, container: &str) -> Option<String> {
+        let b = self.find(container)?;
+        let inner = b.inner.lock().expect("poisoned");
+        let app = inner.app.as_ref()?;
+        (app.state == AppState::Running).then(|| app.instance.clone()).flatten()
+    }
+
+    fn create_exec(&self, session: &Arc<Session>, container: &str, body: &Value) -> Response<Body> {
+        use crate::containers::exec::ExecSpec;
+        if self.running_instance(container).is_none() {
+            return docker_error(StatusCode::CONFLICT, format!("Container {container} is not running"));
+        }
+        let strings = |k: &str| -> Vec<String> {
+            body.get(k)
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .unwrap_or_default()
+        };
+        let flag = |k: &str| body.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let text = |k: &str| body.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        let spec = ExecSpec {
+            cmd: strings("Cmd"),
+            env: strings("Env"),
+            working_dir: text("WorkingDir"),
+            user: text("User"),
+            tty: flag("Tty"),
+            stdin: flag("AttachStdin"),
+            stdout: flag("AttachStdout"),
+            stderr: flag("AttachStderr"),
+            cols: 0,
+            rows: 0,
+        };
+        if spec.cmd.is_empty() {
+            return docker_error(StatusCode::BAD_REQUEST, "No exec command specified");
+        }
+        let id = hex::encode(rand::random::<[u8; 32]>());
+        let mut execs = self.execs.lock().expect("poisoned");
+        execs.retain(|_, e| {
+            e.state.lock().expect("poisoned").finished.is_none_or(|f| f.elapsed() < EXEC_KEEP)
+        });
+        execs.insert(
+            id.clone(),
+            Arc::new(Exec {
+                session: session.id.clone(),
+                container: container.to_owned(),
+                spec,
+                state: Mutex::new(ExecState::default()),
+            }),
+        );
+        docker_json(StatusCode::CREATED, json!({ "Id": id }))
+    }
+
+    async fn start_exec(
+        self: &Arc<Self>,
+        id: &str,
+        e: Arc<Exec>,
+        mut req: Request<Incoming>,
+    ) -> Response<Body> {
+        use crate::containers::exec;
+        use base64::Engine;
+        let downstream = hyper::upgrade::on(&mut req);
+        let body = match http_body_util::Limited::new(req.into_body(), MAX_BODY).collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return docker_error(StatusCode::BAD_REQUEST, "request body too large"),
+        };
+        let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let detach = body.get("Detach").and_then(Value::as_bool).unwrap_or(false);
+        let mut spec = e.spec.clone();
+        if let Some(size) = body.get("ConsoleSize").and_then(Value::as_array) {
+            let n = |i: usize| size.get(i).and_then(Value::as_u64).unwrap_or(0).min(u16::MAX.into()) as u16;
+            (spec.rows, spec.cols) = (n(0), n(1));
+        }
+        if std::mem::replace(&mut e.state.lock().expect("poisoned").started, true) {
+            return docker_error(StatusCode::CONFLICT, format!("Exec {id} has already started"));
+        }
+        let Some(instance) = self.running_instance(&e.container) else {
+            return docker_error(StatusCode::CONFLICT, format!("Container {} is not running", e.container));
+        };
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&spec).unwrap_or_default());
+        let resp = self
+            .exec_http
+            .post(format!("{}/internal/v1/containers/{instance}/exec", self.cfg.controller_url))
+            .bearer_auth(&self.internal_token)
+            .query(&[("runner", self.cfg.runner.as_str())])
+            .header(http::header::CONNECTION, "upgrade")
+            .header(http::header::UPGRADE, exec::PROTOCOL)
+            .header(exec::SPEC_HEADER, encoded)
+            .send()
+            .await;
+        let upstream = match resp {
+            Ok(r) if r.status() == StatusCode::SWITCHING_PROTOCOLS => match r.upgrade().await {
+                Ok(u) => u,
+                Err(err) => return docker_error(StatusCode::BAD_GATEWAY, format!("exec: {err}")),
+            },
+            Ok(r) => {
+                let status = r.status();
+                let message =
+                    r.json::<Value>().await.ok().and_then(|v| v["error"].as_str().map(str::to_owned));
+                return docker_error(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "exec: the containers controller answered {status}: {}",
+                        message.unwrap_or_default()
+                    ),
+                );
+            }
+            Err(err) => return docker_error(StatusCode::BAD_GATEWAY, format!("exec: {err}")),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        {
+            let mut st = e.state.lock().expect("poisoned");
+            st.running = true;
+            st.input = Some(tx.clone());
+        }
+        let tty = spec.tty;
+        if detach {
+            let _ = tx.send(exec::Input::CloseStdin).await;
+            tokio::spawn(async move {
+                bridge_exec(e, upstream, None::<tokio::io::DuplexStream>, tx, rx, tty).await
+            });
+            return docker_json(StatusCode::OK, json!({}));
+        }
+        tokio::spawn(async move {
+            let down = match downstream.await {
+                Ok(d) => Some(hyper_util::rt::TokioIo::new(d)),
+                Err(err) => {
+                    tracing::debug!(error = %err, "workerd's exec connection was not upgraded");
+                    None
+                }
+            };
+            bridge_exec(e, upstream, down, tx, rx, tty).await;
+        });
+        let content_type = if tty {
+            "application/vnd.docker.raw-stream"
+        } else {
+            "application/vnd.docker.multiplexed-stream"
+        };
+        let mut resp = empty(StatusCode::SWITCHING_PROTOCOLS);
+        let h = resp.headers_mut();
+        h.insert(http::header::CONNECTION, http::HeaderValue::from_static("Upgrade"));
+        h.insert(http::header::UPGRADE, http::HeaderValue::from_static("tcp"));
+        h.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static(content_type));
+        resp
     }
 
     async fn create(self: &Arc<Self>, session: &Arc<Session>, name: &str, body: &Value) -> Response<Body> {
@@ -992,6 +1225,123 @@ impl Shim {
             Err(e) => tracing::debug!(%peer, error = %e, "workerd's egress listener is not reachable"),
         }
     }
+}
+
+/// Carries a started exec between workerd's hijacked connection
+/// (`downstream`, absent when detached) and the controller's (`upstream`),
+/// and records how it ended.
+async fn bridge_exec<U, D>(
+    e: Arc<Exec>,
+    upstream: U,
+    downstream: Option<D>,
+    tx: tokio::sync::mpsc::Sender<crate::containers::exec::Input>,
+    mut rx: tokio::sync::mpsc::Receiver<crate::containers::exec::Input>,
+    tty: bool,
+) where
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    D: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    use crate::containers::exec::{self, Input};
+    let (mut ur, mut uw) = tokio::io::split(upstream);
+    let writer = tokio::spawn(async move {
+        while let Some(i) = rx.recv().await {
+            let r = match i {
+                Input::Stdin(b) => exec::write_frame(&mut uw, exec::STDIN, &b).await,
+                Input::CloseStdin => exec::write_frame(&mut uw, exec::CLOSE_STDIN, &[]).await,
+                Input::Resize { cols, rows } => {
+                    let size = json!({ "cols": cols, "rows": rows }).to_string();
+                    exec::write_frame(&mut uw, exec::RESIZE, size.as_bytes()).await
+                }
+            };
+            if r.is_err() {
+                return;
+            }
+        }
+    });
+    let (mut dw, stdin) = match downstream {
+        Some(d) => {
+            let (mut dr, dw) = tokio::io::split(d);
+            let stdin_tx = tx.clone();
+            let stdin = tokio::spawn(async move {
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    match dr.read(&mut buf).await {
+                        Ok(0) | Err(_) => {
+                            let _ = stdin_tx.send(Input::CloseStdin).await;
+                            return;
+                        }
+                        Ok(n) => {
+                            if stdin_tx
+                                .send(Input::Stdin(bytes::Bytes::copy_from_slice(&buf[..n])))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+            (Some(dw), Some(stdin))
+        }
+        None => (None, None),
+    };
+    drop(tx);
+    let mut exit = None;
+    loop {
+        match exec::read_frame(&mut ur).await {
+            Ok(Some((kind @ (exec::STDOUT | exec::STDERR), payload))) => {
+                if let Some(w) = dw.as_mut() {
+                    let r = if tty {
+                        w.write_all(&payload).await
+                    } else {
+                        exec::write_frame(w, kind, &payload).await
+                    };
+                    if r.is_err() {
+                        dw = None;
+                    }
+                }
+            }
+            Ok(Some((exec::EXIT, payload))) => {
+                exit = serde_json::from_slice::<exec::Exit>(&payload).ok();
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let code = match exit {
+        Some(exec::Exit { exit_code: Some(code), .. }) => code,
+        other => {
+            let message =
+                other.and_then(|x| x.error).unwrap_or_else(|| "the exec connection ended".to_owned());
+            tracing::warn!(container = %e.container, %message, "an exec failed");
+            // Say why on stderr, where the caller looks.
+            if let Some(w) = dw.as_mut() {
+                let line = format!("selvedge: {message}\n");
+                let _ = if tty {
+                    w.write_all(line.as_bytes()).await
+                } else {
+                    exec::write_frame(w, exec::STDERR, line.as_bytes()).await
+                };
+            }
+            EXEC_FAILED
+        }
+    };
+    {
+        let mut st = e.state.lock().expect("poisoned");
+        st.running = false;
+        st.exit_code = Some(code);
+        st.finished = Some(Instant::now());
+        st.input = None;
+    }
+    if let Some(mut w) = dw {
+        let _ = w.shutdown().await;
+    }
+    if let Some(s) = stdin {
+        s.abort();
+    }
+    writer.abort();
 }
 
 #[cfg(test)]

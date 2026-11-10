@@ -74,6 +74,11 @@ check "it holds no service account token" "false" "$($K get pod "$POD" -o jsonpa
 check "its runner owns it" "Pod" "$($K get pod "$POD" -o jsonpath='{.metadata.ownerReferences[0].kind}')"
 check "a second request reaches the same instance" "hello one v1" "$(get '/hello?name=a')"
 check "the sidecar's CA is in the container" "present" "$(get '/ca?name=a')"
+check "exec() returns stdout, stderr and the exit code" "[out] [err] 3" "$(get '/exec?name=a')"
+check "exec() takes stdin" "ping 0" "$(get '/exec-stdin?name=a')"
+check "exec() sets the environment and working directory" "hi there /tmp" "$(get '/exec-env?name=a')"
+contains "an exec process can be killed" "killed 143" "$(get '/exec-kill?name=a')"
+check "exec() can allocate a terminal" "terminal 0" "$(get '/exec-pty?name=a')"
 
 # ---- Egress: through workerd only.
 contains "outbound requests fail without enableInternet" "failed" "$(get '/out?name=a&u=http://example.com/')"

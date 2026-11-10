@@ -16,6 +16,7 @@
 //! of them.
 
 pub mod docker;
+pub mod exec;
 pub mod kube;
 pub mod spec;
 
@@ -154,6 +155,9 @@ pub trait Backend: Send + Sync {
     async fn dead_runners(&self, _names: &[String]) -> Result<Vec<String>> {
         Ok(vec![])
     }
+    /// Runs a command in a running instance's application container and
+    /// answers its exit code. Dropping `io.output` ends the output.
+    async fn exec(&self, id: &str, spec: &exec::ExecSpec, io: exec::ExecIo) -> Result<i32>;
 }
 
 /// Limits and names the controller applies to every instance.
@@ -459,6 +463,7 @@ pub fn router(controller: Arc<Controller>) -> Router {
     Router::new()
         .route("/internal/v1/containers", post(start).delete(delete_matching))
         .route("/internal/v1/containers/{id}", get(status).delete(delete))
+        .route("/internal/v1/containers/{id}/exec", post(exec_handler))
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::middleware::from_fn(|r, n| crate::metrics::layer("containers", r, n)))
         .with_state(controller)
@@ -574,6 +579,104 @@ async fn delete(
             error(StatusCode::INTERNAL_SERVER_ERROR, "deleting the container failed")
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ExecQuery {
+    runner: Option<String>,
+}
+
+/// Runs a command in an instance over an upgraded connection (see
+/// [`exec`]): input frames in, output frames and then the exit out.
+async fn exec_handler(
+    AxState(state): AxState<State>,
+    headers: http::HeaderMap,
+    extensions: http::Extensions,
+    Path(id): Path<String>,
+    Query(q): Query<ExecQuery>,
+    mut req: axum::extract::Request,
+) -> Response {
+    use base64::Engine;
+    if !authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let instance = state.wait(&id, Until::Now, Duration::from_secs(5)).await;
+    if instance.phase != Phase::Running
+        || !owns(&state, &instance, q.runner.as_deref(), peer(&extensions)).await
+    {
+        return error(StatusCode::CONFLICT, "not a running instance of this runner");
+    }
+    let spec: Option<exec::ExecSpec> = headers
+        .get(exec::SPEC_HEADER)
+        .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v.as_bytes()).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let Some(spec) = spec.filter(|s| !s.cmd.is_empty()) else {
+        return error(StatusCode::BAD_REQUEST, "no command");
+    };
+    let upgrade = hyper::upgrade::on(&mut req);
+    let backend = state.backend.clone();
+    tokio::spawn(async move {
+        let stream = match upgrade.await {
+            Ok(u) => hyper_util::rt::TokioIo::new(u),
+            Err(e) => {
+                tracing::debug!(error = %e, "an exec connection was not upgraded");
+                return;
+            }
+        };
+        run_exec(&*backend, &id, &spec, stream).await;
+    });
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(http::header::CONNECTION, "upgrade")
+        .header(http::header::UPGRADE, exec::PROTOCOL)
+        .body(axum::body::Body::empty())
+        .expect("a valid response")
+}
+
+async fn run_exec<S>(backend: &dyn Backend, id: &str, spec: &exec::ExecSpec, stream: S)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    use tokio::io::AsyncWriteExt;
+    let (mut r, mut w) = tokio::io::split(stream);
+    let (in_tx, in_rx) = tokio::sync::mpsc::channel(16);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+    let reader = tokio::spawn(async move {
+        while let Ok(Some((kind, payload))) = exec::read_frame(&mut r).await {
+            if let Some(input) = exec::input_of(kind, payload) {
+                if in_tx.send(input).await.is_err() {
+                    return;
+                }
+            }
+        }
+        // The agent went away: nothing more will come in.
+        let _ = in_tx.send(exec::Input::CloseStdin).await;
+    });
+    let run = backend.exec(id, spec, exec::ExecIo { input: in_rx, output: out_tx });
+    let forward = async {
+        while let Some(o) = out_rx.recv().await {
+            let (kind, payload) = match o {
+                exec::Output::Stdout(b) => (exec::STDOUT, b),
+                exec::Output::Stderr(b) => (exec::STDERR, b),
+            };
+            if exec::write_frame(&mut w, kind, &payload).await.is_err() {
+                // Keep draining, so the backend is never blocked on output.
+                while out_rx.recv().await.is_some() {}
+                break;
+            }
+        }
+    };
+    let (result, ()) = tokio::join!(run, forward);
+    let exit = match result {
+        Ok(code) => exec::Exit { exit_code: Some(code), error: None },
+        Err(e) => {
+            tracing::warn!(instance = %id, error = %format!("{e:#}"), "an exec failed");
+            exec::Exit { exit_code: None, error: Some(format!("{e:#}")) }
+        }
+    };
+    let _ = exec::write_frame(&mut w, exec::EXIT, &serde_json::to_vec(&exit).unwrap_or_default()).await;
+    let _ = w.shutdown().await;
+    reader.abort();
 }
 
 #[derive(Deserialize)]

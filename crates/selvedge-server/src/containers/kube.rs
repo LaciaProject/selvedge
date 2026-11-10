@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use super::exec::{ExecIo, ExecSpec, Input, Output};
 use super::spec::{self, PodSettings};
 use super::{Backend, Instance, InstanceSpec, Phase, Runner};
 
@@ -20,6 +21,11 @@ pub struct KubeBackend {
     http: reqwest::Client,
     /// `https://host:port`.
     server: String,
+    /// The API server's host and port, and the CA it is checked with, for
+    /// exec's WebSocket.
+    host: String,
+    port: u16,
+    ca: Vec<u8>,
     namespace: String,
     /// Re-read for every request: the kubelet rotates the token.
     token: PathBuf,
@@ -39,6 +45,8 @@ impl KubeBackend {
         let host = std::env::var("KUBERNETES_SERVICE_HOST")
             .context("not running in a Kubernetes pod (KUBERNETES_SERVICE_HOST is not set)")?;
         let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".into());
+        let port_number: u16 = port.parse().context("KUBERNETES_SERVICE_PORT is not a port")?;
+        let bare_host = host.clone();
         let host = if host.contains(':') { format!("[{host}]") } else { host };
         let ca = std::fs::read(dir.join("ca.crt")).context("reading the service account's CA")?;
         let namespace = std::fs::read_to_string(dir.join("namespace"))
@@ -54,6 +62,9 @@ impl KubeBackend {
         Ok(Self {
             http,
             server: format!("https://{host}:{port}"),
+            host: bare_host,
+            port: port_number,
+            ca,
             namespace,
             token: dir.join("token"),
             settings,
@@ -174,8 +185,154 @@ pub fn instance_of(pod: &Value, now: i64) -> Option<Instance> {
     })
 }
 
+/// The exit code in an exec's final status (channel 3): `Success`, or a
+/// `NonZeroExitCode` failure whose causes carry it.
+pub fn exit_code_of(status: &Value) -> Result<i32> {
+    if status.get("status").and_then(Value::as_str) == Some("Success") {
+        return Ok(0);
+    }
+    if status.get("reason").and_then(Value::as_str) == Some("NonZeroExitCode") {
+        let code = status
+            .pointer("/details/causes")
+            .and_then(Value::as_array)
+            .and_then(|c| c.iter().find(|c| c["reason"] == "ExitCode"))
+            .and_then(|c| c.get("message").and_then(Value::as_str))
+            .and_then(|m| m.parse().ok());
+        if let Some(code) = code {
+            return Ok(code);
+        }
+    }
+    bail!("{}", status.get("message").and_then(Value::as_str).unwrap_or("the exec failed"))
+}
+
+impl KubeBackend {
+    /// The pod's `exec` subresource over a WebSocket, with the channel
+    /// protocol (`v5.channel.k8s.io`, which can close stdin).
+    async fn exec_ws(&self, id: &str, spec: &ExecSpec, io: ExecIo) -> Result<i32> {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+        if spec.user.as_deref().is_some_and(|u| !u.is_empty()) {
+            bail!("exec as another user is not supported on Kubernetes");
+        }
+        if !id.starts_with("slvc-") || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("not an instance id");
+        }
+        let tty = spec.tty;
+        // Kubernetes wants at least one stream; stdout is always asked for
+        // and dropped when the caller did not want it.
+        let mut query = format!(
+            "container=app&stdin={}&stdout=true&stderr={}&tty={tty}",
+            spec.stdin,
+            spec.stderr && !tty
+        );
+        for c in super::exec::wrapped_command(spec) {
+            query.push_str("&command=");
+            query.extend(url::form_urlencoded::byte_serialize(c.as_bytes()));
+        }
+        let path = format!("{}/{id}/exec?{query}", self.pods());
+
+        let mut roots = rustls::RootCertStore::empty();
+        use rustls::pki_types::pem::PemObject;
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&self.ca) {
+            roots.add(cert.context("reading the service account's CA")?)?;
+        }
+        let config = rustls::ClientConfig::builder_with_provider(crate::tls::provider())
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from(self.host.clone())
+            .context("the API server's host is not a valid name")?;
+        let tcp = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect((self.host.as_str(), self.port)),
+        )
+        .await
+        .context("connecting to the API server timed out")??;
+        let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)).connect(name, tcp).await?;
+        let token =
+            tokio::fs::read_to_string(&self.token).await.context("reading the service account token")?;
+        let authority = if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        };
+        let request = http::Request::builder()
+            .uri(format!("wss://{authority}{path}"))
+            .header("host", &authority)
+            .header("authorization", format!("Bearer {}", token.trim()))
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", generate_key())
+            .header("sec-websocket-protocol", "v5.channel.k8s.io, v4.channel.k8s.io")
+            .body(())?;
+        let (ws, response) = tokio_tungstenite::client_async(request, tls)
+            .await
+            .map_err(|e| anyhow::anyhow!("opening the exec stream: {e}"))?;
+        let v5 = response.headers().get("sec-websocket-protocol").is_some_and(|p| p == "v5.channel.k8s.io");
+        let (mut sink, mut stream) = ws.split();
+        let ExecIo { mut input, output } = io;
+        if tty && spec.cols > 0 && spec.rows > 0 {
+            let size = json!({ "Width": spec.cols, "Height": spec.rows }).to_string();
+            sink.send(Message::Binary([&[4u8][..], size.as_bytes()].concat().into())).await?;
+        }
+        let mut status = None;
+        let mut input_open = true;
+        loop {
+            tokio::select! {
+                msg = stream.next() => match msg {
+                    Some(Ok(Message::Binary(data))) if !data.is_empty() => {
+                        let payload = bytes::Bytes::copy_from_slice(&data[1..]);
+                        match data[0] {
+                            1 if spec.stdout => { let _ = output.send(Output::Stdout(payload)).await; }
+                            2 if spec.stderr => { let _ = output.send(Output::Stderr(payload)).await; }
+                            3 => status = serde_json::from_slice::<Value>(&payload).ok(),
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        if status.is_none() {
+                            bail!("the exec stream failed: {e}");
+                        }
+                        break;
+                    }
+                },
+                i = input.recv(), if input_open => match i {
+                    Some(Input::Stdin(b)) => {
+                        sink.send(Message::Binary([&[0u8][..], &b].concat().into())).await?;
+                    }
+                    Some(Input::CloseStdin) => {
+                        // v4 cannot close stdin: the command reads on.
+                        if v5 {
+                            sink.send(Message::Binary(vec![255u8, 0].into())).await?;
+                        }
+                    }
+                    Some(Input::Resize { cols, rows }) => {
+                        let size = json!({ "Width": cols, "Height": rows }).to_string();
+                        sink.send(Message::Binary([&[4u8][..], size.as_bytes()].concat().into())).await?;
+                    }
+                    None => input_open = false,
+                },
+            }
+        }
+        drop(output);
+        let _ = sink.close().await;
+        match status {
+            Some(s) => exit_code_of(&s),
+            None => bail!("the exec ended without a status"),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Backend for KubeBackend {
+    async fn exec(&self, id: &str, spec: &ExecSpec, io: ExecIo) -> Result<i32> {
+        self.exec_ws(id, spec, io).await
+    }
+
     async fn list(&self) -> Result<Vec<Instance>> {
         let selector = format!(
             "{}={},app.kubernetes.io/instance={}",
@@ -326,6 +483,16 @@ mod tests {
             "conditions": [{ "type": "PodScheduled", "status": "False", "message": "0/3 nodes" }] });
         let i = instance_of(&pod(unschedulable), now()).unwrap();
         assert_eq!((i.phase, i.message.as_deref()), (Phase::Pending, Some("not scheduled: 0/3 nodes")));
+    }
+
+    #[test]
+    fn exec_status() {
+        assert_eq!(exit_code_of(&json!({ "status": "Success" })).unwrap(), 0);
+        let failed = json!({ "status": "Failure", "reason": "NonZeroExitCode",
+            "details": { "causes": [{ "reason": "ExitCode", "message": "3" }] } });
+        assert_eq!(exit_code_of(&failed).unwrap(), 3);
+        let error = json!({ "status": "Failure", "message": "container not found" });
+        assert_eq!(exit_code_of(&error).unwrap_err().to_string(), "container not found");
     }
 
     #[test]

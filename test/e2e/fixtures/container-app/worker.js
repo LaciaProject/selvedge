@@ -79,8 +79,35 @@ export class Box extends DurableObject {
           await c.destroy();
           return new Response("destroyed");
         case "/exec": {
-          const p = await c.exec(["true"]);
-          return new Response(`exec ${await p.exitCode}`);
+          // Output, both streams, the exit code.
+          const p = await c.exec(["sh", "-c", "echo out; echo err >&2; exit 3"]);
+          const o = await p.output();
+          const d = new TextDecoder();
+          return new Response(`[${d.decode(o.stdout).trim()}] [${d.decode(o.stderr).trim()}] ${o.exitCode}`);
+        }
+        case "/exec-stdin": {
+          const p = await c.exec(["cat"], { stdin: "pipe" });
+          const w = p.stdin.getWriter();
+          await w.write(new TextEncoder().encode("ping"));
+          await w.close();
+          const o = await p.output();
+          return new Response(`${new TextDecoder().decode(o.stdout)} ${o.exitCode}`);
+        }
+        case "/exec-env": {
+          const p = await c.exec(["sh", "-c", 'echo "$GREETING $(pwd)"'], { env: { GREETING: "hi there" }, cwd: "/tmp" });
+          const o = await p.output();
+          return new Response(new TextDecoder().decode(o.stdout).trim());
+        }
+        case "/exec-kill": {
+          const p = await c.exec(["sleep", "60"]);
+          await new Promise((r) => setTimeout(r, 500));
+          p.kill(15);
+          return new Response(`killed ${await p.exitCode}`);
+        }
+        case "/exec-pty": {
+          const p = await c.exec(["sh", "-c", "test -t 1 && echo terminal"], { pty: true });
+          const o = await p.output();
+          return new Response(`${new TextDecoder().decode(o.stdout).trim()} ${o.exitCode}`);
         }
         default:
           return new Response("not found", { status: 404 });

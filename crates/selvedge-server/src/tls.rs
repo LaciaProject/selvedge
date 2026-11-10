@@ -162,7 +162,7 @@ pub fn scheme() -> &'static str {
     if get().is_some() { "https" } else { "http" }
 }
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub(crate) fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 

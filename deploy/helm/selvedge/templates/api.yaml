@@ -51,6 +51,14 @@ spec:
             # registry's token service.
             - name: SELVEDGE_REGISTRY_HOST
               value: {{ include "selvedge.registryHost" . | quote }}
+            {{- $registryUrl := .Values.containers.registry.url }}
+            {{- if and (not $registryUrl) .Values.containers.registry.bundled }}
+            {{- $registryUrl = printf "http://%s-registry:%v" (include "selvedge.name" .) .Values.containers.registry.service.port }}
+            {{- end }}
+            {{- with $registryUrl }}
+            - name: SELVEDGE_REGISTRY_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: SELVEDGE_REGISTRY_TOKEN_KEY
               value: /etc/selvedge/registry/tls.key
             - name: SELVEDGE_REGISTRY_TOKEN_CERT

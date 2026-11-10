@@ -31,7 +31,7 @@ export SELVEDGE_METRICS_LISTEN=127.0.0.1:$((PORT_BASE + 64))
 # Docker daemon to run instances on.
 openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/registry.key" 2>/dev/null
 openssl req -x509 -new -key "$WORK/registry.key" -days 2 -subj "/CN=selvedge registry tokens" -out "$WORK/registry.crt" 2>/dev/null
-export SELVEDGE_REGISTRY_HOST=$REGISTRY
+export SELVEDGE_REGISTRY_HOST=$REGISTRY SELVEDGE_REGISTRY_URL=http://$REGISTRY
 export SELVEDGE_REGISTRY_TOKEN_KEY="$WORK/registry.key" SELVEDGE_REGISTRY_TOKEN_CERT="$WORK/registry.crt"
 export SELVEDGE_CONTAINERS_DOCKER_SOCKET=${DOCKER_SOCKET:-/var/run/docker.sock}
 export SELVEDGE_CONTAINERS_LISTEN=127.0.0.1:$((PORT_BASE + 92))
@@ -41,7 +41,7 @@ export SELVEDGE_CONTAINERS_ACCOUNT_INSTANCES=5
 
 docker run -d --name "$INSTANCE-registry" -p "127.0.0.1:$REGISTRY_PORT:5000" \
   -v "$WORK/registry.crt:/token.crt:ro" \
-  -e REGISTRY_AUTH=token \
+  -e REGISTRY_AUTH=token -e REGISTRY_STORAGE_DELETE_ENABLED=true \
   -e REGISTRY_AUTH_TOKEN_REALM="http://127.0.0.1:$API_PORT/registry/token" \
   -e REGISTRY_AUTH_TOKEN_SERVICE=selvedge-registry \
   -e REGISTRY_AUTH_TOKEN_ISSUER=selvedge \
@@ -192,10 +192,21 @@ wrangler deploy > "$WORK/deploy3.log" 2>&1 || { cat "$WORK/deploy3.log"; exit 1;
 contains "an unchanged deploy changes nothing" "no changes" "$(tr 'A-Z' 'a-z' < "$WORK/deploy3.log")"
 
 # ---- Deleting the application takes ctx.container away.
+# Its images go from the registry; their tags first, then (registry GC) the layers.
+tags() {
+  local p t
+  p=$(auth -X POST "$API/accounts/$ACCOUNT/containers/registries/$REGISTRY/credentials" -d '{"expiration_minutes": 5, "permissions": ["pull"]}' | json '["result"]["password"]')
+  t=$(curl -s -u "v1:$p" "http://127.0.0.1:$API_PORT/registry/token?service=selvedge-registry&scope=repository:$ACCOUNT/container-app-box:pull" | json '["token"]')
+  curl -s -H "Authorization: Bearer $t" "http://$REGISTRY/v2/$ACCOUNT/container-app-box/tags/list" | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('tags') or []))"
+}
+TAGS_BEFORE=$(tags)
+[ "$TAGS_BEFORE" -gt 0 ] && echo "ok   the application has $TAGS_BEFORE tags in the registry" || { echo "FAIL no tags before deleting"; FAILED=1; exit 1; }
 ID=$(auth "$API/accounts/$ACCOUNT/containers/applications" | json '["result"][0]["id"]')
 check "the application can be deleted" "True" "$(auth -X DELETE "$API/accounts/$ACCOUNT/containers/applications/$ID" | json '["success"]')"
 for _ in $(seq 1 40); do [ "$(instances | wc -l)" = 0 ] && break; sleep 0.5; done
 check "its instances are removed" "0" "$(instances | wc -l | tr -d ' ')"
+for _ in $(seq 1 20); do [ "$(tags)" = 0 ] && break; sleep 0.5; done
+check "and its images" "0" "$(tags)"
 
 METRICS=$(curl -s "http://$SELVEDGE_METRICS_LISTEN/metrics")
 contains "container starts are counted" 'selvedge_container_starts_total{result="created"}' "$METRICS"

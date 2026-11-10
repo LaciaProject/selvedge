@@ -249,12 +249,13 @@ P1 已经实现，代码在 `crates/selvedge-server/src/{containers,agent/docker
 5. **出站中转按来源地址识别实例**。`GET /networks/bridge` 把网关报成 `127.0.0.1`，workerd 的出站监听只开在回环地址上；边车连 runner 的 8791 端口，中转按来源 IP 找到实例，只交给该实例自己的出站监听。NetworkPolicy 只能做到"只连 runner"，跨账号隔离靠这一层。
 6. **拉取凭证**。控制组件为每个实例生成只读、只覆盖该账号仓库的短期凭证，放进归 Pod 所有的 pull secret。仓库可以用 chart 捆绑的 CNCF distribution，也可以接运营方自己的。
 7. **契约测试**（§9 第 4 点）。没有单独做录制回放：`test/e2e/containers.sh` 用真实的 wrangler 和 workerd 跑完整流程，每天的 workerd 升级工作流会跑它；垫片不认识的调用一律 501 并计入 `selvedge_agent_container_unsupported_total`，workerd 换了用法会直接表现为测试失败。
-8. **没有做的**：删除应用时不删镜像（初稿说删 tag），由仓库的 GC 处理；`exec`、快照、TERM/INT/QUIT/KILL 以外的信号返回 501；没有镜像预拉取。
+8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收。
+9. **没有做的**：`exec`、快照、TERM/INT/QUIT/KILL 以外的信号返回 501；没有镜像预拉取。
 
 **测试**
 
-- 单节点（CI `e2e`）：wrangler 构建、推送、部署，token 服务的权限范围，启动、入站、环境变量、CA，出站（默认不通、HTTP 和 HTTPS 拦截、`enableInternet`、拒绝链路本地地址），`max_instances` 和拒绝其他镜像，退出码，销毁和重启，换镜像后的 rollout，删除应用，监控指标。
-- Kubernetes（CI `kind-containers`，kind 加 kata-deploy 4.3.1，GitHub 托管机器的嵌套虚拟化）：节点用实例自己的凭证从捆绑仓库拉取镜像；实例跑在 `kata-qemu` 里、有自己的内核；不挂 token、归 runner Pod 所有；入站、HTTP 和 HTTPS 出站拦截、`enableInternet`，workerd 拒绝集群地址；NetworkPolicy；runner Pod 删除后实例随之回收，DO 在新 runner 上重新启动容器；删除应用后实例和 pull secret 都被清理。
+- 单节点（CI `e2e`）：wrangler 构建、推送、部署，token 服务的权限范围，启动、入站、环境变量、CA，出站（默认不通、HTTP 和 HTTPS 拦截、`enableInternet`、拒绝链路本地地址），`max_instances` 和拒绝其他镜像，退出码，销毁和重启，换镜像后的 rollout，删除应用及其镜像，监控指标。
+- Kubernetes（CI `kind-containers`，kind 加 kata-deploy 4.3.1，GitHub 托管机器的嵌套虚拟化）：节点用实例自己的凭证从捆绑仓库拉取镜像；实例跑在 `kata-qemu` 里、有自己的内核；不挂 token、归 runner Pod 所有；入站、HTTP 和 HTTPS 出站拦截、`enableInternet`，workerd 拒绝集群地址；NetworkPolicy；runner Pod 删除后实例随之回收，DO 在新 runner 上重新启动容器；删除应用后实例、pull secret 和仓库里的镜像都被清理。
 
 | 冷启动（kind + Kata，嵌套虚拟化，三次运行） | 耗时 |
 | --- | --- |

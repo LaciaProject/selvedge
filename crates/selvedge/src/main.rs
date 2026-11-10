@@ -108,6 +108,10 @@ struct RegistryArgs {
     /// it. Enables the containers API; images live under <host>/<account id>/.
     #[arg(long, env = "SELVEDGE_REGISTRY_HOST")]
     registry_host: Option<String>,
+    /// Where the API reaches the registry, to delete a deleted application's
+    /// images. Default: https://<registry host>.
+    #[arg(long, env = "SELVEDGE_REGISTRY_URL")]
+    registry_url: Option<String>,
     /// PEM file with the ECDSA P-256 key that signs registry tokens.
     #[arg(long, env = "SELVEDGE_REGISTRY_TOKEN_KEY")]
     registry_token_key: Option<PathBuf>,
@@ -508,6 +512,11 @@ fn containers_config(
         _ => anyhow::bail!("--registry-token-key and --registry-token-cert go together"),
     };
     Ok(Some(selvedge_server::api::containers::ContainersConfig {
+        registry_url: a
+            .registry_url
+            .clone()
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| format!("https://{host}")),
         registry_host: host,
         signer,
         credentials: Credentials::new(internal_token),

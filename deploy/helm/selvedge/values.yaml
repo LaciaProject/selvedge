@@ -187,6 +187,10 @@ containers:
     # The API's token endpoint, as clients and nodes reach it: the API's
     # public URL followed by /registry/token.
     tokenRealm: ""
+    # Where the API reaches the registry to delete a deleted application's
+    # images (the registry must allow deletes). Empty: the bundled
+    # registry's Service, or https://<host>.
+    url: ""
     # The registry's auth.token.issuer and auth.token.service.
     tokenIssuer: selvedge
     tokenService: selvedge-registry

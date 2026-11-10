@@ -170,6 +170,18 @@ impl TokenSigner {
                 (!granted.is_empty()).then(|| json!({ "type": ty, "name": name, "actions": granted }))
             })
             .collect();
+        self.sign_access(account, access, now)
+    }
+
+    /// A token for the API itself to delete `repository`'s manifests: pull
+    /// and delete on that one repository, which must be the account's.
+    pub fn delete_token(&self, account: &AccountId, repository: &str, now: u64) -> Option<String> {
+        repository.strip_prefix(&format!("{account}/")).filter(|r| !r.is_empty())?;
+        let access = vec![json!({ "type": "repository", "name": repository, "actions": ["pull", "delete"] })];
+        Some(self.sign_access(account, access, now))
+    }
+
+    fn sign_access(&self, account: &AccountId, access: Vec<serde_json::Value>, now: u64) -> String {
         let header = json!({ "typ": "JWT", "alg": "ES256", "x5c": [self.certificate] });
         let claims = json!({
             "iss": self.issuer,
@@ -196,6 +208,61 @@ impl TokenSigner {
     pub const fn ttl() -> u64 {
         TOKEN_TTL
     }
+}
+
+/// Manifest media types, so that the registry answers a tag with the digest
+/// it was pushed as, whatever its kind.
+const MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, \
+    application/vnd.oci.image.manifest.v1+json, \
+    application/vnd.docker.distribution.manifest.list.v2+json, \
+    application/vnd.docker.distribution.manifest.v2+json";
+
+/// Deletes every tagged manifest of `repository` (`<account id>/<name>`) in
+/// the registry at `url`, which removes its tags; the registry's garbage
+/// collection then frees the layers. Answers how many manifests went.
+pub async fn delete_repository(
+    http: &reqwest::Client,
+    url: &str,
+    signer: &TokenSigner,
+    account: &AccountId,
+    repository: &str,
+) -> Result<usize> {
+    let token = signer.delete_token(account, repository, now()).context("not the account's repository")?;
+    let base = format!("{}/v2/{repository}", url.trim_end_matches('/'));
+    let resp = http.get(format!("{base}/tags/list")).bearer_auth(&token).send().await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(0);
+    }
+    if !resp.status().is_success() {
+        bail!("listing the tags of {repository}: {}", resp.status());
+    }
+    let tags: Vec<String> = resp
+        .json::<serde_json::Value>()
+        .await?
+        .get("tags")
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+    let mut digests = Vec::new();
+    for tag in &tags {
+        let resp = http
+            .head(format!("{base}/manifests/{tag}"))
+            .bearer_auth(&token)
+            .header("accept", MANIFEST_TYPES)
+            .send()
+            .await?;
+        if let Some(d) = resp.headers().get("docker-content-digest").and_then(|v| v.to_str().ok()) {
+            if !digests.iter().any(|x| x == d) {
+                digests.push(d.to_owned());
+            }
+        }
+    }
+    for digest in &digests {
+        let resp = http.delete(format!("{base}/manifests/{digest}")).bearer_auth(&token).send().await?;
+        if !(resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND) {
+            bail!("deleting {repository}@{digest}: {}", resp.status());
+        }
+    }
+    Ok(digests.len())
 }
 
 fn der(tag: u8, content: &[u8]) -> Vec<u8> {
@@ -237,6 +304,19 @@ mod tests {
     }
 
     #[test]
+    fn delete_tokens_cover_one_repository_of_the_account() {
+        let signer = test_signer();
+        assert!(signer.delete_token(&account(), "0123456789abcdef0123456789abcdef/app", 1).is_some());
+        assert!(signer.delete_token(&account(), "ffffffffffffffffffffffffffffffff/app", 1).is_none());
+        assert!(signer.delete_token(&account(), "0123456789abcdef0123456789abcdef/", 1).is_none());
+        let token = signer.delete_token(&account(), "0123456789abcdef0123456789abcdef/app", 1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(claims["access"][0]["actions"], json!(["pull", "delete"]));
+    }
+
+    #[test]
     fn credentials_round_trip() {
         let c = Credentials::new("token");
         let p = c.issue(&account(), Permissions { pull: true, push: true }, 1000);
@@ -266,13 +346,12 @@ AwEHoUQDQgAEnUT1/x2WtZB3XGazcA3A4p2qOmb57Lrw3VTNj+GJr6Zh8bsjappP
             .unwrap();
     }
 
-    #[test]
-    fn tokens_cover_only_the_account() {
+    fn test_signer() -> TokenSigner {
         let pkcs8 = match PrivateKeyDer::from_pem_slice(KEY.as_bytes()).unwrap() {
             PrivateKeyDer::Sec1(k) => sec1_to_pkcs8(k.secret_sec1_der()),
             _ => unreachable!(),
         };
-        let signer = TokenSigner {
+        TokenSigner {
             key: EcdsaKeyPair::from_pkcs8(
                 &ECDSA_P256_SHA256_FIXED_SIGNING,
                 &pkcs8,
@@ -282,7 +361,12 @@ AwEHoUQDQgAEnUT1/x2WtZB3XGazcA3A4p2qOmb57Lrw3VTNj+GJr6Zh8bsjappP
             certificate: "Y2VydA==".into(),
             issuer: "selvedge".into(),
             service: "registry".into(),
-        };
+        }
+    }
+
+    #[test]
+    fn tokens_cover_only_the_account() {
+        let signer = test_signer();
         let scopes = vec![
             format!("repository:{}/app:pull,push", account()),
             "repository:ffffffffffffffffffffffffffffffff/app:pull".to_owned(),

@@ -29,6 +29,9 @@ pub struct ContainersConfig {
     /// The registry's host (and port), as image references name it. Images
     /// must live under `<host>/<account id>/`.
     pub registry_host: String,
+    /// Where the API reaches the registry itself, to delete a deleted
+    /// application's images (`https://<host>` unless set).
+    pub registry_url: String,
     /// Signs registry tokens; without it, credentials cannot be used.
     pub signer: Option<TokenSigner>,
     pub credentials: Credentials,
@@ -313,8 +316,42 @@ async fn remove(
     Path((account, app)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let id = account_access(&state, &caller, &account).await?;
+    let cfg = config(&state)?;
+    let Some(existing) = state.db.container_app(&id, &app).await? else { return Err(not_found()) };
     if !state.db.delete_container_app(&id, &app).await? {
         return Err(not_found());
+    }
+    // Its images go too, unless another application uses the repository.
+    let repository = split_image(&existing.image)
+        .filter(|(host, _, _)| *host == cfg.registry_host)
+        .map(|(_, repo, _)| repo.to_owned());
+    if let (Some(repository), Some(_)) = (repository, &cfg.signer) {
+        let shared = state.db.container_apps(&id).await?.iter().any(|a| {
+            split_image(&a.image).is_some_and(|(h, r, _)| h == cfg.registry_host && r == repository)
+        });
+        if !shared {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let Some(cfg) = state.containers.as_ref() else { return };
+                let Some(signer) = cfg.signer.as_ref() else { return };
+                match crate::registry::delete_repository(
+                    &state.http,
+                    &cfg.registry_url,
+                    signer,
+                    &id,
+                    &repository,
+                )
+                .await
+                {
+                    Ok(n) => {
+                        tracing::info!(account = %id, %repository, manifests = n, "deleted a removed application's images")
+                    }
+                    Err(e) => {
+                        tracing::warn!(account = %id, %repository, error = %format!("{e:#}"), "deleting a removed application's images failed")
+                    }
+                }
+            });
+        }
     }
     Ok(ok(Value::Null))
 }
@@ -437,6 +474,7 @@ mod tests {
     fn cfg() -> ContainersConfig {
         ContainersConfig {
             registry_host: "registry.test".into(),
+            registry_url: "https://registry.test".into(),
             signer: None,
             credentials: Credentials::new("t"),
             max_instance: Resources { vcpu: 1.0, memory_mib: 1024, disk_mb: 4000 },

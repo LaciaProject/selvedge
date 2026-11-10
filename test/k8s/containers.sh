@@ -128,6 +128,15 @@ curl -sf -X DELETE -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/con
 wait_count 0 120
 check "deleting the application removes its instances" "0" "$(count)"
 check "and their pull secrets" "0" "$($K get secrets -l selvedge.dev/component=container --no-headers 2>/dev/null | grep -c . || true)"
+tags() {
+  local p t
+  p=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -X POST \
+    "$API/accounts/$ACCOUNT/containers/registries/$REGISTRY/credentials" -d '{"expiration_minutes": 5, "permissions": ["pull"]}' | json '["result"]["password"]')
+  t=$(curl -s -u "v1:$p" "localhost:30787/registry/token?service=selvedge-registry&scope=repository:$ACCOUNT/container-app-box:pull" | json '["token"]')
+  curl -s -H "Authorization: Bearer $t" "http://$REGISTRY/v2/$ACCOUNT/container-app-box/tags/list" | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('tags') or []))"
+}
+for _ in $(seq 1 30); do [ "$(tags)" = 0 ] && break; sleep 1; done
+check "and its images in the bundled registry" "0" "$(tags)"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

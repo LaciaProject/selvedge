@@ -172,6 +172,7 @@ spec:
           env:
             - { name: REGISTRY_HTTP_ADDR, value: "0.0.0.0:5000" }
             - { name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY, value: /var/lib/registry }
+            # The API deletes a deleted application's manifests.
             - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
             - { name: REGISTRY_AUTH, value: token }
             - { name: REGISTRY_AUTH_TOKEN_REALM, value: {{ include "selvedge.registryTokenRealm" . | quote }} }

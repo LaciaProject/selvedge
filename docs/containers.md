@@ -144,5 +144,8 @@ own Durable Object.
   reason, start duration, and Docker API calls the shim does not implement. That last one is the
   canary for a workerd upgrade that changes how workerd drives containers; the end-to-end tests in
   CI, which the workerd update workflow runs, cover the same.
-- **Images.** Deleting an application does not delete its images; run the registry's garbage
-  collection to reclaim space.
+- **Images.** Deleting an application deletes its repository's manifests (unless another of the
+  account's applications uses the same repository), so its tags are gone at once. Layers stay
+  on disk until the registry's garbage collection runs (`registry garbage-collect
+  --delete-untagged`); schedule it. With your own registry, allow deletes and set
+  `containers.registry.url` if the API cannot reach it at `https://<host>`.

@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-v0.1.1 是第一个发布版本：镜像 `ghcr.io/laciaproject/selvedge:0.1.1`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品。）代码分 20 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+最新发布是 v0.2.0，带来 Containers：镜像 `ghcr.io/laciaproject/selvedge:0.2.0`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 30 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |
@@ -38,6 +38,14 @@ v0.1.1 是第一个发布版本：镜像 `ghcr.io/laciaproject/selvedge:0.1.1`�
 | [#18](https://github.com/LaciaProject/selvedge/pull/18) | D1 导出和文件导入 |
 | [#19](https://github.com/LaciaProject/selvedge/pull/19) | R2 生命周期规则 |
 | [#20](https://github.com/LaciaProject/selvedge/pull/20) | R2 S3 接口的虚拟主机寻址 |
+| [#21](https://github.com/LaciaProject/selvedge/pull/21)–[#23](https://github.com/LaciaProject/selvedge/pull/23) | 本文档更新到 #20；发布工作流的镜像路径改小写；v0.1.1 |
+| [#24](https://github.com/LaciaProject/selvedge/pull/24) | 卡死检测：账号进程 30 秒不响应就杀掉重启 |
+| [#25](https://github.com/LaciaProject/selvedge/pull/25) | workerd 1.20261109.1：进程停止前先交接 Durable Object |
+| [#26](https://github.com/LaciaProject/selvedge/pull/26) | 组件之间复用连接，加请求路径基准测试 |
+| [#27](https://github.com/LaciaProject/selvedge/pull/27) | 每个组件的 Prometheus 指标 |
+| [#28](https://github.com/LaciaProject/selvedge/pull/28) | 每天自动检查 workerd 新版本 |
+| [#29](https://github.com/LaciaProject/selvedge/pull/29) | RFC 0002：Containers（沙箱选用 Kata） |
+| [#30](https://github.com/LaciaProject/selvedge/pull/30) | Containers：实现 RFC 0002，含 `exec()`、Helm 和 Kata 集群测试；v0.2.0 |
 
 CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请求：
 

@@ -287,11 +287,18 @@ impl KubeBackend {
                         match data[0] {
                             1 if spec.stdout => { let _ = output.send(Output::Stdout(payload)).await; }
                             2 if spec.stderr => { let _ = output.send(Output::Stderr(payload)).await; }
-                            3 => status = serde_json::from_slice::<Value>(&payload).ok(),
+                            3 => {
+                                status = serde_json::from_slice::<Value>(&payload).ok();
+                                tracing::debug!(instance = %id, ?status, "exec status");
+                            }
                             _ => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        tracing::debug!(instance = %id, ?frame, ?status, "exec stream closed");
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         if status.is_none() {
@@ -305,6 +312,7 @@ impl KubeBackend {
                         sink.send(Message::Binary([&[0u8][..], &b].concat().into())).await?;
                     }
                     Some(Input::CloseStdin) => {
+                        tracing::debug!(instance = %id, v5, "exec stdin closed");
                         // v4 cannot close stdin: the command reads on.
                         if v5 {
                             sink.send(Message::Binary(vec![255u8, 0].into())).await?;

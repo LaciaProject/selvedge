@@ -213,6 +213,9 @@ containers:
     nodeSelector: {}
     tolerations: []
 
+# RUST_LOG for every component, e.g. info,selvedge_server::containers=debug.
+logLevel: info
+
 # Spread replicas over zones (on by default in `ha`).
 topologySpread:
   enabled: null

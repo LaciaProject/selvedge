@@ -135,8 +135,11 @@ jobs:
           kubectl -n selvedge get pods -o wide
           kubectl -n selvedge get events --sort-by=.lastTimestamp | tail -60
           kubectl -n selvedge describe pods -l selvedge.dev/component=container | tail -80 || true
+          for p in $(kubectl -n selvedge get pods -l selvedge.dev/component=container -o name); do
+            echo "=== processes in $p"; kubectl -n selvedge exec "$p" -c app -- ps -o pid,stat,args || true
+          done
           kubectl -n selvedge get networkpolicy -o yaml | grep -A40 'name: slv-container-instances' | head -60 || true
           for c in api containers runner registry; do
-            echo "=== $c"; kubectl -n selvedge logs -l app.kubernetes.io/component=$c --tail=120 --all-containers --prefix || true
+            echo "=== $c"; kubectl -n selvedge logs -l app.kubernetes.io/component=$c --tail=300 --all-containers --prefix | grep -v healthz || true
           done
           docker exec selvedge-control-plane sh -c 'journalctl --no-pager -u containerd -n 200 | grep -iE "error|fail|pull" | tail -60' || true

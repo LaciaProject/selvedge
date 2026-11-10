@@ -78,7 +78,7 @@ topologySpreadConstraints:
 - name: SELVEDGE_INTERNAL_TOKEN
   valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: internal-token } }
 - name: RUST_LOG
-  value: info
+  value: {{ .Values.logLevel | default "info" | quote }}
 {{- if .Values.metrics.enabled }}
 - name: SELVEDGE_METRICS_LISTEN
   value: 0.0.0.0:{{ .Values.metrics.port }}

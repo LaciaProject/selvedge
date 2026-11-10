@@ -2,6 +2,7 @@
 # the bundled registry at localhost:30500 and the API's token endpoint at
 # localhost:30787 (NodePorts mapped to the same ports on the host).
 image: { repository: selvedge, tag: ci, pullPolicy: Never }
+logLevel: info,selvedge_server::containers=debug,selvedge_server::agent::dockershim=debug
 gateway: { service: { type: ClusterIP } }
 runner:
   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }

@@ -652,6 +652,8 @@ where
         // The agent went away: nothing more will come in.
         let _ = in_tx.send(exec::Input::CloseStdin).await;
     });
+    let began = Instant::now();
+    tracing::debug!(instance = %id, cmd = ?spec.cmd, tty = spec.tty, stdin = spec.stdin, "exec started");
     let run = backend.exec(id, spec, exec::ExecIo { input: in_rx, output: out_tx });
     let forward = async {
         while let Some(o) = out_rx.recv().await {
@@ -667,6 +669,7 @@ where
         }
     };
     let (result, ()) = tokio::join!(run, forward);
+    tracing::debug!(instance = %id, result = ?result.as_ref().map_err(|e| format!("{e:#}")), took = ?began.elapsed(), "exec ended");
     let exit = match result {
         Ok(code) => exec::Exit { exit_code: Some(code), error: None },
         Err(e) => {

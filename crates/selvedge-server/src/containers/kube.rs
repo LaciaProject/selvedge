@@ -282,7 +282,10 @@ impl KubeBackend {
         loop {
             tokio::select! {
                 msg = stream.next() => match msg {
-                    Some(Ok(Message::Binary(data))) if !data.is_empty() => {
+                    // Kubernetes sends empty messages on a stream as it
+                    // closes. Passed on, they would be frames for workerd to
+                    // write into an output nobody may be reading.
+                    Some(Ok(Message::Binary(data))) if data.len() > 1 || data.first() == Some(&3) => {
                         let payload = bytes::Bytes::copy_from_slice(&data[1..]);
                         match data[0] {
                             1 if spec.stdout => { let _ = output.send(Output::Stdout(payload)).await; }
@@ -299,6 +302,9 @@ impl KubeBackend {
                         break;
                     }
                     None => break,
+                    Some(Ok(Message::Binary(data))) => {
+                        tracing::debug!(instance = %id, channel = ?data.first(), "an empty exec message");
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         if status.is_none() {

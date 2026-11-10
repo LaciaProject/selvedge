@@ -1297,6 +1297,9 @@ async fn bridge_exec<U, D>(
     let mut exit = None;
     loop {
         match exec::read_frame(&mut ur).await {
+            // workerd writes every frame into the output stream, which the
+            // Worker may never read: an empty one would block it for good.
+            Ok(Some((exec::STDOUT | exec::STDERR, payload))) if payload.is_empty() => {}
             Ok(Some((kind @ (exec::STDOUT | exec::STDERR), payload))) => {
                 if let Some(w) = dw.as_mut() {
                     let r = if tty {

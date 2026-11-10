@@ -142,6 +142,9 @@ pub fn input_of(kind: u8, payload: Bytes) -> Option<Input> {
 /// Answers when the stream ends or `output` is closed.
 pub async fn demux<R: AsyncRead + Unpin>(r: &mut R, output: &mpsc::Sender<Output>) -> Result<()> {
     while let Some((kind, payload)) = read_frame(r).await? {
+        if payload.is_empty() {
+            continue;
+        }
         let o = match kind {
             STDERR => Output::Stderr(payload),
             _ => Output::Stdout(payload),

@@ -139,6 +139,10 @@ struct Exec {
 #[derive(Default)]
 struct ExecState {
     started: bool,
+    /// What inspect reports as its PID once started. workerd waits for a
+    /// non-zero one; the process's real PID is the container's business
+    /// (workerd's kill() finds it inside), so this is a counter.
+    pid: u32,
     running: bool,
     exit_code: Option<i32>,
     finished: Option<Instant>,
@@ -160,6 +164,7 @@ pub struct Shim {
     /// as the command.
     exec_http: reqwest::Client,
     execs: Mutex<HashMap<String, Arc<Exec>>>,
+    exec_pids: std::sync::atomic::AtomicU32,
     /// To instances' sidecars.
     sidecars: reqwest::Client,
     boxes: Mutex<HashMap<String, Arc<ContainerBox>>>,
@@ -253,6 +258,7 @@ impl Shim {
                 .build()
                 .expect("HTTP client"),
             execs: Mutex::new(HashMap::new()),
+            exec_pids: std::sync::atomic::AtomicU32::new(1000),
             // The sidecar closes a connection after each answer.
             sidecars: reqwest::Client::builder()
                 .pool_max_idle_per_host(0)
@@ -545,7 +551,7 @@ impl Shim {
                                 "ContainerID": e.container,
                                 "Running": st.running,
                                 "ExitCode": st.exit_code,
-                                "Pid": 0,
+                                "Pid": st.pid,
                             }),
                         )
                     }
@@ -687,6 +693,7 @@ impl Shim {
         {
             let mut st = e.state.lock().expect("poisoned");
             st.running = true;
+            st.pid = self.exec_pids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             st.input = Some(tx.clone());
         }
         let tty = spec.tty;
@@ -1307,9 +1314,14 @@ async fn bridge_exec<U, D>(
                 break;
             }
             Ok(Some(_)) => {}
-            Ok(None) | Err(_) => break,
+            Ok(None) => break,
+            Err(err) => {
+                tracing::debug!(container = %e.container, error = %format!("{err:#}"), "reading an exec's output failed");
+                break;
+            }
         }
     }
+    tracing::debug!(container = %e.container, ?exit, attached = dw.is_some(), "an exec's output ended");
     let code = match exit {
         Some(exec::Exit { exit_code: Some(code), .. }) => code,
         other => {
@@ -1336,7 +1348,8 @@ async fn bridge_exec<U, D>(
         st.input = None;
     }
     if let Some(mut w) = dw {
-        let _ = w.shutdown().await;
+        let r = w.shutdown().await;
+        tracing::debug!(container = %e.container, result = ?r, "closed an exec's stream to workerd");
     }
     if let Some(s) = stdin {
         s.abort();

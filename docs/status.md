@@ -55,7 +55,8 @@ CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请�
 - `rust`：单元测试；
 - `e2e`：单节点、双 runner 集群、root 模式（每个账号切换到独立用户运行）、开启 mTLS 的集群；
 - `kind-ha`：3 可用区 Kubernetes 高可用测试；
-- `kind-containers`：容器跑在 Kata 虚拟机里的 Kubernetes 测试，覆盖镜像推送和拉取、出站隔离、NetworkPolicy、随 runner 回收。单节点的 Docker 版容器测试在 `e2e` 里。
+- `kind-containers`：容器跑在 Kata 虚拟机里的 Kubernetes 测试，覆盖镜像推送和拉取、出站隔离、NetworkPolicy、随 runner 回收。单节点的 Docker 版容器测试在 `e2e` 里；
+- `kind-upgrade`：先装上一个发布版本（GHCR 上的 chart 和镜像），写入各类数据（KV、密钥、R2、DO 存储、D1、队列积压、等待事件的 Workflow、静态资源），然后在压测下 `helm upgrade` 到当前代码，检查数据都在、升级后能继续部署，再滚动重启新版本的网关、数据服务和 API，要求一个请求都不失败。
 
 ## 已实现功能
 
@@ -85,11 +86,13 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 在 3 可用区的 kind 集群上开启 mTLS 测试：
 
 - 滚动重启期间发出 57 个请求，没有一个失败；
-- 断掉一个可用区时，17 个无状态请求失败 1 个，是被杀节点上正在处理的那个。
+- 断掉一个可用区时，17 个无状态请求失败 1 个，是被杀节点上正在处理的那个；
+- 滚动重启网关、数据服务和 API 期间发出 311 个请求，没有一个失败。从 v0.3.0 升级时 200 个无状态请求失败 3 个：被换掉的是旧版本的网关，它们停止时还不会排空。
 
 **高可用**
 
 - API、网关、数据服务和 runner 都是多副本，分散在不同可用区。状态只存在 PostgreSQL 和 S3 里。
+- 网关停止时先排空：收到 SIGTERM 后健康检查失败，但继续服务 5 秒（`gateway.drainDelaySeconds`），让 kube-proxy 和负载均衡先把新连接转走；然后不再接受连接，等正在处理的请求完成（最多 20 秒）再退出。
 - runner 在本地缓存配置和静态资源，数据服务不可用时，已部署的 Worker 照常服务。
 - 每个 Durable Object 同一时间只有一个所属进程。正常关闭（如滚动升级、超内存重启）时，workerd 逐个交接对象：先让对象上正在处理的请求完成（最多 4 秒），再交给下一个请求所在的进程；进程崩溃或被杀而 agent 还在时，由 agent 代它放弃租约，对象约 1 秒内转移；整个 runner 宕机时要等租约过期，最多约 20 秒。
 - Cron 和 Queues 靠数据库里的抢占和租约避免重复执行。副本崩溃后租约过期，消息会重新投递。

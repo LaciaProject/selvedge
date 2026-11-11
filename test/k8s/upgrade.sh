@@ -145,11 +145,11 @@ sleep 10
 touch "$WORK/stop"; wait
 report() {
   read -r F T < "$WORK/$1.out"
-  echo "     $2 during the upgrade: $F of $T failed"
+  echo "     $2: $F of $T failed"
   [ -f "$WORK/$1.codes" ] && sed 's/^/       /' "$WORK/$1.codes" | head -20 || true
 }
-report kv "stateless requests"
-report do "Durable Object requests"
+report kv "stateless requests during the upgrade"
+report do "Durable Object requests during the upgrade"
 read -r KV_FAILS _ < "$WORK/kv.out"
 # The gateways that stop during an upgrade run the old release. Up to 0.3.0
 # they stopped without draining, dropping the requests on them and refusing
@@ -194,8 +194,11 @@ report kv "stateless requests while this build's gateways, data and API restart"
 read -r KV_FAILS _ < "$WORK/kv.out"
 check "no stateless request failed while they restarted" "0" "$KV_FAILS"
 
-COUNT=$(auth "$API/accounts/$ACCOUNT/storage/kv/namespaces/$NAMESPACE/values/count")
 render after
 wr deploy > "$WORK/deploy2.log" 2>&1 || { cat "$WORK/deploy2.log"; exit 1; }
-check "the upgraded cluster deploys" "after #$((COUNT + 1))" "$(until_ok kv-app / "after #$((COUNT + 1))")"
+# Until the new version is everywhere, requests still reach the old one.
+out=""
+for _ in $(seq 1 60); do out=$(get kv-app / || true); [[ $out == "after #"* ]] && break; sleep 1; done
+check "the upgraded cluster deploys, and the new version goes on from KV" \
+  "after #$(auth "$API/accounts/$ACCOUNT/storage/kv/namespaces/$NAMESPACE/values/count")" "$out"
 echo "all upgrade checks passed ($UPGRADE_FROM -> this build)"

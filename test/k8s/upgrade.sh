@@ -5,10 +5,11 @@
 # component rolls (API, data, gateway, runner) and the database migrates while
 # the old version still runs.
 #
-# Checks: no stateless request fails during the upgrade; Durable Objects come
-# back; and the data written before is all there afterwards (KV, a secret, R2,
-# Durable Object storage, D1, a queue's backlog, a workflow waiting for its
-# event), and the upgraded cluster deploys again.
+# Checks: no stateless request fails during the upgrade (a few may, from
+# releases whose gateways did not drain); the data written before is all there
+# afterwards (KV, a secret, R2, Durable Object storage, D1, a queue's backlog,
+# a workflow waiting for its event, static assets); restarting the new
+# gateways, data and API drops nothing; and the upgraded cluster deploys.
 #
 # Expects UPGRADE_FROM (the release, e.g. 0.3.0) installed as `slv` in
 # namespace `selvedge` with test/k8s/values.yaml and the published image, on
@@ -150,7 +151,15 @@ report() {
 report kv "stateless requests"
 report do "Durable Object requests"
 read -r KV_FAILS _ < "$WORK/kv.out"
-check "no stateless request failed during the upgrade" "0" "$KV_FAILS"
+# The gateways that stop during an upgrade run the old release. Up to 0.3.0
+# they stopped without draining, dropping the requests on them and refusing
+# connections kube-proxy still sent; from those, a few failures are expected.
+if [ "$(printf '%s\n' "$UPGRADE_FROM" 0.3.0 | sort -V | head -1)" = "$UPGRADE_FROM" ]; then
+  echo "     $UPGRADE_FROM's gateways stop without draining: up to 10 failures allowed"
+  [ "$KV_FAILS" -le 10 ] || { echo "FAIL $KV_FAILS stateless requests failed during the upgrade"; exit 1; }
+else
+  check "no stateless request failed during the upgrade" "0" "$KV_FAILS"
+fi
 
 # ---- Everything written before is still there.
 check "the image is this build's" "selvedge:ci" "$(version runner)"
@@ -172,7 +181,21 @@ check "the waiting workflow completes after its event" "complete" \
   "$(for _ in $(seq 1 60); do s=$(wf_status); [ "$s" = complete ] && break; sleep 0.5; done; echo "$s")"
 check "static assets are still served" "$STYLE" "$(get assets-app /style.css)"
 
+# Restarting this build's stateless components drops nothing: gateways drain.
+rm -f "$WORK/stop" "$WORK"/*.codes
+load kv kv-app /
+for d in gateway data api; do
+  $K rollout restart "deploy/slv-$d" > /dev/null
+  $K rollout status "deploy/slv-$d" --timeout=300s > /dev/null
+done
+sleep 5
+touch "$WORK/stop"; wait
+report kv "stateless requests while this build's gateways, data and API restart"
+read -r KV_FAILS _ < "$WORK/kv.out"
+check "no stateless request failed while they restarted" "0" "$KV_FAILS"
+
+COUNT=$(auth "$API/accounts/$ACCOUNT/storage/kv/namespaces/$NAMESPACE/values/count")
 render after
 wr deploy > "$WORK/deploy2.log" 2>&1 || { cat "$WORK/deploy2.log"; exit 1; }
-check "the upgraded cluster deploys" "after #$((COUNT + 2))" "$(until_ok kv-app / "after #$((COUNT + 2))")"
+check "the upgraded cluster deploys" "after #$((COUNT + 1))" "$(until_ok kv-app / "after #$((COUNT + 1))")"
 echo "all upgrade checks passed ($UPGRADE_FROM -> this build)"

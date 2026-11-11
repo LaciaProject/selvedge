@@ -294,6 +294,84 @@ where
     });
 }
 
+/// Lets a server finish its connections when it stops. Each connection served
+/// with [`serve_connection_draining`] closes once the request it is on has
+/// been answered (at once if idle), and [`Drain::finish`] waits for all of
+/// them. Upgraded connections (WebSockets) are not waited for.
+pub struct Drain {
+    stop: tokio::sync::watch::Sender<bool>,
+    open: tokio::sync::mpsc::Sender<()>,
+    closed: tokio::sync::mpsc::Receiver<()>,
+}
+
+/// One connection's part in a [`Drain`]: it holds the drain open until the
+/// connection ends.
+pub struct DrainGuard {
+    stop: tokio::sync::watch::Receiver<bool>,
+    _open: tokio::sync::mpsc::Sender<()>,
+}
+
+impl Default for Drain {
+    fn default() -> Self {
+        let (stop, _) = tokio::sync::watch::channel(false);
+        let (open, closed) = tokio::sync::mpsc::channel(1);
+        Self { stop, open, closed }
+    }
+}
+
+impl Drain {
+    pub fn guard(&self) -> DrainGuard {
+        DrainGuard { stop: self.stop.subscribe(), _open: self.open.clone() }
+    }
+
+    /// Ask every connection to close after its current request, and wait up
+    /// to `limit` for them. Answers whether they all closed in time.
+    pub async fn finish(self, limit: Duration) -> bool {
+        let Self { stop, open, mut closed } = self;
+        let _ = stop.send(true);
+        drop(open);
+        // `recv` gives `None` once every connection's sender is gone.
+        tokio::time::timeout(limit, closed.recv()).await.is_ok()
+    }
+}
+
+/// [`serve_connection`], closing the connection gracefully when its drain
+/// finishes.
+pub fn serve_connection_draining<S, H, F>(stream: S, handler: Arc<H>, guard: DrainGuard)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    H: Fn(Request<Incoming>) -> F + Send + Sync + 'static,
+    F: Future<Output = Response<Body>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let DrainGuard { mut stop, _open } = guard;
+        let service = hyper::service::service_fn(move |req| {
+            let handler = handler.clone();
+            async move { Ok::<_, Infallible>(handler(req).await) }
+        });
+        let conn = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades();
+        tokio::pin!(conn);
+        let mut stopping = false;
+        loop {
+            tokio::select! {
+                res = conn.as_mut() => {
+                    if let Err(e) = res {
+                        tracing::debug!(error = %e, "client connection ended");
+                    }
+                    break;
+                }
+                // A dropped drain also stops the connection gracefully.
+                _ = stop.wait_for(|s| *s), if !stopping => {
+                    stopping = true;
+                    conn.as_mut().graceful_shutdown();
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -364,6 +442,43 @@ mod tests {
     async fn get(client: &reqwest::Client, front: &str) -> (u16, String) {
         let r = client.get(format!("http://{front}/")).send().await.unwrap();
         (r.status().as_u16(), r.text().await.unwrap())
+    }
+
+    /// A drain lets the request in progress finish, closes idle keep-alive
+    /// connections, and reports when they are all gone.
+    #[tokio::test]
+    async fn drain_finishes_requests_and_closes_idle_connections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let drain = Drain::default();
+        let handler = Arc::new(|req: Request<Incoming>| async move {
+            if req.uri().path() == "/slow" {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            full(StatusCode::OK, "done")
+        });
+        let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (s, _) = listener.accept().await.unwrap();
+        serve_connection_draining(s, handler.clone(), drain.guard());
+        let mut busy = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (s, _) = listener.accept().await.unwrap();
+        serve_connection_draining(s, handler, drain.guard());
+
+        // A keep-alive request on the idle connection, answered before the drain.
+        idle.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = idle.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).ends_with("done"));
+        // The slow one is in progress when the drain starts.
+        busy.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let finished = tokio::spawn(drain.finish(Duration::from_secs(5)));
+
+        let mut answer = String::new();
+        busy.read_to_string(&mut answer).await.unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("done"), "{answer}");
+        assert_eq!(idle.read(&mut buf).await.unwrap(), 0, "the idle connection is closed");
+        assert!(finished.await.unwrap(), "the drain saw every connection close");
     }
 
     #[tokio::test]

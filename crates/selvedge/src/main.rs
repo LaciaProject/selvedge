@@ -361,6 +361,9 @@ struct GatewayArgs {
     /// request.cf.colo: a name for this site.
     #[arg(long, env = "SELVEDGE_COLO")]
     colo: Option<String>,
+    /// Seconds to keep serving, unhealthy, after SIGTERM before draining.
+    #[arg(long, env = "SELVEDGE_DRAIN_DELAY", default_value_t = 5)]
+    drain_delay: u64,
 }
 
 #[derive(Args, Clone)]
@@ -804,6 +807,7 @@ async fn main() -> Result<()> {
                         h
                     },
                     colo: args.colo.filter(|c| !c.is_empty()),
+                    drain_delay: std::time::Duration::from_secs(args.drain_delay),
                 },
                 shutdown_signal(),
             )
@@ -1044,6 +1048,8 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
             trust_forwarded: false,
             cf_headers: vec![],
             colo: None,
+            // One process: nothing in front of it to move away first.
+            drain_delay: std::time::Duration::ZERO,
         },
         stop(&tx),
     ));

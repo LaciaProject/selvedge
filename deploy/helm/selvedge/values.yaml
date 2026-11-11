@@ -99,6 +99,11 @@ gateway:
     requests: { cpu: 100m, memory: 128Mi }
   # How many runners serve each account.
   accountReplicas: 2
+  # On shutdown, seconds to keep serving while health checks fail, so that
+  # kube-proxy and the load balancer stop sending new connections; then the
+  # gateway finishes the requests it is answering (up to 20 s) and exits.
+  # Raise it if your load balancer's health checks take longer to notice.
+  drainDelaySeconds: 5
   # Trust X-Forwarded-For/-Proto from the load balancer in front.
   trustForwarded: false
   # request.cf fields from headers the load balancer sets (needs

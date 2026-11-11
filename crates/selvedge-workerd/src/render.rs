@@ -129,7 +129,8 @@ pub struct ClusterOptions {
     pub key_hex: String,
     /// From SIGTERM to exit: the instance hands its Durable Objects to peers
     /// within three quarters of it, then deregisters. Killed sooner, it leaves
-    /// them to wait for its lease to expire (20 seconds).
+    /// them to wait for its lease to expire (20 seconds), unless the agent
+    /// gives the lease up once the process has exited.
     pub stop_timeout_ms: u32,
 }
 

@@ -186,21 +186,54 @@ if [ "${SELVEDGE_E2E_TLS:-}" = 1 ]; then
       -H "x-selvedge-account: $ACCOUNT" -H 'x-selvedge-script: counter' -H 'Host: nowhere.test' "http://127.0.0.1:$((P + 80))/")"
 fi
 
-# Durable Object storage goes through the agent's S3 proxy: workerd holds a
-# key for its own account only, which reaches only that account's prefix.
-PROXY=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/a2.log" | grep -o 'storage proxy listening addr=[0-9.:]*' | head -1 | cut -d= -f2)
-WPID=$(pgrep -f "^.*workerd serve.*$WORK/a2/" | head -1)
-check "workerd holds only its account's storage key" "$ACCOUNT no-real-secret" \
-  "$(tr '\0' '\n' < /proc/"$WPID"/environ | sed -n 's/^AWS_ACCESS_KEY_ID=//p') $(tr '\0' '\n' < /proc/"$WPID"/environ | grep -q "^AWS_SECRET_ACCESS_KEY=${DO_S3_SECRET:-any}$" && echo real-secret || echo no-real-secret)"
-OWN_KEY=$(tr '\0' '\n' < /proc/"$WPID"/environ | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')
+# Durable Object storage goes through the agent's S3 proxy: each workerd
+# process holds a key of its own, which reaches only its account's prefix.
+proxy_of() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/$1.log" | grep -o 'storage proxy listening addr=[0-9.:]*' | head -1 | cut -d= -f2; }
+wenv() { # runner, variable: from the environment of the runner's workerd
+  tr '\0' '\n' < /proc/"$(pgrep -f "^.*workerd serve.*$WORK/$1/a/$ACCOUNT/" | head -1)"/environ | sed -n "s/^$2=//p"
+}
+PROXY=$(proxy_of a2)
+OWN_ID=$(wenv a2 AWS_ACCESS_KEY_ID)
+OWN_KEY=$(wenv a2 AWS_SECRET_ACCESS_KEY)
+check "workerd holds only a storage key of its own" "$ACCOUNT no-real-secret" \
+  "${OWN_ID%-*} $([ "$OWN_KEY" = "${DO_S3_SECRET:-any}" ] && echo real-secret || echo no-real-secret)"
 OTHER=$(openssl rand -hex 16)
 PFX="cluster-$$"
-s3() { python3 "$ROOT/test/e2e/s3req.py" "http://$PROXY" "$ACCOUNT" "$1" "$2" "$3" "${4:-}"; }
+s3() { python3 "$ROOT/test/e2e/s3req.py" "http://$PROXY" "$OWN_ID" "$1" "$2" "$3" "${4:-}"; }
 check "the proxy lists the account's own prefix" "200" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$ACCOUNT/")"
 check "the proxy refuses another account's prefix" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$OTHER/")"
 check "the proxy refuses another account's objects" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/$PFX/$OTHER/v1/x")"
 check "the proxy refuses a bucket-wide listing" "403" "$(s3 "$OWN_KEY" GET "/$BUCKET/" "list-type=2")"
 check "the proxy refuses a bad signature" "403" "$(s3 "not-the-key" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$ACCOUNT/")"
+
+# Requests for objects a dead process owned fail (like Cloudflare's "Network
+# connection lost") until another process takes them over. A client retries;
+# no write may be lost or applied twice.
+retry_get() {
+  local out deadline=$(( $(date +%s) + 45 ))
+  while :; do
+    out=$(get "$1")
+    if [[ $out =~ ^[0-9]+$ ]] || [ "$(date +%s)" -ge "$deadline" ]; then echo "$out"; return; fi
+    sleep 0.5
+  done
+}
+
+# A workerd process that crashes while its agent runs: the agent gives up its
+# cluster lease, so its objects move at once rather than after the lease.
+for n in p1 p2 p3 p4 p5 p6 p7 p8; do get "/?name=$n" > /dev/null; done
+DEAD_ID=$(wenv a1 AWS_ACCESS_KEY_ID) DEAD_KEY=$(wenv a1 AWS_SECRET_ACCESS_KEY)
+pkill -9 -f "^.*workerd serve.*$WORK/a1/a/$ACCOUNT/"
+start_ms=$(date +%s%3N)
+for n in p1 p2 p3 p4 p5 p6 p7 p8; do
+  check "object $n survives its process crashing" "2" "$(retry_get "/?name=$n")"
+done
+took=$(( $(date +%s%3N) - start_ms ))
+echo "     every object was back within ${took}ms"
+check "...well within the cluster lease (20 seconds)" "yes" "$([ "$took" -le 8000 ] && echo yes || echo no)"
+check "the agent gave up the crashed process's lease" "yes" \
+  "$(grep -q 'gave up the cluster lease' "$WORK/a1.log" && echo yes || echo no)"
+check "the crashed process's storage key is refused" "403" \
+  "$(python3 "$ROOT/test/e2e/s3req.py" "http://$(proxy_of a1)" "$DEAD_ID" "$DEAD_KEY" GET "/$BUCKET/" "list-type=2&prefix=$PFX/$ACCOUNT/")"
 
 # A D1 database lives in a Durable Object too.
 DB=$(curl -sf -X POST "$API/accounts/$ACCOUNT/d1/database" -H "Authorization: Bearer $TOKEN" -d '{"name":"crash"}' | json '["result"]["uuid"]')
@@ -228,17 +261,8 @@ check "workflow instances start on two runners" "6" "$(printf '%s\n' "${WIDS[@]}
 for n in a b c d e f g h; do get "/?name=$n" > /dev/null; done
 kill -9 "$PID_a1"; pkill -9 -f "$WORK/a1/" || true
 start_ts=$(date +%s)
-# Requests for objects the dead runner owned fail (like Cloudflare's "Network
-# connection lost") until its lease expires and the survivor takes them over.
-# A client retries; no write may be lost or applied twice.
-retry_get() {
-  local out deadline=$(( $(date +%s) + 45 ))
-  while :; do
-    out=$(get "$1")
-    if [[ $out =~ ^[0-9]+$ ]] || [ "$(date +%s)" -ge "$deadline" ]; then echo "$out"; return; fi
-    sleep 0.5
-  done
-}
+# Objects the dead runner owned move once its lease expires: no agent is left
+# to give it up.
 for n in a b c d e f g h; do
   check "object $n survives a runner crash" "2" "$(retry_get "/?name=$n")"
 done

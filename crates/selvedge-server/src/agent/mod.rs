@@ -133,13 +133,13 @@ pub async fn run(cfg: AgentConfig, shutdown: impl std::future::Future<Output = (
     tracing::info!(workerd = %cfg.workerd.display(), %max_date, "agent starting");
     let cfg = Arc::new(cfg);
     // Durable Object storage goes through the agent's S3 proxy, so workerd
-    // processes hold only per-account credentials.
+    // processes hold only credentials of their own.
     let s3_proxy = match &cfg.cluster {
         Some(c) => {
-            let proxy = s3proxy::S3Proxy::new(c.upstream()?, &c.bucket, c.secret.clone())?;
-            let addr = proxy.serve(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+            let proxy = s3proxy::S3Proxy::new(c.upstream()?, &c.bucket)?;
+            let addr = proxy.clone().serve(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
             tracing::info!(%addr, "Durable Object storage proxy listening");
-            Some(addr)
+            Some((proxy, addr))
         }
         None => None,
     };

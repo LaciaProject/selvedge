@@ -159,6 +159,7 @@ v1 用 Postgres 足够，存储层做成接口，以后有需要再加 NATS JetS
   output gate 由 workerd 原生实现，所以对外的响应一定在数据持久化之后才发出。
   同一对象的并发提交合并上传，热点对象每组提交只上传一次。
 - **故障切换**：每个进程在对象存储里持有一个 20 秒的租约，每 3 秒续约。进程崩溃后，最长约 20 秒其他进程就能接管它的对象。
+  agent 还在时（只是 workerd 崩溃或被杀），agent 确认进程已退出、它经代理发出的存储请求都已返回后，像 workerd 正常退出时那样把租约记录的到期时间改成 0（条件写），对象约 1 秒内转移。agent 从代理流量里得知每个进程的租约记录：每个进程有自己的代理密钥。
   正常退出（SIGTERM）时进程会立即注销，对象可以马上被接管。
 - **路由**：进程之间各保持一条 Cap'n Proto 会话。请求发给非所有者时，workerd 会转给所有者，HTTP、WebSocket 和 JS RPC 都不变。
 - **Alarm**：存在对象存储里，节点故障后由其他节点接管。
@@ -303,7 +304,7 @@ Selvedge 只需要做配置生成、凭据和测试。
 | Workflows：官方 workers-sdk 的 Workflows 引擎（未修改，每个实例一个 DO，跟随 cluster 模式）、workerd 自带的 `workflows-api` 绑定模块；系统 worker `selvedge-workflows` 维护实例索引、对外提供 REST；不需要实验性标志 | 完成 | wrangler 部署和 `wrangler workflows` 的端到端测试；两 runner 测试中 runner 崩溃后等待事件的实例全部继续完成 |
 | 每账户 UID：agent 以只带六个 capability 的 root 运行，每个账户的 workerd 用独立 UID、无 capability，目录 0700、绑定 socket 0600；Helm 默认开启，可选 `hostUsers: false`；Pod 使用 `RuntimeDefault` seccomp | 完成 | 以 root 在容器里跑的单节点端到端测试（进程 UID、socket 和目录权限）；kind 测试默认开启 |
 | `request.cf` 由 gateway 设置，不再暴露 runner 本地 socket 的 PID/UID | 完成 | 端到端测试（含客户端伪造） |
-| 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 只拿到按账户派生的密钥；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |
+| 每账户对象存储凭据：DO 存储经 agent 内的 S3 代理，workerd 每个进程只拿到自己的一把密钥（进程结束即作废）；代理校验 SigV4、只放行本账户前缀和 cluster 模式用到的操作，再用真实凭据重新签名 | 完成 | AWS SigV4 测试向量；两 runner 测试：DO 正常读写和故障切换，越权前缀、整桶列举、错误签名均被拒绝，workerd 环境里没有真实密钥 |
 | R2 的 S3 兼容接口：data 服务上单独的监听端口，路径式寻址；SigV4（请求头和预签名 URL）、`aws-chunked` 请求体；对象、分段上传、列举、复制、条件读写；凭据同 Cloudflare（token id + token 的 SHA-256） | 完成 | 官方 AWS SDK 的 13 项端到端检查；S3 写入的对象可由 `wrangler r2` 读出 |
 | R2 公开访问：`pub-<id>.<zone>` 公开 URL（运营方配置 zone，相当于 r2.dev）和自定义域名（须在分配给该账号的 zone 内）；在 S3 端口上按 Host 匿名提供 GET/HEAD（范围读取、条件请求），不列目录；`wrangler r2 bucket dev-url`、`domain` 子命令 | 完成 | 端到端测试：开启、读取、范围、304、拒绝写入、关闭后不可读；自定义域名的添加、列出、越 zone 被拒、删除 |
 | R2 事件通知：规则按前缀、后缀和动作（`PutObject`、`CopyObject`、`CompleteMultipartUpload`、`DeleteObject`）把对象变更发到账号的队列，消息格式同 Cloudflare；绑定、S3 接口、`wrangler r2` 的写入都会触发；`wrangler r2 bucket notification` 子命令 | 完成（消息与对象写入在同一事务中入队，至少一次投递） | 端到端测试：PUT、复制、删除送达队列消费者，不匹配前缀的不发，删除规则后不再发 |

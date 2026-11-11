@@ -21,6 +21,7 @@ No metric carries an account or script id, so the number of series does not grow
 | `selvedge_agent_process_start_duration_seconds` | histogram | | From fetching an account's bundle to its sockets accepting. |
 | `selvedge_agent_process_stops_total` | counter | `reason` | `replaced` (deploy), `idle`, `memory` (over its limit), `hung` (failed its health probe for `--hang-timeout`), `removed` (no scripts left), `shutdown`. |
 | `selvedge_agent_process_exits_total` | counter | | Account processes that exited on their own: a crash, or the kernel's OOM killer in cgroup mode. |
+| `selvedge_agent_cluster_leases_given_up_total` | counter | | Cluster leases the agent gave up for account processes that ended without leaving the cluster (a crash, an OOM kill, a hung process killed), so that their Durable Objects moved at once instead of after the lease. |
 | `selvedge_agent_cpu_throttles_total` | counter | | Times an account process over its CPU share was given a lower priority. |
 | `selvedge_agent_binding_requests_total` | counter | `binding` (`kv`, `r2`, `queue`, `assets`, `other`), `code` (or `error`) | Binding calls the agent sent to the data service. Static assets served from the runner's cache are not counted. |
 | `selvedge_agent_container_start_duration_seconds` | histogram | `result` (`ok`, `error`) | From workerd asking for a container to its application running: scheduling, image pull, sandbox boot. |
@@ -33,8 +34,9 @@ No metric carries an account or script id, so the number of series does not grow
 Some useful alerts:
 
 - `increase(selvedge_agent_process_stops_total{reason="hung"}[10m]) > 0`: a Worker is stuck in a loop.
-- `increase(selvedge_agent_process_exits_total[10m]) > 0`: workerd crashed or was OOM-killed. Its Durable
-  Objects were unavailable for up to 20 seconds.
+- `increase(selvedge_agent_process_exits_total[10m]) > 0`: workerd crashed or was OOM-killed. Calls in
+  flight on its Durable Objects failed; the objects moved within about a second, as
+  `selvedge_agent_cluster_leases_given_up_total` shows.
 - `selvedge_gateway_healthy_runners < <runner replicas>`: a runner is failing its health checks.
 - A high share of 5xx in `selvedge_http_requests_total{component="gateway"}`.
 - `increase(selvedge_container_starts_total{result="error"}[10m]) > 0`: instances fail to start (image

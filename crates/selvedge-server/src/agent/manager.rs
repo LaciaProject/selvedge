@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::AgentConfig;
+use super::s3proxy::{Credentials, Retired, S3Proxy};
 
 /// How long a known generation is trusted before a request triggers a check.
 /// Deploys normally arrive sooner, through [`Manager::watch`].
@@ -32,12 +33,22 @@ const DRAIN_GRACE: Duration = Duration::from_secs(30);
 const LIMIT_GRACE: Duration = Duration::from_secs(3);
 /// workerd's `stopTimeoutMs` in cluster mode: from SIGTERM, it hands each
 /// Durable Object to a peer, letting requests in flight finish, then leaves the
-/// cluster and exits. Killing it sooner leaves objects for the lease (20 s).
+/// cluster and exits. Killed sooner, it leaves the objects it has not handed
+/// off until the agent gives its lease up.
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a cluster-mode process gets past its own stop timeout.
 const STOP_MARGIN: Duration = Duration::from_secs(2);
 /// How often the agent probes each process's health worker.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the agent checks whether a cluster process is still running.
+const EXIT_POLL: Duration = Duration::from_millis(250);
+
+/// A cluster process's storage key, which ends with it.
+struct Storage {
+    proxy: Arc<S3Proxy>,
+    access_key_id: String,
+    account: AccountId,
+}
 
 /// A running account process.
 pub struct Live {
@@ -58,6 +69,8 @@ pub struct Live {
     exited: std::sync::atomic::AtomicBool,
     /// The process's containers: ended with it.
     containers: Option<(Arc<super::dockershim::Shim>, String)>,
+    /// The process's storage key, retired once it has exited.
+    storage: StdMutex<Option<Storage>>,
 }
 
 impl Live {
@@ -92,7 +105,10 @@ impl Live {
             if !self.exited.load(std::sync::atomic::Ordering::SeqCst) {
                 crate::metrics::AGENT_PROCESS_STOPS.inc(&[reason]);
             }
-            p.stop(grace).await;
+            let exited = p.stop(grace).await;
+            if let Some(storage) = self.storage.lock().expect("poisoned").take() {
+                tokio::spawn(retire(storage, exited));
+            }
         }
         // After the process: workerd stops its containers itself as it hands
         // its Durable Objects off; this removes whatever is left.
@@ -139,8 +155,8 @@ pub struct Manager {
     /// Scripts someone is tailing, from the change feed.
     tails: super::bindings::Tailed,
     uids: Option<super::uids::Uids>,
-    /// The agent's S3 proxy for Durable Object storage.
-    s3_proxy: Option<std::net::SocketAddr>,
+    /// The agent's S3 proxy for Durable Object storage, and its address.
+    s3_proxy: Option<(Arc<S3Proxy>, std::net::SocketAddr)>,
     /// Where account cgroups go, when the cgroup tree is writable.
     cgroup_dir: Option<PathBuf>,
     /// Durable Objects' containers, if this agent runs them.
@@ -159,7 +175,7 @@ impl Manager {
     pub fn new(
         cfg: Arc<AgentConfig>,
         max_date: String,
-        s3_proxy: Option<std::net::SocketAddr>,
+        s3_proxy: Option<(Arc<S3Proxy>, std::net::SocketAddr)>,
         cgroup_dir: Option<PathBuf>,
         shim: Option<Arc<super::dockershim::Shim>>,
     ) -> Result<Arc<Self>> {
@@ -439,21 +455,42 @@ impl Manager {
             }
             _ => None,
         };
+        // A cluster member gets a storage key of its own, so that the agent
+        // can give up its lease if it exits without leaving the cluster.
+        let storage = match (&opts.cluster, &self.s3_proxy) {
+            (Some(_), Some((proxy, _))) => {
+                let Credentials { access_key_id, secret_access_key } = proxy.register(account);
+                Some((
+                    Storage {
+                        proxy: proxy.clone(),
+                        access_key_id: access_key_id.clone(),
+                        account: account.clone(),
+                    },
+                    secret_access_key,
+                ))
+            }
+            _ => None,
+        };
         let label = format!("{account}/{tag}");
         let process = WorkerdProcess::start_as(
             &self.cfg.workerd,
             &rendered,
-            &self.workerd_env(account),
+            &workerd_env(storage.as_ref().map(|(s, secret)| (s.access_key_id.as_str(), secret.as_str()))),
             &label,
             READY_TIMEOUT,
             uid,
         )
         .await;
+        let storage = storage.map(|(s, _)| s);
         let process = match process {
             Ok(p) => p,
             Err(e) => {
                 if let Some((shim, session)) = &containers {
                     shim.end_session(session).await;
+                }
+                if let Some(s) = storage {
+                    // It may still be exiting: its key goes, its lease stays.
+                    tokio::spawn(retire(s, false));
                 }
                 return Err(e);
             }
@@ -479,6 +516,7 @@ impl Manager {
             clustered: rendered.experimental,
             exited: std::sync::atomic::AtomicBool::new(false),
             containers,
+            storage: StdMutex::new(storage),
         });
         let old = {
             let mut slot = state.slot.lock().await;
@@ -487,6 +525,9 @@ impl Manager {
         };
         if let Some(timeout) = self.cfg.hang_timeout {
             tokio::spawn(self.clone().monitor(account.clone(), live.clone(), timeout));
+        }
+        if live.storage.lock().expect("poisoned").is_some() {
+            tokio::spawn(self.clone().watch_exit(account.clone(), live.clone()));
         }
         if let Some(old) = old {
             tokio::spawn(async move { old.stop(DRAIN_GRACE, "replaced").await });
@@ -515,7 +556,7 @@ impl Manager {
                 .iter()
                 .filter(|o| !super::UPSTREAM_OPTIONS.contains(&o.split('=').next().unwrap_or_default()))
                 .cloned()
-                .chain(self.s3_proxy.map(|a| format!("aws_endpoint=http://{a}")))
+                .chain(self.s3_proxy.as_ref().map(|(_, a)| format!("aws_endpoint=http://{a}")))
                 .collect(),
             address: format!("{}:0", c.bind_host),
             advertise: None,
@@ -636,7 +677,7 @@ impl Manager {
                 answered = Instant::now();
             } else if answered.elapsed() >= timeout {
                 tracing::warn!(%account, generation = live.generation, ?timeout, "account process stopped responding; killing it");
-                self.kill_hung(&account, &live).await;
+                self.stop_if_current(&account, &live, "hung").await;
                 return;
             }
         }
@@ -650,10 +691,28 @@ impl Manager {
         }
     }
 
-    /// Kills a hung process at once: it cannot drain, since draining needs the
-    /// thread that is stuck. In cluster mode its Durable Objects move once
-    /// their lease expires. Does nothing if `live` was replaced meanwhile.
-    async fn kill_hung(&self, account: &AccountId, live: &Arc<Live>) {
+    /// Notices a cluster process that exited on its own (a crash, a kernel OOM
+    /// kill) as it happens rather than at the account's next request, so that
+    /// its lease is given up and peers take its Durable Objects over at once.
+    async fn watch_exit(self: Arc<Self>, account: AccountId, live: Arc<Live>) {
+        loop {
+            tokio::time::sleep(EXIT_POLL).await;
+            if !self.is_current(&account, &live).await {
+                return;
+            }
+            if !live.alive().await {
+                tracing::warn!(%account, generation = live.generation, "account process exited");
+                self.stop_if_current(&account, &live, "exited").await;
+                return;
+            }
+        }
+    }
+
+    /// Stops a process at once, such as a hung one: it cannot drain, since
+    /// draining needs the thread that is stuck. In cluster mode the agent then
+    /// gives up its lease, so its Durable Objects move at once. Does nothing
+    /// if `live` was replaced meanwhile.
+    async fn stop_if_current(&self, account: &AccountId, live: &Arc<Live>, reason: &'static str) {
         let state = self.accounts.lock().expect("poisoned").get(account).cloned();
         let Some(state) = state else { return };
         let _start = state.start.lock().await;
@@ -662,7 +721,7 @@ impl Manager {
             if slot.live.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)) { slot.live.take() } else { None }
         };
         if let Some(live) = taken {
-            live.stop(Duration::ZERO, "hung").await;
+            live.stop(Duration::ZERO, reason).await;
         }
     }
 
@@ -720,20 +779,39 @@ impl Manager {
 }
 
 /// The only variables workerd gets: what it needs to reach the cluster bucket,
-/// and a sane PATH/locale. Never the internal token or database URL.
-impl Manager {
-    /// workerd's environment: nothing of the agent's, and for Durable Object
-    /// storage only credentials that the agent's S3 proxy accepts for this
-    /// account.
-    fn workerd_env(&self, account: &AccountId) -> Vec<(String, String)> {
-        let mut env: Vec<(String, String)> =
-            ["TZ"].iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
-        env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
-        if let (Some(c), Some(_)) = (&self.cfg.cluster, self.s3_proxy) {
-            env.push(("AWS_ACCESS_KEY_ID".into(), account.to_string()));
-            env.push(("AWS_SECRET_ACCESS_KEY".into(), super::s3proxy::account_secret(&c.secret, account)));
+/// and a sane PATH/locale. Never the internal token or database URL: the
+/// agent's own environment holds platform secrets. For Durable Object storage,
+/// only the process's own key, which the agent's S3 proxy accepts.
+fn workerd_env(storage: Option<(&str, &str)>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> =
+        ["TZ"].iter().filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v))).collect();
+    env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
+    if let Some((key, secret)) = storage {
+        env.push(("AWS_ACCESS_KEY_ID".into(), key.to_owned()));
+        env.push(("AWS_SECRET_ACCESS_KEY".into(), secret.to_owned()));
+    }
+    env
+}
+
+/// Retires an ended process's storage key. Once it has `exited`, its cluster
+/// lease is given up too, unless it left the cluster itself.
+async fn retire(storage: Storage, exited: bool) {
+    let Storage { proxy, access_key_id, account } = storage;
+    if !exited {
+        proxy.revoke(&access_key_id);
+        return;
+    }
+    match proxy.retire(&access_key_id).await {
+        Ok(Retired::Expired { node }) => {
+            crate::metrics::AGENT_LEASES_GIVEN_UP.inc(&[]);
+            tracing::info!(%account, %node, "gave up the cluster lease of an account process that ended without leaving the cluster; peers take its Durable Objects over now");
         }
-        env
+        Ok(Retired::NoRecord | Retired::AlreadyGone) => {}
+        Err(e) => tracing::warn!(
+            %account,
+            error = %format!("{e:#}"),
+            "giving up an ended account process's cluster lease failed; its Durable Objects move when the lease expires"
+        ),
     }
 }
 

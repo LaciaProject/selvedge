@@ -204,6 +204,11 @@ pub static AGENT_PROCESS_EXITS: Family = Family::counter(
     "Account processes found exited on their own (a crash or a kernel OOM kill).",
     &[],
 );
+pub static AGENT_LEASES_GIVEN_UP: Family = Family::counter(
+    "selvedge_agent_cluster_leases_given_up_total",
+    "Cluster leases the agent gave up for account processes that ended without leaving the cluster (a crash, a kill), so that peers took their Durable Objects over at once.",
+    &[],
+);
 pub static AGENT_CPU_THROTTLED: Family = Family::counter(
     "selvedge_agent_cpu_throttles_total",
     "Times an account process over its CPU share was given a lower priority.",
@@ -250,6 +255,7 @@ static ALL: &[&Family] = &[
     &AGENT_PROCESS_START_DURATION,
     &AGENT_PROCESS_STOPS,
     &AGENT_PROCESS_EXITS,
+    &AGENT_LEASES_GIVEN_UP,
     &AGENT_CPU_THROTTLED,
     &AGENT_BINDING_REQUESTS,
     &CONTAINER_INSTANCES,

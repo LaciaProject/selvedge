@@ -175,14 +175,19 @@ its storage commits are acknowledged only once the object store holds them.
 
 Differences:
 
-- **Failover takes up to about 20 seconds.** When the process owning an object dies, calls to that
-  object fail (as with Cloudflare's "Network connection lost") until the owner's lease expires and
-  another runner takes the object over. The lease is fixed in workerd. A clean shutdown, such as
-  a rolling upgrade or the agent's restart of a process over its memory limit, hands objects over
-  without this wait: workerd lets requests in flight on each object finish (up to 4 seconds), then
-  releases it to the next request anywhere, and the agent gives it workerd's full stop timeout
-  (8 seconds, plus 2) before killing it. A kernel OOM kill (cgroup mode), a crash, or the agent
-  killing a hung process still waits for the lease.
+- **Losing a whole runner means up to about 20 seconds of failover.** When the process owning an
+  object dies, calls to that object fail (as with Cloudflare's "Network connection lost") until
+  another process takes the object over. How long that takes depends on how the process ended:
+  - A clean shutdown, such as a rolling upgrade or the agent's restart of a process over its
+    memory limit, hands objects over without a wait: workerd lets requests in flight on each object
+    finish (up to 4 seconds), then releases it to the next request anywhere, and the agent gives it
+    workerd's full stop timeout (8 seconds, plus 2) before killing it.
+  - A process that dies while its agent runs (a crash, a kernel OOM kill in cgroup mode, the agent
+    killing a hung process) has its cluster lease given up by the agent, as workerd does itself
+    when it stops cleanly. Its objects move within about a second (0.6 seconds in the two-runner
+    test). Requests in flight on them fail.
+  - When the whole runner goes (its node fails, the pod is killed), nothing is left to give the
+    lease up: peers wait for it to expire. The lease is fixed in workerd at 20 seconds.
 - Storage writes wait for the object store, so write latency depends on it (single-digit
   milliseconds for an in-cluster store).
 - Requires an S3-compatible store that supports conditional writes (`If-None-Match: *` and

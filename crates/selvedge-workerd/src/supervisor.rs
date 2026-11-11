@@ -120,13 +120,17 @@ impl WorkerdProcess {
 
     /// Asks workerd to drain (SIGTERM), then kills it after `grace`. In cluster
     /// mode a drain deregisters the instance so peers take its objects at once.
-    pub async fn stop(mut self, grace: Duration) {
+    /// Answers whether the process is known to have exited.
+    pub async fn stop(mut self, grace: Duration) -> bool {
         if let Some(pid) = self.child.id() {
             let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status().await;
         }
-        if tokio::time::timeout(grace, self.child.wait()).await.is_err() {
-            tracing::warn!(label = %self.label, "workerd did not drain in time; killing");
-            let _ = self.child.kill().await;
+        match tokio::time::timeout(grace, self.child.wait()).await {
+            Ok(status) => status.is_ok(),
+            Err(_) => {
+                tracing::warn!(label = %self.label, "workerd did not drain in time; killing");
+                self.child.kill().await.is_ok()
+            }
         }
     }
 }

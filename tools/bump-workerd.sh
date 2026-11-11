@@ -31,8 +31,8 @@ sed -i "s/${OLD//./\\.}/$NEW/g" .github/workflows/ci.yml README.md docs/compatib
 (cd test/e2e && npm install --save-exact --no-audit --no-fund "workerd@$NEW" > /dev/null)
 python3 tools/experimental-flags.py "$NEW" > crates/selvedge-workerd/src/experimental-flags.txt
 
-# Every pin must have moved.
-left=$(git grep -n "${OLD//./\\.}" -- . ':!test/e2e/package-lock.json' || true)
+# Every pin must have moved. RFCs keep the version they were written against.
+left=$(git grep -n "${OLD//./\\.}" -- . ':!test/e2e/package-lock.json' ':!docs/rfcs/' || true)
 [ -z "$left" ] || { echo "still pinned to $OLD:" >&2; echo "$left" >&2; exit 1; }
 echo "workerd $OLD -> $NEW"
 git --no-pager diff --stat

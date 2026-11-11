@@ -53,10 +53,17 @@ curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/log" -H "Authorization: 
   -F 'metadata={"main_module":"index.js","compatibility_date":"2026-10-01","bindings":[{"type":"durable_object_namespace","name":"LOG","class_name":"Log"}]};type=application/json' \
   -F "index.js=@$HERE/log.js;filename=index.js;type=application/javascript+module" > /dev/null
 HOST="log.$SUBDOMAIN.workers.local"
-for _ in $(seq 1 60); do
-  [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://$GW/?key=warmup&append=w")" = 200 ] && break
-  sleep 1
+# Every gateway must know the Worker first: 30 answers in a row, spread over
+# the gateways and runners.
+ok=0
+for _ in $(seq 1 300); do
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://$GW/?key=warmup")" = 200 ]; then
+    ok=$((ok + 1)); [ $ok -ge 30 ] && break
+  else
+    ok=0; sleep 0.5
+  fi
 done
+[ $ok -ge 30 ] || { echo "FAIL the Worker never answered steadily"; exit 1; }
 echo "     account $ACCOUNT, gateway $GW"
 
 runners() { $K get pods -l app.kubernetes.io/component=runner --field-selector=status.phase=Running -o name | sed 's|pod/||'; }

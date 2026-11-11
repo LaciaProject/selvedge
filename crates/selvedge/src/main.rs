@@ -577,7 +577,18 @@ async fn serve_axum_internal(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     if selvedge_server::tls::get().is_none() {
-        return serve_axum(listen, app, shutdown).await;
+        // Callers' addresses are recorded all the same: the containers
+        // controller checks a runner's against its pod's.
+        let listener =
+            tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+        tracing::info!(addr = %listen, "listening");
+        let listener = axum::serve::ListenerExt::tap_io(listener, |s: &mut tokio::net::TcpStream| {
+            let _ = s.set_nodelay(true);
+        });
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        return Ok(());
     }
     let listener =
         tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;

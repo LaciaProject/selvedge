@@ -203,6 +203,12 @@ containers:
     # with the certificate from the token Secret.
     bundled: true
     image: registry:2.8.3
+    # Garbage collection in the registry's pod: frees the layers of images
+    # no tag refers to any more (a deleted application's). A push that
+    # overlaps a run can fail and is retried by the client.
+    gc:
+      enabled: true
+      intervalSeconds: 86400
     storage: 20Gi
     storageClass: ""
     service:

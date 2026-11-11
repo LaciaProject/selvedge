@@ -25,7 +25,7 @@ No metric carries an account or script id, so the number of series does not grow
 | `selvedge_agent_cpu_throttles_total` | counter | | Times an account process over its CPU share was given a lower priority. |
 | `selvedge_agent_binding_requests_total` | counter | `binding` (`kv`, `r2`, `queue`, `assets`, `other`), `code` (or `error`) | Binding calls the agent sent to the data service. Static assets served from the runner's cache are not counted. |
 | `selvedge_agent_container_start_duration_seconds` | histogram | `result` (`ok`, `error`) | From workerd asking for a container to its application running: scheduling, image pull, sandbox boot. |
-| `selvedge_agent_container_unsupported_total` | counter | `operation` (`snapshot`, `archive`, `image`, `exec`, `container`, `other`) | Docker API calls from workerd that Selvedge answers with 501. A new operation here after a workerd upgrade means workerd uses something the shim does not implement. |
+| `selvedge_agent_container_unsupported_total` | counter | `operation` (`snapshot`, `archive`, `image`, `exec`, `signal`, `container`, `other`) | Docker API calls from workerd that Selvedge answers with 501. A new operation here after a workerd upgrade means workerd uses something the shim does not implement. |
 | `selvedge_agent_container_egress_refused_total` | counter | | Connections to a runner's container egress port from addresses that are not its instances. |
 | `selvedge_container_instances` | gauge | `state` (`running`, `pending`) | Container instances, as the containers controller last listed them. |
 | `selvedge_container_starts_total` | counter | `result` (`created`, `limit`, `error`) | Start requests: `limit` is a refusal by `max_instances` or an account or installation limit. |

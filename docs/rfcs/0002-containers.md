@@ -86,7 +86,7 @@ workerd 自带一个容器后端，**通过 Docker Engine API 工作**：
 | `POST /containers/create`（应用） | 记下环境变量、命令和出站配置。镜像、`CapAdd`/`Devices`/`SecurityOpt`、资源限制都忽略，由控制组件决定。 |
 | `POST /containers/{id}/start` | 请控制组件创建实例，等应用进入运行状态或失败（超时可配置，默认 300 秒）。失败原因写进 agent 日志，workerd 只告诉 Worker 启动失败。 |
 | `GET /containers/{id}/json` | 把实例状态翻译成 Docker 的字段；边车的入口端口填 agent 开的回环端口。 |
-| `POST /containers/{id}/wait`、`stop`、`kill` | `wait` 等实例结束并返回退出码；`stop` 是带 10 秒宽限期的删除；`kill` 支持 TERM、INT、QUIT、KILL，其他信号返回 501。 |
+| `POST /containers/{id}/wait`、`stop`、`kill` | `wait` 等实例结束并返回退出码；`stop` 是带 10 秒宽限期的删除；`kill`：SIGKILL 删除实例，其他信号通过 exec 在容器里执行 `kill -<n> 1` 送给 PID 1，和 Docker 一样只有该进程处理的信号才会送达。镜像里没有 `/bin/sh` 时，TERM、INT、QUIT 退回为停止实例。 |
 | `DELETE /containers/{id}` | 删除实例。 |
 | `PUT /containers/{id}/archive?path=/etc` | 接受并丢弃：workerd 想写入边车的 CA，实例启动时 setup 步骤会取回真正的 CA。 |
 | `POST /containers/{id}/exec`、`/exec/{id}/start`、`/json`、`/resize` | 记下命令；start 时向控制组件开一条升级后的 mTLS 连接，控制组件用 Docker 的 exec 或 Pod 的 `exec` 子资源运行命令。stdin、stdout/stderr、终端尺寸和退出码在这条连接上用 Docker 多路复用流的帧格式传递。Kubernetes 上不支持指定用户。 |
@@ -250,9 +250,10 @@ P1 已经实现，代码在 `crates/selvedge-server/src/{containers,agent/docker
 5. **出站中转按来源地址识别实例**。`GET /networks/bridge` 把网关报成 `127.0.0.1`，workerd 的出站监听只开在回环地址上；边车连 runner 的 8791 端口，中转按来源 IP 找到实例，只交给该实例自己的出站监听。NetworkPolicy 只能做到"只连 runner"，跨账号隔离靠这一层。
 6. **拉取凭证**。控制组件为每个实例生成只读、只覆盖该账号仓库的短期凭证，放进归 Pod 所有的 pull secret。仓库可以用 chart 捆绑的 CNCF distribution，也可以接运营方自己的。
 7. **契约测试**（§9 第 4 点）。没有单独做录制回放：`test/e2e/containers.sh` 用真实的 wrangler 和 workerd 跑完整流程，每天的 workerd 升级工作流会跑它；垫片不认识的调用一律 501 并计入 `selvedge_agent_container_unsupported_total`，workerd 换了用法会直接表现为测试失败。
-8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收。
+8. **删除镜像**：删除应用时，API 给自己签一个只覆盖该仓库的 `delete` token，删掉仓库里所有带 tag 的 manifest（另一个应用还在用同一个仓库时不删）；层文件由仓库的 GC 回收：捆绑的仓库在同一个 Pod 里每天跑一次 `garbage-collect --delete-untagged`。
 9. **`exec()`**（初稿的 P2）：经控制组件代理，runner 依然碰不到实例的运行时。Kubernetes 用 `v5.channel.k8s.io`，可以关闭 stdin；`user` 选项只有 Docker 后端支持。
-10. **没有做的**：快照、TERM/INT/QUIT/KILL 以外的信号返回 501；没有镜像预拉取。
+10. **信号**：有了 exec 之后，SIGKILL 以外的信号都在容器里送给 PID 1（容器内不能给 init 发 SIGKILL，所以它仍是删除实例）。
+11. **没有做的**：快照返回 501；没有镜像预拉取。
 
 **测试**
 

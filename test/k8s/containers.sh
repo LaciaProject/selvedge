@@ -79,6 +79,11 @@ check "exec() takes stdin" "ping 0" "$(get '/exec-stdin?name=a')"
 check "exec() sets the environment and working directory" "hi there /tmp" "$(get '/exec-env?name=a')"
 contains "an exec process can be killed" "killed 143" "$(get '/exec-kill?name=a')"
 check "exec() can allocate a terminal" "terminal 0" "$(get '/exec-pty?name=a')"
+check "signal() delivers a signal the application handles" "sent 1" "$(get '/signal?name=a&s=1') $(get '/hups?name=a')"
+contains "and one that ends it reports its exit code" "42" "$(get '/signal-exit?name=a&s=10')"
+wait_count 0 60
+check "the exited instance is removed" "0" "$(count)"
+check "the object starts its container again" "hello after v1" "$(get '/start?name=a&msg=after')"
 
 # ---- Egress: through workerd only.
 contains "outbound requests fail without enableInternet" "failed" "$(get '/out?name=a&u=http://example.com/')"
@@ -128,6 +133,8 @@ T0=$(date +%s.%N)
 check "the object starts its container again on the new runner" "hello again v1" "$(get '/start?name=a&msg=again')"
 echo "     (restart on another runner: $(since "$T0") s)"
 
+blobs() { $K exec deploy/slv-registry -c gc -- sh -c 'ls /var/lib/registry/docker/registry/v2/blobs/sha256/*/ 2>/dev/null | grep -c . || true'; }
+BLOBS=$(blobs)
 ID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/containers/applications" | json '["result"][0]["id"]')
 curl -sf -X DELETE -H "Authorization: Bearer $TOKEN" "$API/accounts/$ACCOUNT/containers/applications/$ID" > /dev/null
 wait_count 0 120
@@ -142,6 +149,11 @@ tags() {
 }
 for _ in $(seq 1 30); do [ "$(tags)" = 0 ] && break; sleep 1; done
 check "and its images in the bundled registry" "0" "$(tags)"
+# The registry's garbage collection then frees their layers.
+for _ in $(seq 1 90); do [ "$(blobs)" -lt "$BLOBS" ] && break; sleep 1; done
+AFTER=$(blobs)
+[ "$AFTER" -lt "$BLOBS" ] && echo "ok   garbage collection freed $((BLOBS - AFTER)) of $BLOBS blobs" \
+  || { echo "FAIL garbage collection freed nothing ($BLOBS blobs before, $AFTER after)"; $K logs deploy/slv-registry -c gc --tail=30; exit 1; }
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

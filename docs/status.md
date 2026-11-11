@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-最新发布是 v0.2.0，带来 Containers：镜像 `ghcr.io/laciaproject/selvedge:0.2.0`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 30 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+最新发布是 v0.3.0：镜像 `ghcr.io/laciaproject/selvedge:0.3.0`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。它在 v0.2.0（Containers）的基础上加了容器安全加固、任意信号、内置镜像仓库的垃圾回收，以及 workerd 进程死掉后 Durable Object 不到 1 秒就转移。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 33 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |
@@ -46,6 +46,9 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 | [#28](https://github.com/LaciaProject/selvedge/pull/28) | 每天自动检查 workerd 新版本 |
 | [#29](https://github.com/LaciaProject/selvedge/pull/29) | RFC 0002：Containers（沙箱选用 Kata） |
 | [#30](https://github.com/LaciaProject/selvedge/pull/30) | Containers：实现 RFC 0002，含 `exec()`、Helm 和 Kata 集群测试；v0.2.0 |
+| [#31](https://github.com/LaciaProject/selvedge/pull/31) | Containers：安全审查和加固，支持发送任意信号，内置镜像仓库的垃圾回收 |
+| [#32](https://github.com/LaciaProject/selvedge/pull/32) | workerd 进程死掉而 agent 还在时，由 agent 立即放弃它的集群租约，DO 不再停 20 秒 |
+| [#34](https://github.com/LaciaProject/selvedge/pull/34) | v0.3.0 |
 
 CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请求：
 

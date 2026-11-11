@@ -325,7 +325,14 @@ Spike 结论：
 
 - **S3（条件写入）**：SeaweedFS 4.50 通过 workerd 的启动检查，已用于 CI 和 Helm 的 minimal profile。
   MinIO 在 Docker Hub 上的官方镜像已经拉不到，未测试。Garage、Rook-Ceph RGW 待测。
-- **S1（部分）**：本地两 runner：`kill -9` 一个 runner 后，它持有的对象在约 20 秒（租约时长）后恢复，期间对这些对象的调用失败、
-  不会挂起到超时；正常下线（SIGTERM）几乎无中断。Kubernetes 上的同类测试在 `test/k8s/e2e.sh`。
+- **S1（存储一致性部分已完成，2026-11-11）**：`test/k8s/chaos.sh`（CI 的 `kind-chaos`）在 3 可用区 kind 集群上，
+  让客户端不停地对 DO 里的只追加日志做追加和读取，同时依次注入 9 种故障：runner 容器被 SIGKILL、workerd 被 SIGKILL、
+  一个 runner 和对象存储隔开 45 秒、对象存储延迟 100 ms 加 10% 丢包、一个 runner 和其他 runner 隔开 45 秒、
+  一个 runner 的时钟快或慢 30 秒、滚动重启。每个对象的每次回答都是整个日志，所以历史可以直接检查线性一致性：
+  回答都是最终日志的前缀、已确认的写入都在、操作开始前已确认的写入都能读到。约 4.8 万次操作、54 个对象，没有违例。
+  这依赖 workerd 的提交协议：写入先上传到所有者自己 epoch 的日志，再重读 `own.json`，epoch 没变才确认；新所有者用条件写
+  占下一个 epoch 再恢复旧日志，所以旧所有者在被接管后上传的批次不会被确认。时钟偏差超过 2 秒（`MAX_SKEW_MS`）的节点自行隔离。
+  可用性：runner 崩溃要等 20 秒租约；和对象存储隔开约 22 秒；和其他 runner 隔开时对象不转移，经其他 runner 的请求挂起到客户端超时。
+  WebSocket Hibernation、Alarm、`WorkflowsEngine` 在故障下的行为还没有专门测。
 - **S5（部分）**：单账户进程冷启动在本地约 0.1–0.4 秒（2 核虚拟机，含渲染配置）。
 - 实现中发现：workerd 子进程默认继承 agent 的环境变量（含内部 token），已改为清空环境、只传对象存储所需的变量。

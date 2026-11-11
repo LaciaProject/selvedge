@@ -60,16 +60,25 @@ done
 echo "     account $ACCOUNT, gateway $GW"
 
 runners() { $K get pods -l app.kubernetes.io/component=runner --field-selector=status.phase=Running -o name | sed 's|pod/||'; }
-pick() { runners | shuf -n 1; }
+# Faults go to each runner in turn.
+TURN=0
+pick() { # sets V; not in a subshell, so the turn advances
+  local all; mapfile -t all < <(runners)
+  V=${all[$(( TURN % ${#all[@]} ))]}; TURN=$((TURN + 1))
+}
 others() { runners | grep -vx "$1"; }
 settle() {
   $K rollout status deploy/slv-runner --timeout=300s > /dev/null
   $K wait --for=condition=Ready pod -l app.kubernetes.io/component=runner --timeout=300s > /dev/null
   sleep 5
 }
-epochs() { # ownership changes logged by workerd, where its logs say so
-  $K logs -l app.kubernetes.io/component=runner -c runner --tail=-1 --max-log-requests=10 2>/dev/null \
-    | grep -cE 'epoch [0-9]+ open' || true
+signals() { # since: what the runners logged about ownership and processes
+  local logs
+  logs=$($K logs -l app.kubernetes.io/component=runner -c runner --since-time="$1" --max-log-requests=10 2>/dev/null || true)
+  echo "exits=$(grep -c 'account process exited' <<< "$logs" || true)" \
+    "fenced=$(grep -ciE 'clock off from the bucket|lease lapsed|fenc' <<< "$logs" || true)" \
+    "superseded=$(grep -c 'was superseded' <<< "$logs" || true)" \
+    "renewal-failures=$(grep -c 'renewing the cluster lease failed' <<< "$logs" || true)"
 }
 
 # Chaos Mesh resources, removed after `duration` by deleting them.
@@ -89,8 +98,8 @@ pods_yaml() { # names... -> a selector listing those pods
 }
 
 phase() { # name, then the fault's commands as a function name
-  local name=$1 fault=$2 before
-  before=$(epochs)
+  local name=$1 fault=$2 since
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "---- $name"
   rm -f "$OUT/stop"
   python3 "$HERE/workload.py" --addr "$GW" --host "$HOST" --phase "$name" \
@@ -100,14 +109,14 @@ phase() { # name, then the fault's commands as a function name
   sleep 10
   touch "$OUT/stop"; wait $load
   settle
-  echo "     workerd logged $(( $(epochs) - before )) ownership changes (best effort: logs of killed containers are gone)"
+  echo "     runners logged: $(signals "$since") (a crashed container's own lines are gone)"
 }
 
 baseline() { sleep 20; }
 
 runner_crash() {
   for i in 1 2 3; do
-    local v; v=$(pick)
+    pick; local v=$V
     echo "     SIGKILL runner container of $v"
     chaos PodChaos "crash-$i" 1 "  action: container-kill
   mode: all
@@ -121,7 +130,7 @@ $(pods_yaml "$v")"
 
 workerd_kill() {
   for _ in 1 2 3 4; do
-    local v; v=$(pick)
+    pick; local v=$V
     echo "     SIGKILL workerd in $v"
     $K exec "$v" -c runner -- sh -c \
       'for d in /proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = workerd ] && kill -9 "${d#/proc/}"; done; true'
@@ -131,7 +140,7 @@ workerd_kill() {
 
 store_partition() {
   for i in 1 2; do
-    local v; v=$(pick)
+    pick; local v=$V
     echo "     partition $v from the object store for 45s"
     chaos NetworkChaos "store-partition-$i" 45 "  action: partition
   mode: all
@@ -162,7 +171,7 @@ store_slow() {
 }
 
 peer_partition() {
-  local v; v=$(pick)
+  pick; local v=$V
   echo "     partition $v from the other runners for 45s"
   chaos NetworkChaos peer-partition 45 "  action: partition
   mode: all
@@ -176,7 +185,7 @@ $(pods_yaml $(others "$v") | sed 's/^/  /')"
 }
 
 clock() { # offset
-  local v; v=$(pick)
+  pick; local v=$V
   echo "     $v's clock $1 for 60s"
   chaos TimeChaos "clock" 60 "  mode: all
   timeOffset: '$1'

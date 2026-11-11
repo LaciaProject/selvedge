@@ -13,8 +13,8 @@ history is linearizable exactly when one final log explains every answer:
   5. an answer holds no append that started after the answer arrived.
 
 Appends that got no answer are indeterminate: they may be in the log or not.
-Prints a summary per phase, including the longest stretch with no successful
-operation, and exits 1 on any violation.
+Prints a summary per phase, including the longest stretch in which one object
+gave no successful answer, and exits 1 on any violation.
 """
 import argparse
 import bisect
@@ -119,20 +119,25 @@ def main():
                 bad(key, f"{op['op']} {op['token'] or ''} missed an append acknowledged before it started "
                          f"(saw {len(op['log'])} entries, needed {need[j - 1] + 1})")
 
-    # Per phase: counts, and the longest stretch without a successful answer.
+    # Per phase: counts, and the longest stretch an object went without a
+    # successful answer.
     phases = collections.OrderedDict()
     for op in sorted(ops, key=lambda o: o["start"]):
         phases.setdefault(op["phase"], []).append(op)
     in_final = {t for log in final.values() for t in log}
-    print(f"{'phase':<18}{'ops':>7}{'ok':>7}{'failed':>8}{'failed appends kept':>21}{'longest gap':>13}")
+    print(f"{'phase':<18}{'ops':>7}{'ok':>7}{'failed':>8}{'failed appends kept':>21}{'longest outage':>16}")
     for name, pops in phases.items():
         ok = [o for o in pops if o["ok"]]
         failed = [o for o in pops if not o["ok"]]
         kept = sum(1 for o in failed if o["op"] == "append" and o["token"] in in_final)
         fa = sum(1 for o in failed if o["op"] == "append")
-        points = [pops[0]["start"]] + sorted(o["end"] for o in ok) + [max(o["end"] for o in pops)]
-        gap = max(b - a for a, b in zip(points, points[1:])) / 1e9
-        print(f"{name:<18}{len(pops):>7}{len(ok):>7}{len(failed):>8}{f'{kept}/{fa}':>21}{gap:>12.1f}s")
+        first, last = pops[0]["start"], max(o["end"] for o in pops)
+        gap = 0
+        for key in {o["key"] for o in pops}:
+            points = [first] + sorted(o["end"] for o in ok if o["key"] == key) + [last]
+            gap = max(gap, max(b - a for a, b in zip(points, points[1:])))
+        gap /= 1e9
+        print(f"{name:<18}{len(pops):>7}{len(ok):>7}{len(failed):>8}{f'{kept}/{fa}':>21}{gap:>15.1f}s")
         errors = collections.Counter(o["error"].split(":")[0][:60] for o in failed)
         for e, n in errors.most_common(4):
             print(f"{'':<18}  {n} x {e}")

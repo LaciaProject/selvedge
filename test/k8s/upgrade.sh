@@ -125,11 +125,16 @@ check "static assets on the old release" "$STYLE" "$(until_ok assets-app /style.
 # ---- The upgrade, under load: the KV app (stateless) and Durable Objects.
 rm -f "$WORK/stop"
 load() { # name host path: counts failures until $WORK/stop appears
+  # A failure is logged as: when the request started, its status (000 for no
+  # response), how long it took, and curl's exit code (7 refused, 28 timed
+  # out, 52 empty reply, 56 reset).
   ( f=0 t=0
     while [ ! -f "$WORK/stop" ]; do
       t=$((t+1))
-      code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "Host: $2.$SUBDOMAIN.workers.local" "http://$GW$3" || true)
-      [ "$code" = 200 ] || { f=$((f+1)); echo "$(date +%T) $code" >> "$WORK/$1.codes"; }
+      at=$(date +%T.%2N)
+      out=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{time_total}' -H "Host: $2.$SUBDOMAIN.workers.local" "http://$GW$3") \
+        && rc=0 || rc=$?
+      [ "${out%% *}" = 200 ] || { f=$((f+1)); echo "$at ${out%% *} ${out#* }s curl=$rc" >> "$WORK/$1.codes"; }
       sleep 0.05
     done
     echo "$f $t" > "$WORK/$1.out" ) &
@@ -183,15 +188,29 @@ check "static assets are still served" "$STYLE" "$(get assets-app /style.css)"
 
 # Restarting this build's stateless components drops nothing: gateways drain.
 rm -f "$WORK/stop" "$WORK"/*.codes
+# The pods about to stop are gone by the time a failure is reported, so keep
+# their logs (and the runners') as they go, and when each rollout ran.
+$K logs -f --prefix --tail=0 --max-log-requests 20 \
+  -l 'app.kubernetes.io/component in (gateway,data,api,runner)' > "$WORK/restart.log" 2>&1 &
+LOGS=$!
 load kv kv-app /
 for d in gateway data api; do
+  echo "$(date +%T.%2N) restart $d" >> "$WORK/timeline"
   $K rollout restart "deploy/slv-$d" > /dev/null
   $K rollout status "deploy/slv-$d" --timeout=300s > /dev/null
+  echo "$(date +%T.%2N) $d rolled" >> "$WORK/timeline"
 done
 sleep 5
+kill "$LOGS" 2>/dev/null || true
 touch "$WORK/stop"; wait
 report kv "stateless requests while this build's gateways, data and API restart"
 read -r KV_FAILS _ < "$WORK/kv.out"
+if [ "$KV_FAILS" != 0 ]; then
+  sed 's/^/       /' "$WORK/timeline"
+  echo "     what the restarting pods logged besides startup:"
+  grep -vE '"(mTLS between components is on|metrics listening|listening|listening \(mTLS\)|gateway listening|gateway internal listener)"' \
+    "$WORK/restart.log" | grep -v 'schema_migrations' | cut -c1-400 | tail -80 | sed 's/^/       /' || true
+fi
 check "no stateless request failed while they restarted" "0" "$KV_FAILS"
 
 render after

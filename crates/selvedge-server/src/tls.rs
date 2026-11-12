@@ -367,7 +367,7 @@ pub async fn accept(stream: tokio::net::TcpStream, clients: &[Role]) -> std::io:
 
 /// Whether a request on a [`Stream::health_only`] connection may proceed.
 pub fn health_path(path: &str) -> bool {
-    matches!(path, "/healthz" | "/__selvedge/healthz")
+    matches!(path, "/healthz" | "/__selvedge/healthz" | "/__selvedge/readyz")
 }
 
 /// A TCP stream, maybe in TLS.

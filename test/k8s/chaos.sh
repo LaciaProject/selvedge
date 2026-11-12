@@ -88,15 +88,18 @@ signals() { # since: what the runners logged about ownership and processes
     "renewal-failures=$(grep -c 'renewing the cluster lease failed' <<< "$logs" || true)"
 }
 
-# Chaos Mesh resources, removed after `duration` by deleting them.
+# Chaos Mesh resources, removed after `duration` by deleting them. Creating
+# one goes through Chaos Mesh's admission webhook, which now and then refuses
+# connections for a moment; retry rather than fail the whole run.
 chaos() { # kind name duration spec-yaml
-  $K apply -f - > /dev/null <<EOF
-apiVersion: chaos-mesh.org/v1alpha1
-kind: $1
-metadata: { name: $2 }
-spec:
-$4
-EOF
+  local manifest err try
+  manifest=$(printf 'apiVersion: chaos-mesh.org/v1alpha1\nkind: %s\nmetadata: { name: %s }\nspec:\n%s\n' "$1" "$2" "$4")
+  for try in 1 2 3 4 5 6; do
+    err=$($K apply -f - <<< "$manifest" 2>&1 > /dev/null) && break
+    [ "$try" = 6 ] && { echo "$err" >&2; return 1; }
+    echo "     creating $1 $2 failed, retrying: ${err:0:160}"
+    sleep 5
+  done
   sleep "$3"
   $K delete "$1" "$2" --wait=true > /dev/null
 }

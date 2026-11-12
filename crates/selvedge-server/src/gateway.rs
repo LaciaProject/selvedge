@@ -51,7 +51,13 @@ pub struct GatewayConfig {
     pub cf_headers: Vec<(String, String)>,
     /// `request.cf.colo`: a name for this site.
     pub colo: Option<String>,
+    /// After SIGTERM, how long to keep serving while health checks fail, so
+    /// that kube-proxy and load balancers stop sending new connections first.
+    pub drain_delay: Duration,
 }
+
+/// How long a stopping gateway waits for the requests it is answering.
+const DRAIN_LIMIT: Duration = Duration::from_secs(20);
 
 /// `request.cf` fields that can come from a load balancer's headers, and
 /// whether each is a number (the rest are strings, as on Cloudflare).
@@ -142,6 +148,8 @@ struct Shared {
     patterns: RwLock<Vec<selvedge_store::zones::PatternRoute>>,
     /// Runner addresses that passed their last health check, sorted.
     healthy: RwLock<Vec<String>>,
+    /// Stopping: health checks fail, requests are still served.
+    draining: std::sync::atomic::AtomicBool,
 }
 
 pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -218,23 +226,42 @@ pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output =
     }
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     tracing::info!(addr = %cfg.listen, "gateway listening");
+    let drain = proxy::Drain::default();
+    let accept = |accepted: std::io::Result<(tokio::net::TcpStream, SocketAddr)>| match accepted {
+        Ok((stream, peer)) => {
+            let _ = stream.set_nodelay(true);
+            let (cfg, shared) = (cfg.clone(), shared.clone());
+            let handler = Arc::new(move |req| {
+                let (cfg, shared) = (cfg.clone(), shared.clone());
+                async move { handle(&cfg, &shared, peer, req, false).await }
+            });
+            proxy::serve_connection_draining(stream, handler, drain.guard());
+        }
+        Err(e) => tracing::warn!(error = %e, "accept failed"),
+    };
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, peer)) => {
-                    let _ = stream.set_nodelay(true);
-                    let (cfg, shared) = (cfg.clone(), shared.clone());
-                    let handler = Arc::new(move |req| {
-                        let (cfg, shared) = (cfg.clone(), shared.clone());
-                        async move { handle(&cfg, &shared, peer, req, false).await }
-                    });
-                    proxy::serve_connection(stream, handler);
-                }
-                Err(e) => tracing::warn!(error = %e, "accept failed"),
-            },
+            accepted = listener.accept() => accept(accepted),
             () = &mut shutdown => break,
         }
+    }
+    // Fail health checks but keep serving, so that new connections go to
+    // other gateways before this one stops accepting.
+    shared.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!(delay = ?cfg.drain_delay, "gateway unhealthy; waiting before draining");
+    let delay = tokio::time::sleep(cfg.drain_delay);
+    tokio::pin!(delay);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => accept(accepted),
+            () = &mut delay => break,
+        }
+    }
+    drop(listener);
+    tracing::info!("gateway draining");
+    if !drain.finish(DRAIN_LIMIT).await {
+        tracing::warn!(limit = ?DRAIN_LIMIT, "requests still running after the drain limit; stopping anyway");
     }
     for t in tasks {
         t.abort();
@@ -344,6 +371,9 @@ async fn handle(
     internal_listener: bool,
 ) -> Response<Body> {
     if req.uri().path() == "/__selvedge/healthz" {
+        if shared.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            return proxy::full(StatusCode::SERVICE_UNAVAILABLE, "draining");
+        }
         return proxy::full(StatusCode::OK, "ok");
     }
     let start = std::time::Instant::now();
@@ -488,6 +518,7 @@ mod tests {
             cf_headers: parse_cf_headers(&cf_headers.iter().map(|s| s.to_string()).collect::<Vec<_>>())
                 .unwrap(),
             colo: colo.map(str::to_owned),
+            drain_delay: Duration::ZERO,
         }
     }
 

@@ -1,0 +1,3 @@
+# Added to test/k8s/values.yaml for the fault-injection test: every runner
+# serves the test account, so all three compete for its Durable Objects.
+gateway: { accountReplicas: 3 }

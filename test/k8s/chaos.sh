@@ -89,17 +89,23 @@ signals() { # since: what the runners logged about ownership and processes
 }
 
 # Chaos Mesh resources, removed after `duration` by deleting them. Creating
-# one goes through Chaos Mesh's admission webhook, which now and then refuses
-# connections for a moment; retry rather than fail the whole run.
+# one goes through Chaos Mesh's admission webhook, which refuses connections
+# while no controller-manager replica is ready (one crashing and restarting
+# takes over a minute); retry for two minutes rather than fail the whole run.
 chaos() { # kind name duration spec-yaml
   local manifest err try
   manifest=$(printf 'apiVersion: chaos-mesh.org/v1alpha1\nkind: %s\nmetadata: { name: %s }\nspec:\n%s\n' "$1" "$2" "$4")
-  for try in 1 2 3 4 5 6; do
+  for try in $(seq 1 24); do
     err=$($K apply -f - <<< "$manifest" 2>&1 > /dev/null) && break
-    [ "$try" = 6 ] && { echo "$err" >&2; return 1; }
-    echo "     creating $1 $2 failed, retrying: ${err:0:160}"
+    if [ "$try" = 24 ]; then
+      echo "$err" >&2
+      kubectl -n chaos-mesh get pods -o wide >&2 || true
+      return 1
+    fi
+    [ "$try" = 1 ] && echo "     creating $1 $2 failed, retrying for up to 2 minutes: ${err:0:160}"
     sleep 5
   done
+  [ "$try" -gt 1 ] && echo "     created $1 $2 after $try tries"
   sleep "$3"
   $K delete "$1" "$2" --wait=true > /dev/null
 }

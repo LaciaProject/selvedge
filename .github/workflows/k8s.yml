@@ -77,6 +77,11 @@ jobs:
           ref: ${{ inputs.ref || '' }}
       - name: Kernel modules for network faults
         run: sudo modprobe -a sch_netem ip_set ip_set_hash_net ip_set_hash_ip xt_set
+      # Every kind node shares the runner's kernel, and its default of 128
+      # inotify instances per user runs out with Chaos Mesh's controllers on
+      # top of the cluster; controllers that hit it crash.
+      - name: Raise inotify limits
+        run: sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=524288
       - uses: docker/setup-buildx-action@v3
       - name: Build the image
         uses: docker/build-push-action@v6
@@ -124,6 +129,12 @@ jobs:
           kubectl -n selvedge describe networkchaos,timechaos,podchaos | tail -60 || true
           kubectl -n selvedge get events --sort-by=.lastTimestamp | tail -40
           kubectl -n chaos-mesh logs -l app.kubernetes.io/component=chaos-daemon --tail=60 --prefix || true
+          echo "=== chaos-mesh"; kubectl -n chaos-mesh get pods -o wide || true
+          kubectl -n chaos-mesh get events --sort-by=.lastTimestamp | tail -30 || true
+          for p in $(kubectl -n chaos-mesh get pods -l app.kubernetes.io/component=controller-manager -o name); do
+            echo "=== $p"; kubectl -n chaos-mesh logs "$p" --tail=40 || true
+            echo "=== $p (previous)"; kubectl -n chaos-mesh logs "$p" --previous --tail=40 || true
+          done
           for c in gateway runner seaweedfs; do
             echo "=== $c"; kubectl -n selvedge logs -l app.kubernetes.io/component=$c --tail=150 --all-containers --prefix || true
           done

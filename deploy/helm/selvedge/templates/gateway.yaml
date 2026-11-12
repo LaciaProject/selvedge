@@ -60,7 +60,7 @@ spec:
             {{- if .Values.tls.enabled }}
             - { name: internal, containerPort: 8779 }
             {{- end }}
-          readinessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 2 }
+          readinessProbe: { httpGet: { path: /__selvedge/readyz, port: http }, periodSeconds: 2 }
           livenessProbe: { httpGet: { path: /__selvedge/healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
           resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}

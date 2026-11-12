@@ -150,6 +150,21 @@ struct Shared {
     healthy: RwLock<Vec<String>>,
     /// Stopping: health checks fail, requests are still served.
     draining: std::sync::atomic::AtomicBool,
+    /// The route table has loaded at least once.
+    routes_loaded: std::sync::atomic::AtomicBool,
+    /// A runner has passed a health check at least once.
+    runners_seen: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    /// Whether to take new connections: warmed up and not stopping. Until
+    /// then a gateway would answer every request 404 or 503, so it stays out
+    /// of the load balancer. Once warm it stays ready even if the API or every
+    /// runner goes away, like the other gateways.
+    fn ready(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        !self.draining.load(SeqCst) && self.routes_loaded.load(SeqCst) && self.runners_seen.load(SeqCst)
+    }
 }
 
 pub async fn run(cfg: GatewayConfig, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
@@ -296,6 +311,7 @@ async fn refresh_routes(
     *shared.routes.write().expect("poisoned") = map;
     *shared.patterns.write().expect("poisoned") = table.patterns;
     *etag = new_etag;
+    shared.routes_loaded.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
@@ -329,6 +345,9 @@ async fn check_runners(http: &reqwest::Client, cfg: &GatewayConfig, shared: &Sha
     let mut healthy: Vec<String> = futures::future::join_all(checks).await.into_iter().flatten().collect();
     healthy.sort();
     crate::metrics::GATEWAY_HEALTHY_RUNNERS.set(&[], healthy.len() as i64);
+    if !healthy.is_empty() {
+        shared.runners_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     let mut current = shared.healthy.write().expect("poisoned");
     if *current != healthy {
         tracing::info!(runners = ?healthy, "healthy runners changed");
@@ -375,6 +394,14 @@ async fn handle(
             return proxy::full(StatusCode::SERVICE_UNAVAILABLE, "draining");
         }
         return proxy::full(StatusCode::OK, "ok");
+    }
+    if req.uri().path() == "/__selvedge/readyz" {
+        if shared.ready() {
+            return proxy::full(StatusCode::OK, "ok");
+        }
+        let why =
+            if shared.draining.load(std::sync::atomic::Ordering::SeqCst) { "draining" } else { "starting" };
+        return proxy::full(StatusCode::SERVICE_UNAVAILABLE, why);
     }
     let start = std::time::Instant::now();
     let resp = route(cfg, shared, peer, req, internal_listener).await;
@@ -520,6 +547,37 @@ mod tests {
             colo: colo.map(str::to_owned),
             drain_delay: Duration::ZERO,
         }
+    }
+
+    #[tokio::test]
+    async fn ready_once_warm_until_draining() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let shared = Shared::default();
+        assert!(!shared.ready(), "no routes, no runners");
+        shared.routes_loaded.store(true, SeqCst);
+        assert!(!shared.ready(), "no runner seen yet");
+        // A runner answering /healthz marks the gateway warm, and it stays
+        // warm when that runner goes away.
+        let runner = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = runner.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let (s, _) = runner.accept().await.unwrap();
+                let handler = Arc::new(|_req| async { proxy::full(StatusCode::OK, "ok") });
+                proxy::serve_connection(s, handler);
+            }
+        });
+        let mut cfg = cfg_with(&[], None);
+        cfg.runners = Runners::Static(vec![addr]);
+        let http = reqwest::Client::new();
+        check_runners(&http, &cfg, &shared).await;
+        assert!(shared.ready());
+        cfg.runners = Runners::Static(vec![]);
+        check_runners(&http, &cfg, &shared).await;
+        assert!(shared.healthy.read().unwrap().is_empty());
+        assert!(shared.ready());
+        shared.draining.store(true, SeqCst);
+        assert!(!shared.ready());
     }
 
     #[test]

@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-最新发布是 v0.3.1：镜像 `ghcr.io/laciaproject/selvedge:0.3.1`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。它在 v0.3.0 的基础上让网关停止时先排空、启动时等加载完路由并看到健康的 runner 才接流量，滚动升级网关不再丢请求（新增 chart 参数 `gateway.drainDelaySeconds`），并加了 DO 故障注入测试和从上一个发布版本升级的测试。v0.3.0 在 v0.2.0（Containers）的基础上加了容器安全加固、任意信号、内置镜像仓库的垃圾回收，以及 workerd 进程死掉后 Durable Object 不到 1 秒就转移。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 39 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+最新发布是 v0.3.1：镜像 `ghcr.io/laciaproject/selvedge:0.3.1`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。它在 v0.3.0 的基础上让网关停止时先排空、启动时等加载完路由并看到健康的 runner 才接流量，滚动升级网关不再丢请求（新增 chart 参数 `gateway.drainDelaySeconds`），并加了 DO 故障注入测试和从上一个发布版本升级的测试。v0.3.0 在 v0.2.0（Containers）的基础上加了容器安全加固、任意信号、内置镜像仓库的垃圾回收，以及 workerd 进程死掉后 Durable Object 不到 1 秒就转移。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 41 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |
@@ -55,6 +55,8 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 | [#37](https://github.com/LaciaProject/selvedge/pull/37) | v0.3.1 |
 | [#38](https://github.com/LaciaProject/selvedge/pull/38) | Chaos 测试：创建故障时 Chaos Mesh 的 webhook 拒绝连接则重试 |
 | [#39](https://github.com/LaciaProject/selvedge/pull/39) | 网关新增 `/__selvedge/readyz`：加载完路由并看到健康的 runner 之前不进负载均衡 |
+| [#40](https://github.com/LaciaProject/selvedge/pull/40) | Chaos 测试：调高 inotify 上限避免 Chaos Mesh 控制器崩溃，创建故障重试 2 分钟，失败时保留控制器日志 |
+| [#41](https://github.com/LaciaProject/selvedge/pull/41) | 升级测试：失败请求记下 curl 退出码和耗时，并保留停掉的 pod 的日志 |
 
 CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请求：
 

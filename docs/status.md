@@ -40,7 +40,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 | [#20](https://github.com/LaciaProject/selvedge/pull/20) | R2 S3 接口的虚拟主机寻址 |
 | [#21](https://github.com/LaciaProject/selvedge/pull/21)–[#23](https://github.com/LaciaProject/selvedge/pull/23) | 本文档更新到 #20；发布工作流的镜像路径改小写；v0.1.1 |
 | [#24](https://github.com/LaciaProject/selvedge/pull/24) | 卡死检测：账号进程 30 秒不响应就杀掉重启 |
-| [#25](https://github.com/LaciaProject/selvedge/pull/25) | workerd 1.20261109.1：进程停止前先交接 Durable Object |
+| [#25](https://github.com/LaciaProject/selvedge/pull/25) | workerd 1.20261113.1：进程停止前先交接 Durable Object |
 | [#26](https://github.com/LaciaProject/selvedge/pull/26) | 组件之间复用连接，加请求路径基准测试 |
 | [#27](https://github.com/LaciaProject/selvedge/pull/27) | 每个组件的 Prometheus 指标 |
 | [#28](https://github.com/LaciaProject/selvedge/pull/28) | 每天自动检查 workerd 新版本 |
@@ -73,7 +73,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 | 产品 | 支持的内容 | 实现方式 |
 | --- | --- | --- |
-| Workers 运行时 | ES module、多模块（ES、CommonJS、Wasm、JSON、Python 等）、兼容日期与标志、出站 `fetch()` 和 `connect()` | workerd `1.20261109.1`，每个账号一个进程 |
+| Workers 运行时 | ES module、多模块（ES、CommonJS、Wasm、JSON、Python 等）、兼容日期与标志、出站 `fetch()` 和 `connect()` | workerd `1.20261113.1`，每个账号一个进程 |
 | 部署与版本 | `deploy`、`versions upload/deploy`、`rollback`、`delete`、`secret`，约 2 秒内生效 | agent 跟随变更流，先启动新版本再退掉旧版本 |
 | 灰度发布 | 两个版本按百分比分流，支持 `Cloudflare-Workers-Version-Key` 和 `-Overrides` 头 | 每个版本是单独的 workerd 服务 |
 | 路由 | workers.dev 式子域名、自定义域名、zone 路由（如 `*.example.com/*`），最具体的规则优先 | 由网关匹配；zone 由管理员分配给账号 |

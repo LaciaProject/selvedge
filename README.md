@@ -83,7 +83,7 @@ The chart's notes print how to get the admin token, create an account and deploy
 
 ```sh
 cargo build --release
-npm install -g workerd@1.20261109.1 wrangler   # or point SELVEDGE_WORKERD at a workerd binary
+npm install -g workerd@1.20261113.1 wrangler   # or point SELVEDGE_WORKERD at a workerd binary
 
 export SELVEDGE_DATABASE_URL=postgres://user:pass@localhost/selvedge
 export SELVEDGE_BLOB_URL=file://$HOME/.local/share/selvedge/blobs

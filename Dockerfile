@@ -3,10 +3,15 @@
 # checked against its published sha512 integrity hash.
 
 FROM rust:1-bookworm AS build
+# Multi-platform builds run this stage once per platform, at the same time.
+# Each gets its own caches: a shared target directory could put one
+# platform's binary in the other's image, and a shared registry let both
+# unpack the same crate at once (v0.3.1's first release run failed so).
+ARG TARGETPLATFORM
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=cargo-registry-$TARGETPLATFORM,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-target-$TARGETPLATFORM,target=/src/target,sharing=locked \
     cargo build --release --locked -p selvedge && cp target/release/selvedge /selvedge
 
 FROM debian:bookworm-slim AS workerd

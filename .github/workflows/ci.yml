@@ -20,8 +20,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The official workerd release Selvedge is tested against.
-  WORKERD_VERSION: "1.20261109.1"
 
 jobs:
   rust:
@@ -36,9 +34,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install official workerd
         run: |
-          # The checked-out version: when called for another ref, this file's
-          # env is the caller's.
-          v=$(sed -n 's/^  WORKERD_VERSION: "\(.*\)"$/\1/p' .github/workflows/ci.yml)
+          # The release the image ships (the Dockerfile is the one place it is
+          # pinned; the workerd update workflow may not edit workflow files).
+          v=$(sed -n 's/^ARG WORKERD_VERSION=//p' Dockerfile)
+          [ -n "$v" ] || { echo "no WORKERD_VERSION in Dockerfile" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/workerd" && cd "$RUNNER_TEMP/workerd"
           npm init -y >/dev/null
           npm install --no-audit --no-fund "workerd@$v"

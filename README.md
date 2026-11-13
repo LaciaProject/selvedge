@@ -10,7 +10,8 @@ availability-zone failures.
 > "Cloudflare" and "Workers" are trademarks of Cloudflare, Inc.; they are used here only to describe
 > API compatibility.
 
-Status: **early development (v0.1)**. The API and storage formats can still change.
+Status: **early development** ([latest release](https://github.com/LaciaProject/selvedge/releases/latest)). The API and
+storage formats can still change.
 
 ## Why
 

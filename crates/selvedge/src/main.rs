@@ -99,6 +99,17 @@ struct ApiArgs {
     gateway_url: Option<String>,
     #[command(flatten)]
     registry: RegistryArgs,
+    #[command(flatten)]
+    drain: DrainArgs,
+}
+
+#[derive(Args, Clone)]
+struct DrainArgs {
+    /// Seconds to keep accepting connections after SIGTERM before closing
+    /// the listener: a Service sends new connections to a stopping pod until
+    /// its endpoints update. Not used by `all`.
+    #[arg(long, env = "SELVEDGE_DRAIN_DELAY", default_value_t = 5)]
+    drain_delay: u64,
 }
 
 /// Containers in the API: the image registry it is the token service of.
@@ -260,6 +271,8 @@ struct DataArgs {
     /// (<bucket>.<domain>); path-style requests work either way.
     #[arg(long, env = "SELVEDGE_R2_S3_DOMAIN")]
     r2_s3_domain: Option<String>,
+    #[command(flatten)]
+    drain: DrainArgs,
 }
 
 #[derive(Args, Clone)]
@@ -453,6 +466,17 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
     tracing::info!("shutting down");
+}
+
+/// The shutdown signal, then `delay` more of accepting connections: until
+/// the Service's endpoints drop this pod, connections still arrive, and a
+/// closed listener refuses them.
+async fn shutdown_after(delay: Duration) {
+    shutdown_signal().await;
+    if !delay.is_zero() {
+        tracing::info!(?delay, "still accepting connections before closing the listener");
+        tokio::time::sleep(delay).await;
+    }
 }
 
 async fn open_db(args: &DbArgs) -> Result<Db> {
@@ -698,6 +722,7 @@ async fn main() -> Result<()> {
             );
         }
         Command::Api(args) => {
+            let drain = Duration::from_secs(args.drain.drain_delay);
             let state = api_state(&args).await?;
             let router = selvedge_server::api::router(state);
             if selvedge_server::tls::get().is_some() {
@@ -710,7 +735,7 @@ async fn main() -> Result<()> {
                         addr,
                         selvedge_server::tls::API_INTERNAL_CLIENTS,
                         internal,
-                        shutdown_signal(),
+                        shutdown_after(drain),
                     )
                     .await
                     {
@@ -719,12 +744,13 @@ async fn main() -> Result<()> {
                 });
                 // The public listener: everything but the internal endpoints.
                 let public = router.layer(axum::middleware::from_fn(refuse_internal));
-                serve_axum(args.listen, public, shutdown_signal()).await?;
+                serve_axum(args.listen, public, shutdown_after(drain)).await?;
             } else {
-                serve_axum(args.listen, router, shutdown_signal()).await?;
+                serve_axum(args.listen, router, shutdown_after(drain)).await?;
             }
         }
         Command::Data(args) => {
+            let drain = Duration::from_secs(args.drain.drain_delay);
             let db = open_db(&args.db).await?;
             let blobs = Blobs::open(&args.blob_url, &blob_options())?;
             let r2_s3 = args.r2_s3_listen.map(|addr| {
@@ -767,7 +793,7 @@ async fn main() -> Result<()> {
             if let Some((addr, s3)) = r2_s3 {
                 tokio::spawn(async move {
                     if let Err(e) =
-                        serve_axum(addr, selvedge_server::r2s3::router(s3), shutdown_signal()).await
+                        serve_axum(addr, selvedge_server::r2s3::router(s3), shutdown_after(drain)).await
                     {
                         tracing::error!(error = %format!("{e:#}"), "R2 S3 API listener failed");
                     }
@@ -777,7 +803,7 @@ async fn main() -> Result<()> {
                 args.listen,
                 selvedge_server::tls::DATA_CLIENTS,
                 selvedge_server::data::router(state),
-                shutdown_signal(),
+                shutdown_after(drain),
             )
             .await?;
         }

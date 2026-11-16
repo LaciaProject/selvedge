@@ -19,6 +19,8 @@ use hyper_util::rt::TokioIo;
 pub type Body = BoxBody<Bytes, hyper::Error>;
 
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The first pause between connection attempts in [`Pool::request_retrying`].
+const RETRY_BACKOFF: Duration = Duration::from_millis(25);
 
 /// Headers between hops that must not be forwarded, except `upgrade`/`connection`
 /// on upgrade requests.
@@ -247,6 +249,10 @@ impl Pool {
                 Err(Failed::NotSent(r, e)) if attempt < attempts => {
                     tracing::debug!(%addr, attempt, error = %e, "connect failed; retrying");
                     req = *r;
+                    // Back off (25, 50, 100 ms...): retried at once, every
+                    // attempt can reach the same stopped pod before the
+                    // Service's endpoints drop it.
+                    tokio::time::sleep(RETRY_BACKOFF * (1 << (attempt - 1).min(5))).await;
                 }
                 Err(Failed::NotSent(_, e)) => return Err(e),
             }

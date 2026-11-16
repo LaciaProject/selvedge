@@ -509,7 +509,7 @@ async fn route(
     let first = rand::random_range(0..set);
     ranked[..set].rotate_left(first);
 
-    let mut req = req;
+    let mut req = req.map(http_body_util::BodyExt::boxed);
     for addr in &ranked {
         match proxy::POOL.request(addr, crate::tls::Role::Runner, req).await {
             Ok(r) => return r,

@@ -76,6 +76,13 @@ pick() { # sets V; not in a subshell, so the turn advances
 others() { runners | grep -vx "$1"; }
 settle() {
   $K rollout status deploy/slv-runner --timeout=300s > /dev/null
+  # The selector below also matches runners still stopping, which never turn
+  # Ready again: waiting on one lasts until the timeout, even once it is gone.
+  local stopping
+  stopping=$($K get pods -l app.kubernetes.io/component=runner \
+    -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{" "}{end}')
+  # shellcheck disable=SC2086 # one name per word
+  [ -z "$stopping" ] || $K wait --for=delete pod $stopping --timeout=300s > /dev/null
   $K wait --for=condition=Ready pod -l app.kubernetes.io/component=runner --timeout=300s > /dev/null
   sleep 5
 }

@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rustix::process::{Pid, Signal, kill_process};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -122,8 +123,13 @@ impl WorkerdProcess {
     /// mode a drain deregisters the instance so peers take its objects at once.
     /// Answers whether the process is known to have exited.
     pub async fn stop(mut self, grace: Duration) -> bool {
-        if let Some(pid) = self.child.id() {
-            let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status().await;
+        // Signalled directly: the image has no `kill` program, and a SIGTERM
+        // that never arrives leaves the process to be killed after `grace`,
+        // without handing off its Durable Objects.
+        if let Some(pid) = self.child.id().and_then(|p| i32::try_from(p).ok()).and_then(Pid::from_raw)
+            && let Err(e) = kill_process(pid, Signal::TERM)
+        {
+            tracing::warn!(label = %self.label, error = %e, "sending workerd SIGTERM failed");
         }
         match tokio::time::timeout(grace, self.child.wait()).await {
             Ok(status) => status.is_ok(),
@@ -165,5 +171,27 @@ fn forward_logs(child: &mut Child, label: &str) {
                 tracing::warn!(target: "workerd", label = %label, "{line}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stop delivers SIGTERM itself, so a process that exits on it stops
+    /// at once rather than at the end of the grace period, even where no
+    /// `kill` program is installed (as in the image).
+    #[tokio::test]
+    async fn stop_sends_sigterm() {
+        let child = Command::new("sh")
+            .args(["-c", "trap 'exit 0' TERM; while :; do sleep 0.05; done"])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("sh starts");
+        let process = WorkerdProcess { child, sockets: Vec::new(), label: "test".into() };
+        tokio::time::sleep(Duration::from_millis(200)).await; // let the trap be set
+        let started = tokio::time::Instant::now();
+        assert!(process.stop(Duration::from_secs(20)).await);
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 }

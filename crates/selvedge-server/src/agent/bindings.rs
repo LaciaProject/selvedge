@@ -98,7 +98,14 @@ pub fn serve(
             );
             headers.insert(ACCOUNT_HEADER, account_header);
             headers.insert(http::header::AUTHORIZATION, auth);
-            let sent = proxy::POOL.request_retrying(&cfg.data_addr, crate::tls::Role::Data, req, 4).await;
+            let sent = proxy::POOL
+                .request_retrying(
+                    &cfg.data_addr,
+                    crate::tls::Role::Data,
+                    req.map(http_body_util::BodyExt::boxed),
+                    4,
+                )
+                .await;
             let code = sent.as_ref().map_or("error", |r| crate::metrics::code_class(r.status()));
             crate::metrics::AGENT_BINDING_REQUESTS.inc(&[binding, code]);
             match sent {

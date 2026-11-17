@@ -2022,6 +2022,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "hex",
+ "rustix",
  "selvedge-core",
  "serde",
  "serde_json",

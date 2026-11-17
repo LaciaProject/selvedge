@@ -166,7 +166,18 @@ else
   check "no stateless request failed during the upgrade" "0" "$KV_FAILS"
 fi
 
-# ---- Everything written before is still there.
+# ---- Everything written before is still there, checked once the old
+# release's pods have gone. Up to 0.3.1 a runner's workerd processes never got
+# SIGTERM (the image has no `kill` program): each one it replaced or stopped
+# was killed 30 s later without handing its Durable Objects off, failing the
+# requests that reached them then.
+OLD_PODS=$($K get pods -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{" "}{end}')
+if [ -n "$OLD_PODS" ]; then
+  waited=$(date +%s)
+  # shellcheck disable=SC2086 # one name per word
+  $K wait --for=delete pod $OLD_PODS --timeout=180s > /dev/null
+  echo "     the old release's pods were gone $(( $(date +%s) - waited ))s later"
+fi
 check "the image is this build's" "selvedge:ci" "$(version runner)"
 COUNT=$(auth "$API/accounts/$ACCOUNT/storage/kv/namespaces/$NAMESPACE/values/count")
 check "KV kept its value, and the Worker goes on from it" "before #$((COUNT + 1))" "$(get kv-app /)"

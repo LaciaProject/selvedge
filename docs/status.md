@@ -1,6 +1,6 @@
 # 项目进度、功能与局限
 
-截至 2026-11-10。
+截至 2026-11-17。
 
 Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用 `wrangler` 部署的 Worker 不用改代码，就能在自己的 Kubernetes 集群上运行。规划中的主要产品都已实现，并通过了单节点、多 runner 集群和 3 可用区 Kubernetes 高可用测试。设计细节见 [RFC 0001](rfcs/0001-architecture.md)，逐项兼容性差异见 [compatibility.md](compatibility.md)。
 
@@ -14,7 +14,7 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 
 ## 当前进度
 
-最新发布是 v0.3.1：镜像 `ghcr.io/laciaproject/selvedge:0.3.1`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。它在 v0.3.0 的基础上让网关停止时先排空、启动时等加载完路由并看到健康的 runner 才接流量，滚动升级网关不再丢请求（新增 chart 参数 `gateway.drainDelaySeconds`），并加了 DO 故障注入测试和从上一个发布版本升级的测试。v0.3.0 在 v0.2.0（Containers）的基础上加了容器安全加固、任意信号、内置镜像仓库的垃圾回收，以及 workerd 进程死掉后 Durable Object 不到 1 秒就转移。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 41 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
+最新发布是 v0.3.2：镜像 `ghcr.io/laciaproject/selvedge:0.3.2`，Helm chart `oci://ghcr.io/laciaproject/charts/selvedge`。它修复了 v0.3.1 及更早版本的一个问题：镜像里没有 `kill` 程序，runner 停止 workerd 进程时 SIGTERM 发不出去，所以部署新版本、闲置回收和 runner 停止时，旧进程都要过 30 秒才被强杀，Durable Object 没有交接，那一刻发往这些对象的请求会失败。v0.3.2 还让 API 和数据服务停止时先继续接受连接 5 秒，组件之间的长连接在应答前被关闭时重发无请求体的请求，并把 workerd 升到 1.20261116.1。v0.3.1 在 v0.3.0 的基础上让网关停止时先排空、启动时等加载完路由并看到健康的 runner 才接流量，滚动升级网关不再丢请求（新增 chart 参数 `gateway.drainDelaySeconds`），并加了 DO 故障注入测试和从上一个发布版本升级的测试。v0.3.0 在 v0.2.0（Containers）的基础上加了容器安全加固、任意信号、内置镜像仓库的垃圾回收，以及 workerd 进程死掉后 Durable Object 不到 1 秒就转移。第一个发布版本是 v0.1.1（`v0.1.0` 标签的发布因镜像路径大小写问题失败，没有产出任何制品）。代码分 51 个 PR 依次合并进 `main`，每个 PR 合并前都通过了 CI。
 
 | PR | 内容 |
 | --- | --- |
@@ -57,6 +57,16 @@ Selvedge 是一个开源、高可用、兼容 Cloudflare Workers 的平台：用
 | [#39](https://github.com/LaciaProject/selvedge/pull/39) | 网关新增 `/__selvedge/readyz`：加载完路由并看到健康的 runner 之前不进负载均衡 |
 | [#40](https://github.com/LaciaProject/selvedge/pull/40) | Chaos 测试：调高 inotify 上限避免 Chaos Mesh 控制器崩溃，创建故障重试 2 分钟，失败时保留控制器日志 |
 | [#41](https://github.com/LaciaProject/selvedge/pull/41) | 升级测试：失败请求记下 curl 退出码和耗时，并保留停掉的 pod 的日志 |
+| [#42](https://github.com/LaciaProject/selvedge/pull/42) | 本文档更新到 #41 |
+| [#43](https://github.com/LaciaProject/selvedge/pull/43) | workerd 自动更新只改 Dockerfile 里的版本，机器人才能推送分支 |
+| [#44](https://github.com/LaciaProject/selvedge/pull/44) | README 不再称项目为 v0.1 |
+| [#46](https://github.com/LaciaProject/selvedge/pull/46) | 镜像构建：每个平台用自己的 Cargo 缓存 |
+| [#49](https://github.com/LaciaProject/selvedge/pull/49) | API 和数据服务停止时先继续接受连接 5 秒；runner 连数据服务失败时退避重试 |
+| [#51](https://github.com/LaciaProject/selvedge/pull/51) | workerd 1.20261116.1；升级脚本不再改写本表里的版本号 |
+| [#52](https://github.com/LaciaProject/selvedge/pull/52) | 组件之间的长连接在应答前被关闭时，无请求体的 GET、HEAD、OPTIONS 换一条连接重发 |
+| [#54](https://github.com/LaciaProject/selvedge/pull/54) | runner 直接给 workerd 发 SIGTERM：镜像里没有 `kill` 程序，之前信号从未送达，旧进程 30 秒后被强杀，不交接 DO |
+| [#55](https://github.com/LaciaProject/selvedge/pull/55) | Chaos 测试：先等正在退出的 runner 消失，再等其余的就绪 |
+| [#56](https://github.com/LaciaProject/selvedge/pull/56) | v0.3.2 |
 
 CI 包含以下几项，测试都由真实的 `wrangler` 和 AWS SDK 发起请求：
 
@@ -103,9 +113,9 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 **高可用**
 
 - API、网关、数据服务和 runner 都是多副本，分散在不同可用区。状态只存在 PostgreSQL 和 S3 里。
-- 网关停止时先排空：收到 SIGTERM 后健康检查失败，但继续服务 5 秒（`gateway.drainDelaySeconds`），让 kube-proxy 和负载均衡先把新连接转走；然后不再接受连接，等正在处理的请求完成（最多 20 秒）再退出。API 和数据服务停止时同样先继续接受连接 5 秒（`SELVEDGE_DRAIN_DELAY`），等 Service 的 endpoints 去掉自己再关闭监听；runner 连数据服务失败时会退避重试，换到其他副本。
+- 网关停止时先排空：收到 SIGTERM 后健康检查失败，但继续服务 5 秒（`gateway.drainDelaySeconds`），让 kube-proxy 和负载均衡先把新连接转走；然后不再接受连接，等正在处理的请求完成（最多 20 秒）再退出。API 和数据服务停止时同样先继续接受连接 5 秒（`SELVEDGE_DRAIN_DELAY`），等 Service 的 endpoints 去掉自己再关闭监听；runner 连数据服务失败时会退避重试，换到其他副本。组件之间复用长连接，一条连接在应答前被对端关闭时，没有请求体的 GET、HEAD、OPTIONS 会换一条连接重发，其他请求可能已被处理过，直接报错。
 - runner 在本地缓存配置和静态资源，数据服务不可用时，已部署的 Worker 照常服务。
-- 每个 Durable Object 同一时间只有一个所属进程。正常关闭（如滚动升级、超内存重启）时，workerd 逐个交接对象：先让对象上正在处理的请求完成（最多 4 秒），再交给下一个请求所在的进程；进程崩溃或被杀而 agent 还在时，由 agent 代它放弃租约，对象约 1 秒内转移；整个 runner 宕机时要等租约过期，最多约 20 秒。
+- 每个 Durable Object 同一时间只有一个所属进程。正常关闭（如部署新版本、滚动升级、超内存重启、闲置回收）时，agent 向 workerd 发 SIGTERM，workerd 逐个交接对象：先让对象上正在处理的请求完成（最多 4 秒），再交给下一个请求所在的进程；进程崩溃或被杀而 agent 还在时，由 agent 代它放弃租约，对象约 1 秒内转移；整个 runner 宕机时要等租约过期，最多约 20 秒。
 - Cron 和 Queues 靠数据库里的抢占和租约避免重复执行。副本崩溃后租约过期，消息会重新投递。
 
 **可观测性**
@@ -130,7 +140,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 
 | 方面 | 局限 |
 | --- | --- |
-| DO 故障转移 | 整个 runner 宕机（节点故障、Pod 被杀）后，对它所持对象的调用最多失败约 20 秒。这是 workerd 内部固定的租约时长：agent 也不在了，没人能确认进程已死，只能等租约过期。只是 workerd 进程崩溃、被 OOM 杀掉或因卡死被杀时，agent 代它放弃租约，对象约 1 秒内转移，只有正在处理的请求会失败。滚动升级和超内存重启会先交接对象，不用等，正在处理的请求也能完成。一个 runner 和其他 runner 断开、但仍连得上对象存储时，它的租约照常续约，对象不会转移；落到其他 runner 上的这些对象的请求会挂起，直到客户端超时（故障注入测试里有对象 15–45 秒没有响应）。存储写入的延迟取决于 S3。S3 必须支持条件写（已测 SeaweedFS 4.50） |
+| DO 故障转移 | 整个 runner 宕机（节点故障、Pod 被杀）后，对它所持对象的调用最多失败约 20 秒。这是 workerd 内部固定的租约时长：agent 也不在了，没人能确认进程已死，只能等租约过期。只是 workerd 进程崩溃、被 OOM 杀掉或因卡死被杀时，agent 代它放弃租约，对象约 1 秒内转移，只有正在处理的请求会失败。部署新版本、滚动升级和超内存重启会先交接对象，不用等，正在处理的请求也能完成。一个 runner 和其他 runner 断开、但仍连得上对象存储时，它的租约照常续约，对象不会转移；落到其他 runner 上的这些对象的请求会挂起，直到客户端超时（故障注入测试里有对象 15–45 秒没有响应）。存储写入的延迟取决于 S3。S3 必须支持条件写（已测 SeaweedFS 4.50） |
 | CPU 和内存限制 | 限制针对整个账号进程，不针对单个请求。一个请求失控会让进程重启，同账号其他正在处理的请求也会失败。cgroup 不可写时（K8s 里常见）由 agent 自己监控：内存超限约 2 秒内重启进程（有 DO 的进程先给 10 秒交接，期间新请求已由新进程处理；没有 DO 的给 3 秒），CPU 超限只降低优先级，不会被硬性封顶。陷入死循环的请求要等卡死检测超时（默认 30 秒）才会被终止，这期间同账号的所有请求都会挂起；被杀进程上的 DO 随即转移 |
 | `request.cf` | 地理和网络字段来自前面负载均衡注入的请求头（`--cf-header` 映射），Selvedge 自己没有 GeoIP 数据库；没有 `botManagement` 等 Cloudflare 专有字段 |
 | 灰度发布 | 定义了 DO 或带静态资源的 Worker 不能分流。服务绑定、Cron 和队列只发往占比大的版本 |

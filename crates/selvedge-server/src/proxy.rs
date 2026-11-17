@@ -80,7 +80,7 @@ pub enum Target<'a> {
     Unix(&'a Path),
 }
 
-pub type Sender = hyper::client::conn::http1::SendRequest<Incoming>;
+pub type Sender = hyper::client::conn::http1::SendRequest<Body>;
 
 /// Opens a connection. Failing here means nothing was sent, so the caller may
 /// try another target with the same request.
@@ -119,7 +119,7 @@ pub async fn connect(target: Target<'_>) -> Result<Sender, String> {
 
 /// Sends `req` on `sender` and returns the response. If both sides agree to
 /// upgrade, the two upgraded connections are joined.
-pub async fn send(mut sender: Sender, mut req: Request<Incoming>) -> Result<Response<Body>, String> {
+pub async fn send(mut sender: Sender, mut req: Request<Body>) -> Result<Response<Body>, String> {
     strip_hop_by_hop(req.headers_mut());
     let client_upgrade = is_upgrade(req.headers()).then(|| hyper::upgrade::on(&mut req));
     let mut resp = sender.send_request(req).await.map_err(|e| e.to_string())?;
@@ -141,14 +141,14 @@ pub async fn send(mut sender: Sender, mut req: Request<Incoming>) -> Result<Resp
 }
 
 pub async fn forward(target: Target<'_>, req: Request<Incoming>) -> Result<Response<Body>, String> {
-    send(connect(target).await?, req).await
+    send(connect(target).await?, req.map(BodyExt::boxed)).await
 }
 
 /// Why a pooled request failed.
 pub enum Failed {
     /// Nothing was sent (no connection could be opened): the request comes
     /// back, to try elsewhere.
-    NotSent(Box<Request<Incoming>>, String),
+    NotSent(Box<Request<Body>>, String),
     /// The request may have reached the server, so it must not be replayed.
     Sent(String),
 }
@@ -195,13 +195,16 @@ impl Pool {
 
     /// Sends `req` to `addr` on a kept-alive connection, or a new one. A kept
     /// connection that turns out closed before the request was written is
-    /// replaced by a new one. Upgrades (WebSockets) always get a connection of
+    /// replaced by a new one, and so is one the server closed before it
+    /// answered a GET, HEAD or OPTIONS request without a body: a server that
+    /// is stopping closes its idle connections, and a request can go out on
+    /// one at that moment. Upgrades (WebSockets) always get a connection of
     /// their own.
     pub async fn request(
         &self,
         addr: &str,
         server: crate::tls::Role,
-        mut req: Request<Incoming>,
+        mut req: Request<Body>,
     ) -> Result<Response<Body>, Failed> {
         if is_upgrade(req.headers()) {
             let sender = match connect(Target::Tcp(addr, server)).await {
@@ -213,14 +216,19 @@ impl Pool {
         strip_hop_by_hop(req.headers_mut());
         let key = (addr.to_owned(), server);
         if let Some(mut sender) = self.checkout(&key) {
+            let replay = replayable(&req).then(|| bodiless_copy(&req));
             match sender.try_send_request(req).await {
                 Ok(resp) => {
                     self.give_back(key, sender);
                     return Ok(finish(resp));
                 }
-                Err(mut e) => match e.take_message() {
-                    Some(r) => req = r,
-                    None => return Err(Failed::Sent(e.into_error().to_string())),
+                Err(mut e) => match (e.take_message(), replay) {
+                    (Some(r), _) => req = r,
+                    (None, Some(r)) if e.error().is_incomplete_message() => {
+                        tracing::debug!(%addr, error = %e.error(), "kept connection closed unanswered; sending again");
+                        req = r;
+                    }
+                    (None, _) => return Err(Failed::Sent(e.into_error().to_string())),
                 },
             }
         }
@@ -239,7 +247,7 @@ impl Pool {
         &self,
         addr: &str,
         server: crate::tls::Role,
-        mut req: Request<Incoming>,
+        mut req: Request<Body>,
         attempts: usize,
     ) -> Result<Response<Body>, String> {
         for attempt in 1.. {
@@ -261,13 +269,29 @@ impl Pool {
     }
 }
 
+/// A request that may be sent again when the connection it went out on
+/// closed before any answer: one that changes nothing, with no body.
+fn replayable(req: &Request<Body>) -> bool {
+    matches!(*req.method(), http::Method::GET | http::Method::HEAD | http::Method::OPTIONS)
+        && hyper::body::Body::is_end_stream(req.body())
+}
+
+fn bodiless_copy(req: &Request<Body>) -> Request<Body> {
+    let mut r = Request::new(http_body_util::Empty::new().map_err(|e: Infallible| match e {}).boxed());
+    *r.method_mut() = req.method().clone();
+    *r.uri_mut() = req.uri().clone();
+    *r.version_mut() = req.version();
+    *r.headers_mut() = req.headers().clone();
+    r
+}
+
 fn finish(resp: Response<Incoming>) -> Response<Body> {
     let (mut parts, body) = resp.into_parts();
     strip_hop_by_hop(&mut parts.headers);
     Response::from_parts(parts, body.boxed())
 }
 
-fn spawn_conn<T>(conn: hyper::client::conn::http1::Connection<TokioIo<T>, Incoming>)
+fn spawn_conn<T>(conn: hyper::client::conn::http1::Connection<TokioIo<T>, Body>)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -432,7 +456,10 @@ mod tests {
                     Arc::new(move |req: Request<Incoming>| {
                         let (pool, backend) = (pool.clone(), backend.clone());
                         async move {
-                            match pool.request(&backend, crate::tls::Role::Runner, req).await {
+                            match pool
+                                .request(&backend, crate::tls::Role::Runner, req.map(BodyExt::boxed))
+                                .await
+                            {
                                 Ok(r) => r,
                                 Err(Failed::NotSent(_, e)) => full(StatusCode::SERVICE_UNAVAILABLE, e),
                                 Err(Failed::Sent(e)) => full(StatusCode::BAD_GATEWAY, e),
@@ -508,6 +535,56 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    }
+
+    /// A backend that answers the first request on each connection, then
+    /// closes the connection when the next one arrives, unanswered: a server
+    /// that stops just as a request goes out on its idle connection.
+    async fn backend_hanging_up() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let mut got = Vec::new();
+                    // Reads up to the end of the first request's head and body.
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi").await;
+                    let _ = s.read(&mut buf).await;
+                });
+            }
+        });
+        (addr, accepted)
+    }
+
+    #[tokio::test]
+    async fn sends_a_get_again_when_its_kept_connection_closes_unanswered() {
+        let (b, accepted) = backend_hanging_up().await;
+        let f = front(Arc::new(Pool::default()), b).await;
+        let client = reqwest::Client::new();
+        for _ in 0..3 {
+            assert_eq!(get(&client, &f).await, (200, "hi".into()));
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn does_not_send_a_post_again() {
+        let (b, _) = backend_hanging_up().await;
+        let f = front(Arc::new(Pool::default()), b).await;
+        let client = reqwest::Client::new();
+        assert_eq!(get(&client, &f).await, (200, "hi".into()));
+        let r = client.post(format!("http://{f}/")).body("x").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 502);
     }
 
     #[tokio::test]

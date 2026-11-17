@@ -38,10 +38,37 @@ const LIMIT_GRACE: Duration = Duration::from_secs(3);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a cluster-mode process gets past its own stop timeout.
 const STOP_MARGIN: Duration = Duration::from_secs(2);
+/// How many times a GET to the API is sent, and the first wait between them.
+const API_ATTEMPTS: u32 = 4;
+const API_RETRY_BACKOFF: Duration = Duration::from_millis(25);
 /// How often the agent probes each process's health worker.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 /// How often the agent checks whether a cluster process is still running.
 const EXIT_POLL: Duration = Duration::from_millis(250);
+
+/// A GET to the API, sent up to 4 times, backing off 25, 50 and 100 ms. It is
+/// sent again when it fails to connect, times out, or fails on the way out,
+/// as when an API pod that is stopping closes the kept connection it went out
+/// on: a GET changes nothing. A new connection can reach another API replica
+/// while a stopped one is still listed in the Service's endpoints.
+async fn get_retrying(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> reqwest::Result<reqwest::Response> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match client.get(url).bearer_auth(token).send().await {
+            Ok(r) => return Ok(r),
+            Err(e) if attempt < API_ATTEMPTS && (e.is_connect() || e.is_timeout() || e.is_request()) => {
+                tracing::debug!(%url, attempt, error = %e, "API request failed; retrying");
+                tokio::time::sleep(API_RETRY_BACKOFF * (1 << (attempt - 1))).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// A cluster process's storage key, which ends with it.
 struct Storage {
@@ -565,21 +592,8 @@ impl Manager {
         })
     }
 
-    /// A GET to the API, retried when the connection fails or times out. Each
-    /// attempt is a new connection, so it can reach another API replica while
-    /// a dead one is still listed in the Service's endpoints.
     async fn get(&self, client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            match client.get(url).bearer_auth(&self.cfg.internal_token).send().await {
-                Ok(r) => return Ok(r),
-                Err(e) if attempt < 4 && (e.is_connect() || e.is_timeout()) => {
-                    tracing::debug!(%url, attempt, error = %e, "API request failed; retrying");
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        Ok(get_retrying(client, url, &self.cfg.internal_token).await?)
     }
 
     async fn generation(&self, account: &AccountId) -> Result<Option<i64>> {
@@ -827,4 +841,54 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::get_retrying;
+
+    /// A server that answers the first request on each connection, then
+    /// closes the connection when the next one arrives, unanswered: an API
+    /// pod that stops just as a GET goes out on its idle connection.
+    async fn hanging_up() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let mut got = Vec::new();
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi").await;
+                    let _ = s.read(&mut buf).await;
+                });
+            }
+        });
+        (addr, accepted)
+    }
+
+    #[tokio::test]
+    async fn sends_a_get_again_when_its_kept_connection_closes_unanswered() {
+        let (addr, accepted) = hanging_up().await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/internal/v1/blobs/x");
+        for _ in 0..3 {
+            let r = get_retrying(&client, &url, "token").await.expect("sent again on a new connection");
+            assert_eq!(r.text().await.unwrap(), "hi");
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    }
 }

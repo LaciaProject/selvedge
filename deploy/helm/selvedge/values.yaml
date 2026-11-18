@@ -75,6 +75,38 @@ api:
     type: ClusterIP
     port: 8787
 
+# The web dashboard (RFC 0003, docs/dashboard.md), served by the API pods on
+# their own port for its own domain. It is on once `url` is set: route that
+# domain to the <release>-dash Service and terminate TLS in front of it.
+dash:
+  enabled: true
+  # The dashboard's public URL, e.g. https://dash.example.com. Requests must
+  # come from its origin, and OpenID Connect redirects to <url>/auth/callback.
+  url: ""
+  service:
+    type: ClusterIP
+    port: 8785
+  # Logging in with an API token, besides OpenID Connect.
+  tokenLogin: true
+  session:
+    idleSeconds: 28800 # 8 h
+    maxSeconds: 86400 # 24 h
+  oidc:
+    # The provider's issuer URL; empty: no single sign-on.
+    issuer: ""
+    clientId: ""
+    # A Secret with key `client-secret`; empty for a public client.
+    existingSecret: ""
+    # On the login button.
+    name: SSO
+    scopes: [openid, email, profile]
+    # The claim with the user's groups (a dotted path reaches into objects).
+    groupsClaim: groups
+    # Members of these groups, and people with these verified emails, are
+    # platform admins.
+    adminGroups: []
+    adminEmails: []
+
 data:
   resources:
     requests: { cpu: 100m, memory: 128Mi }

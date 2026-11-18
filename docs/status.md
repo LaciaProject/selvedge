@@ -100,6 +100,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Workflows | `step.do`、`sleep`、`sleepUntil`、`waitForEvent`，实例管理，`wrangler workflows` 全部子命令 | 未修改的 Cloudflare Workflows 引擎，每个实例一个 Durable Object |
 | `wrangler tail` | pretty 和 json 两种格式及全部过滤器，包括 console 日志与异常 | tail worker 加 PostgreSQL `LISTEN/NOTIFY` |
 | Containers | DO 通过 `ctx.container` 控制容器：`start`、`getTcpPort().fetch()`、`monitor`、`destroy`、出站拦截、`enableInternet`、`exec()`；`wrangler deploy` 构建、推送镜像并创建应用；`max_instances` 和实例规格 | 运营方开启后可用。每个实例是一个跑在 Kata 虚拟机里的 Pod，由唯一持有集群凭证的控制组件创建；镜像仓库用 API 签发的 token 认证。见 [containers.md](containers.md) |
+| Web 控制台 | 类似 Cloudflare 控制台的管理界面，中英文：Worker 的版本、部署、分流、绑定、密钥、路由、域名、Cron 和实时日志；KV、D1（SQL 控制台、导入导出）、R2（对象浏览、公开访问、生命周期）、Queues、Workflows、Durable Objects、Containers；成员和 token；平台管理员管理账号、用户和 zone | Cloudflare 开源的 Kumo 组件；API 进程上的独立端口和独立域名，标准 OIDC 单点登录，见 [dashboard.md](dashboard.md) |
 | 服务绑定、环境变量、密钥 | 支持命名入口点；密钥用 AES-256-GCM 加密存储 | 只能在同一账号内使用 |
 
 ## 高可用与安全
@@ -125,6 +126,8 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 - 每个组件在单独的端口上提供 Prometheus 指标，Helm 默认开启：请求数和延迟、runner 健康、连接复用、账号进程的启动和停止原因（含内存超限和卡死）、进程崩溃、CPU 降权、各类绑定调用。指标不带账号 id，序列数不随租户增长。详见 [metrics.md](metrics.md)。
 
 **安全与隔离**
+
+- **Web 控制台**：使用单独的域名和端口，只认会话 cookie（HttpOnly、SameSite=Lax），不认 Bearer token；API 端口只认 Bearer token。改动类请求必须来自控制台自己的 Origin，并带自定义请求头；页面配严格的 CSP，不能被嵌入 iframe。OIDC 用授权码加 PKCE，ID token 的签名、签发方、受众、`nonce` 和有效期都会校验。成员资格每次请求时重新读取，移除成员立即生效。
 
 - **组件间 mTLS**：Helm 默认开启，自动生成 CA，并为 API、data、gateway、runner 各签发一张证书。每个内部端口只接受调用它的角色，所以 runner 的证书连不上其他 runner，也不能把请求路由进账号进程。内部接口在单独的端口上监听，公共端口拒绝内部请求，NetworkPolicy 限制可访问的端口。
 - **按账号隔离进程**：每个账号一个 workerd 进程，用独立的 Linux 用户运行，账号之间互相访问不到对方的文件和 socket。
@@ -153,6 +156,7 @@ Cloudflare Workers 的核心产品都已可用。把 `CLOUDFLARE_API_BASE_URL` �
 | Queues | 不支持 `v8` 内容类型；`queue.metrics()` 只有积压数 |
 | Workflows | 不跟踪版本；`schedules`、`concurrency` 和保留期配置会被忽略 |
 | `wrangler tail` | 尽力投递，超过约 7.9 KB 的事件会被截断 |
+| Web 控制台 | 没有按 Worker 的流量图表（指标不带账号 id）；角色只有平台管理员和成员两种；不能在线编辑或上传代码。删除账号时，Durable Object（含 D1）的存储留在 runner 的集群 bucket 里，需要运维删除 |
 | 运行时与 API | 不支持 service-worker 语法和 Global API key |
 | Containers | 冷启动是秒级（Pod 调度、首次拉取镜像、虚拟机启动），比 Cloudflare 慢；沙箱要求节点支持 KVM。不支持快照；SIGKILL 以外的信号要求镜像里有 `/bin/sh`；Kubernetes 上 `exec()` 不能指定用户；rollout 立即生效；删除应用后镜像层要等仓库的定期 GC（捆绑仓库默认每天一次） |
 

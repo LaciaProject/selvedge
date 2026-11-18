@@ -46,6 +46,28 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  dash:
+    # The web dashboard (RFC 0003): types, lint, both languages' messages,
+    # unit tests, and the first screen's size.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dash/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npm run size
+
   e2e:
     needs: rust
     runs-on: ubuntu-latest
@@ -90,6 +112,15 @@ jobs:
           SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
           PORT_BASE: "28500"
         run: test/e2e/containers.sh
+      - name: Build the dashboard and its test browser
+        run: |
+          cd dash && npm ci --no-audit --no-fund && npm run build
+          npx playwright install --with-deps chromium
+      - name: The web dashboard (Playwright, both languages, OIDC through Dex)
+        env:
+          SELVEDGE_DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/selvedge
+          PORT_BASE: "28600"
+        run: test/e2e/dash.sh
       - name: Start SeaweedFS (S3 with conditional writes)
         run: |
           docker run -d --name seaweedfs -p 127.0.0.1:29000:8333 chrislusf/seaweedfs:4.50 \

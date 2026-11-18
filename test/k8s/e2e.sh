@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # High-availability tests on a kind cluster with Selvedge installed (ha profile,
-# test/k8s/values.yaml): a rolling restart of every runner, then the loss of a
-# whole zone (the kind node of a runner that hosts the test account).
+# test/k8s/values.yaml): a rolling restart of every runner, a dashboard session
+# through a rolling restart of the API, then the loss of a whole zone (the
+# kind node of a runner that hosts the test account).
 # Expects kubectl pointing at the cluster and the release `slv` in namespace `selvedge`.
 set -euo pipefail
 
@@ -86,7 +87,26 @@ load_stop
 check "no failed requests during a rolling restart ($TOTAL sent)" "0" "$FAILS"
 for n in $OBJECTS; do check "object $n kept its state through the restart" "2" "$(retry $n)"; done
 
-# 2. Losing a zone: kill the node of a runner that runs this account.
+# 2. The web dashboard (RFC 0003): sessions live in PostgreSQL, so one
+# outlasts a rolling restart of the API pods that serve the dashboard.
+DASH=localhost:18785
+dash_forward() {
+  $K port-forward svc/slv-dash 18785:8785 > /dev/null 2>&1 & DASH_PF=$!
+  for _ in $(seq 1 30); do curl -sf -o /dev/null "$DASH/login" && break; sleep 0.5; done
+}
+dash() { curl -s -b "$WORK/cookies" -c "$WORK/cookies" -H 'x-selvedge-dash: 1' -H "origin: http://$DASH" "$@"; }
+dash_forward
+check "the dashboard serves its pages" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$DASH/login")"
+check "a token logs in to the dashboard" "200" \
+  "$(dash -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" "$DASH/auth/token")"
+$K rollout restart deploy/slv-api
+$K rollout status deploy/slv-api --timeout=300s
+kill $DASH_PF; dash_forward
+check "the session outlasts a rolling restart of the API" "200" "$(dash -o /dev/null -w '%{http_code}' "$DASH/auth/me")"
+check "and reaches the account" "k8s" "$(dash "$DASH/client/v4/accounts/$ACCOUNT" | json '["result"]["name"]')"
+kill $DASH_PF
+
+# 3. Losing a zone: kill the node of a runner that runs this account.
 victim=""
 for pod in $($K get pods -l app.kubernetes.io/component=runner -o name); do
   if $K logs "$pod" | grep -q "account process ready.*$ACCOUNT\|$ACCOUNT.*account process ready"; then victim=$pod; break; fi

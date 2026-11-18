@@ -14,6 +14,15 @@ RUN --mount=type=cache,id=cargo-registry-$TARGETPLATFORM,target=/usr/local/cargo
     --mount=type=cache,id=cargo-target-$TARGETPLATFORM,target=/src/target,sharing=locked \
     cargo build --release --locked -p selvedge && cp target/release/selvedge /selvedge
 
+# The web dashboard (RFC 0003): static files, the same for every platform, so
+# built once on the build machine's own platform.
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS dash
+WORKDIR /dash
+COPY dash/package.json dash/package-lock.json ./
+RUN --mount=type=cache,id=npm,target=/root/.npm npm ci --no-audit --no-fund
+COPY dash/ ./
+RUN npm run build
+
 FROM debian:bookworm-slim AS workerd
 ARG TARGETARCH
 ARG WORKERD_VERSION=1.20261117.1
@@ -37,7 +46,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && useradd --system --uid 65532 --home /var/lib/selvedge selvedge
 COPY --from=workerd /workerd /usr/local/bin/workerd
 COPY --from=build /selvedge /usr/local/bin/selvedge
+COPY --from=dash /dash/dist /usr/share/selvedge/dash
 ENV SELVEDGE_WORKERD=/usr/local/bin/workerd \
+    SELVEDGE_DASH_DIR=/usr/share/selvedge/dash \
     SELVEDGE_STATE_DIR=/var/lib/selvedge \
     SELVEDGE_RUN_DIR=/run/selvedge \
     SELVEDGE_LOG_JSON=true

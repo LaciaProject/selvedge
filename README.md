@@ -63,6 +63,7 @@ The design and its trade-offs are in [RFC 0001](docs/rfcs/0001-architecture.md).
 | Service bindings, environment variables, secrets, JSON bindings | Tail Workers, Logpush |
 | `wrangler tail` (logs, exceptions, filters) | |
 | workers.dev-style hostnames, custom domains and zone routes (`routes` in wrangler config) | |
+| A web dashboard in English and Chinese, with OpenID Connect single sign-on ([docs/dashboard.md](docs/dashboard.md)) | Per-Worker analytics |
 
 Uploads that use an unsupported binding are rejected rather than deployed without it. See
 [docs/compatibility.md](docs/compatibility.md) for details and known differences, and

@@ -1,3 +1,7 @@
 target
 test/e2e/node_modules
+dash/node_modules
+dash/dist
+dash/test-results
+dash/playwright-report
 .git

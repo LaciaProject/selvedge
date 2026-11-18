@@ -42,6 +42,39 @@ spec:
             - name: SELVEDGE_R2_DEV_ZONE
               value: {{ .Values.data.r2S3.devZone | quote }}
             {{- end }}
+            {{- if and .Values.dash.enabled .Values.dash.url }}
+            {{- $d := .Values.dash }}
+            - name: SELVEDGE_DASH_LISTEN
+              value: 0.0.0.0:8785
+            - name: SELVEDGE_DASH_URL
+              value: {{ $d.url | quote }}
+            - name: SELVEDGE_DASH_TOKEN_LOGIN
+              value: {{ $d.tokenLogin | quote }}
+            - name: SELVEDGE_DASH_SESSION_IDLE
+              value: {{ $d.session.idleSeconds | quote }}
+            - name: SELVEDGE_DASH_SESSION_MAX
+              value: {{ $d.session.maxSeconds | quote }}
+            {{- if $d.oidc.issuer }}
+            - name: SELVEDGE_OIDC_ISSUER
+              value: {{ $d.oidc.issuer | quote }}
+            - name: SELVEDGE_OIDC_CLIENT_ID
+              value: {{ required "dash.oidc.clientId is required with dash.oidc.issuer" $d.oidc.clientId | quote }}
+            {{- with $d.oidc.existingSecret }}
+            - name: SELVEDGE_OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: client-secret } }
+            {{- end }}
+            - name: SELVEDGE_OIDC_NAME
+              value: {{ $d.oidc.name | quote }}
+            - name: SELVEDGE_OIDC_SCOPES
+              value: {{ join "," $d.oidc.scopes | quote }}
+            - name: SELVEDGE_OIDC_GROUPS_CLAIM
+              value: {{ $d.oidc.groupsClaim | quote }}
+            - name: SELVEDGE_OIDC_ADMIN_GROUPS
+              value: {{ join "," $d.oidc.adminGroups | quote }}
+            - name: SELVEDGE_OIDC_ADMIN_EMAILS
+              value: {{ join "," $d.oidc.adminEmails | quote }}
+            {{- end }}
+            {{- end }}
             - name: SELVEDGE_MASTER_KEY
               valueFrom: { secretKeyRef: { name: {{ include "selvedge.secretName" . }}, key: master-key } }
             - name: SELVEDGE_ADMIN_TOKEN
@@ -79,6 +112,9 @@ spec:
             - { name: metrics, containerPort: {{ .Values.metrics.port }} }
             {{- end }}
             - { name: http, containerPort: 8787 }
+            {{- if and .Values.dash.enabled .Values.dash.url }}
+            - { name: dash, containerPort: 8785 }
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - { name: internal, containerPort: 8786 }
             {{- end }}
@@ -107,6 +143,19 @@ spec:
   type: {{ .Values.api.service.type }}
   selector: {{- include "selvedge.selector" $c | nindent 4 }}
   ports: [{ name: http, port: {{ .Values.api.service.port }}, targetPort: http }]
+{{- if and .Values.dash.enabled .Values.dash.url }}
+---
+# The web dashboard: route its domain here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-dash
+  labels: {{- include "selvedge.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.dash.service.type }}
+  selector: {{- include "selvedge.selector" $c | nindent 4 }}
+  ports: [{ name: dash, port: {{ .Values.dash.service.port }}, targetPort: dash }]
+{{- end }}
 {{- if .Values.tls.enabled }}
 ---
 # The API's internal endpoints, for agents and gateways (mTLS).

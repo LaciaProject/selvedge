@@ -1,6 +1,6 @@
 # RFC 0003：Web 管理控制台
 
-- 状态：**草案**。入口、登录方式和界面语言已定（2026-11-18）：单独域名、标准 OIDC、中英文
+- 状态：**已实现**（2026-11-18）。入口、登录方式和界面语言：单独域名、标准 OIDC、中英文。§12 的待定项已定，实现与本文初稿的差异见 §13，运维文档见 [dashboard.md](../dashboard.md)
 - 日期：2026-11-18
 - 依赖：[RFC 0001](0001-architecture.md) §5（控制面 API）、§8（多租户隔离）
 - 依据：Selvedge v0.3.3 的 `/client/v4` API（`crates/selvedge-server/src/api/`），`@cloudflare/kumo` 2.19.0，OpenID Connect Core 1.0 与 Discovery 1.0
@@ -280,9 +280,32 @@ Prometheus 指标已经很全，但没有现成的面板。在 `deploy/grafana/s
 
 每个阶段是独立的 PR，合并前通过 CI，包括 Playwright。每个阶段的中英文文案同时提交。
 
-## 12. 待定
+## 12. 待定项的决定
 
-- **细分角色**：除了 `admin` 和 `member`，要不要加只读成员，或者按产品限定权限（比如只能看日志）？这要给 API 的每个处理函数标上所需权限，工作量不小，先看需求。
-- **审计表**：§4.5 的写操作日志要不要入库，并在控制台里按账号查看？
-- **API token 的创建者**：OIDC 用户创建的 token，要不要在成员被移除时一并吊销？倾向于不自动吊销，只在 token 列表里标出创建者已不是成员，避免误伤 CI。
-- **Kumo 的变化**：如果 Kumo 出 3.x 并有大的不兼容改动，控制台可能要跟着改。§3.2 的锁版本加机器人升级可以让每次升级都经过测试。
+- **细分角色**：v1 只有 `admin` 和 `member` 两种。只读成员要给 API 的每个处理函数标上所需权限，等有实际需求再做。
+- **审计**：不建审计表。控制台上的每个写操作记一行 `dashboard change` 日志，包括用户 id、邮箱、方法、路径和状态，由日志系统收集和检索。
+- **API token 的创建者**：成员被移除时，他创建的 token 不自动吊销，以免误停 CI；token 列表里标出“创建者已不是成员”，由管理员决定是否吊销。
+- **Kumo 的变化**：Kumo 锁定精确版本，由 Dependabot 每周提升级 PR，CI（含 Playwright）通过后再合并。
+
+## 13. 实现（2026-11-18）
+
+与上文设计不同或补充的地方：
+
+- **OIDC 不依赖 `openidconnect` crate**：发现文档、授权码换 token、JWKS 缓存和 ID token 校验都在 `crates/selvedge-server/src/dash/oidc.rs` 里自己实现，签名校验用项目已有的 `ring`，支持 RS256/384/512、PS256/384/512、ES256/384 和 EdDSA。这样少引入一棵依赖树，校验规则也一目了然。单元测试覆盖篡改签名、`alg: none`、HMAC、未声明的算法、未知 `kid`、错误的 `iss`/`aud`/`azp`/`nonce`、过期和未来签发。
+- **端口**：控制台端口是 8785，不是 §5 写的 8788，因为 8788 在 `selvedge all` 里是数据服务的端口。Helm 的 Service 是 `<release>-dash`。
+- **开启方式**：`dash.enabled` 默认开，但要设了 `dash.url` 才真正启用；没有地址，控制台就无法校验 `Origin`，也无法作为 OIDC 回调地址。
+- **登录出错**：服务端不渲染错误页，而是跳回 `/login?error=<代码>`，由前端按当前语言显示。这样所有文案都在两份语言文件里。
+- **管理员**：除了 `adminGroups`，还可以用 `adminEmails` 按已验证的邮箱指定，方便不带组声明的提供方。管理员身份和组成员资格在每次登录时更新，存在 `users` 表里，会话不再单独存。
+- **补充的 API**：
+  - `GET /accounts/{id}/queues/{queue}` 多返回 `message_backlog_count`；
+  - `/auth/config` 返回 `workers_dev_zone`，供页面显示 Worker 的默认地址；
+  - D1 导入导出的文件地址 `/d1/v1/transfers/*` 也经控制台端口转发，凭路径里的 token 访问。
+- **Token 会话**：用账号 token 登录的会话不能管理 token，和 API 的规则一致；页面会说明 token 由成员和管理员管理。
+- **前端**：
+  - Kumo 的 DeleteResource block 翻译后放在 `components/dialogs.tsx`；
+  - 页面按路由懒加载，首屏 JS 压缩后约 268 KB；
+  - 中文语言包按需加载；
+  - `scripts/check-locales.mjs` 检查代码用到的每个键在英文里都有，中英文的键完全一致。
+- **测试**：
+  - `test/e2e/dash.sh` 启动 `selvedge all` 和 Dex（v2.46.1），用 Playwright 跑 33 个用例：主要流程中英文各一遍、安全检查，以及 OIDC（按组成为管理员、按邀请和按组成为成员、移除成员立即生效、退出登录、伪造回调被拒绝）；
+  - `kind-ha` 检查控制台会话能撑过 API 的滚动重启。

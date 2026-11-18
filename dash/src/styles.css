@@ -1,0 +1,28 @@
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "@cloudflare/kumo/styles";
+@import "tailwindcss";
+
+/* Selvedge's own colors over Kumo's tokens (RFC 0003 §3.3): denim indigo,
+   not Cloudflare's orange. */
+:root {
+  color-scheme: light dark;
+  --color-kumo-brand: light-dark(oklch(0.45 0.12 268), oklch(0.62 0.13 268));
+  --color-kumo-brand-hover: light-dark(oklch(0.39 0.12 268), oklch(0.68 0.13 268));
+  --text-color-kumo-brand: light-dark(oklch(0.45 0.12 268), oklch(0.75 0.11 268));
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-kumo-canvas);
+}
+
+/* Kumo's popups portal to <body>; keep the app's own stacking separate. */
+#root {
+  isolation: isolate;
+}

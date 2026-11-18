@@ -1,0 +1,37 @@
+# Dex for the dashboard's end-to-end tests (test/e2e/dash.sh fills in the
+# ports). Everyone's password is "password".
+issuer: http://127.0.0.1:__DEX_PORT__/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+staticClients:
+  - id: selvedge
+    name: Selvedge
+    secret: selvedge-e2e-secret
+    redirectURIs:
+      - http://localhost:__DASH_PORT__/auth/callback
+enablePasswordDB: true
+staticPasswords:
+  - email: admin@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: admin
+    name: Ada Admin
+    emailVerified: true
+    userID: 1b1f2d6e-0000-4000-8000-000000000001
+    groups: [platform-admins]
+  - email: alice@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: alice
+    name: Alice Member
+    emailVerified: true
+    userID: 1b1f2d6e-0000-4000-8000-000000000002
+  - email: bob@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: bob
+    name: Bob Blue
+    emailVerified: true
+    userID: 1b1f2d6e-0000-4000-8000-000000000003
+    groups: [team-blue]

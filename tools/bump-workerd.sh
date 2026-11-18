@@ -30,15 +30,16 @@ sed -i "s/^ARG WORKERD_VERSION=.*/ARG WORKERD_VERSION=$NEW/; \
   s|^ARG WORKERD_SHA512_AMD64=.*|ARG WORKERD_SHA512_AMD64=$AMD64|; \
   s|^ARG WORKERD_SHA512_ARM64=.*|ARG WORKERD_SHA512_ARM64=$ARM64|" Dockerfile
 sed -i "s/${OLD//./\\.}/$NEW/g" README.md docs/compatibility.md
-# status.md's table of pull requests is history: a row keeps the version
-# that pull request moved to.
-sed -i "/^| \[#/!s/${OLD//./\\.}/$NEW/g" docs/status.md
+# status.md quotes the pinned version as code; everywhere else it names one
+# (the release notes, the table of pull requests) it is history and stays.
+sed -i "s/\`${OLD//./\\.}\`/\`$NEW\`/g" docs/status.md
 (cd test/e2e && npm install --save-exact --no-audit --no-fund "workerd@$NEW" > /dev/null)
 python3 tools/experimental-flags.py "$NEW" > crates/selvedge-workerd/src/experimental-flags.txt
 
-# Every pin must have moved. RFCs and status.md's pull request rows keep the
-# version they were written against.
-left=$(git grep -n "${OLD//./\\.}" -- . ':!test/e2e/package-lock.json' ':!docs/rfcs/' | grep -v '^docs/status.md:[0-9]*:| \[#' || true)
+# Every pin must have moved. RFCs and status.md's history keep the version
+# they were written against.
+left=$(git grep -n "${OLD//./\\.}" -- . ':!test/e2e/package-lock.json' ':!docs/rfcs/' ':!docs/status.md' || true
+  git grep -n "\`${OLD//./\\.}\`" -- docs/status.md || true)
 [ -z "$left" ] || { echo "still pinned to $OLD:" >&2; echo "$left" >&2; exit 1; }
 git diff --quiet -- .github/ || { echo "changed .github/, which the workflow cannot push" >&2; exit 1; }
 echo "workerd $OLD -> $NEW"

@@ -42,6 +42,12 @@ jobs:
           npm init -y >/dev/null
           npm install --no-audit --no-fund "workerd@$v"
           echo "SELVEDGE_WORKERD=$(readlink -f node_modules/@cloudflare/workerd-linux-64/bin/workerd)" >> "$GITHUB_ENV"
+      - name: The Grafana dashboard matches its generator, and its queries parse
+        run: |
+          tools/grafana-dashboard.py | diff - deploy/helm/selvedge/dashboards/selvedge.json
+          tools/grafana-dashboard.py --rules > "$RUNNER_TEMP/dashboard-rules.json"
+          docker run --rm -v "$RUNNER_TEMP/dashboard-rules.json:/rules.json:ro" --entrypoint promtool \
+            prom/prometheus:v3.5.0 check rules /rules.json
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked

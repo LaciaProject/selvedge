@@ -247,6 +247,16 @@ metrics:
     enabled: false
     interval: 30s
     labels: {}
+  # A ConfigMap with the Grafana dashboard (dashboards/selvedge.json), for
+  # Grafana's dashboard sidecar. The file can also be imported by hand.
+  grafanaDashboard:
+    enabled: false
+    # The label the sidecar looks for (kube-prometheus-stack's default).
+    labels: { grafana_dashboard: "1" }
+    # e.g. { grafana_folder: Selvedge } for the sidecar's folder annotation.
+    annotations: {}
+    # Where Grafana's sidecar watches, if not this release's namespace.
+    namespace: ""
 
 networkPolicy:
   enabled: true

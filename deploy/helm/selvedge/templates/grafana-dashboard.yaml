@@ -1,0 +1,21 @@
+{{- if .Values.metrics.grafanaDashboard.enabled }}
+# The Grafana dashboard for these metrics, for Grafana's dashboard sidecar
+# (it loads ConfigMaps with the label below).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "selvedge.name" . }}-grafana-dashboard
+  {{- with .Values.metrics.grafanaDashboard.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "selvedge.labels" . | nindent 4 }}
+    {{- toYaml .Values.metrics.grafanaDashboard.labels | nindent 4 }}
+  {{- with .Values.metrics.grafanaDashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  selvedge.json: |-
+{{ .Files.Get "dashboards/selvedge.json" | indent 4 }}
+{{- end }}

@@ -42,3 +42,29 @@ Some useful alerts:
 - `increase(selvedge_container_starts_total{result="error"}[10m]) > 0`: instances fail to start (image
   pulls, scheduling, the sandbox); the containers controller's log says why.
 - `increase(selvedge_agent_container_unsupported_total[1h]) > 0` after a workerd upgrade.
+
+## Grafana dashboard
+
+[`deploy/helm/selvedge/dashboards/selvedge.json`](../deploy/helm/selvedge/dashboards/selvedge.json) is a
+Grafana dashboard for these metrics. Its sections:
+
+- **Traffic**: requests, the 5xx share and latency per component.
+- **Gateway and runners**: healthy runners, account processes, starts and stops by reason, and leases
+  given up.
+- **Bindings and connections**: binding calls and their failures, and new connections.
+- **Containers**: instances, starts, stops and start time.
+
+It has two variables: the Prometheus data source, and the namespaces to show (by the `namespace`
+label your scrape configuration adds).
+
+There are two ways to load it:
+
+- Import the file in Grafana.
+- Set `metrics.grafanaDashboard.enabled` in the chart. The chart then creates a ConfigMap labelled
+  `grafana_dashboard: "1"`, which the dashboard sidecar of Grafana's Helm chart (and of
+  kube-prometheus-stack) loads. `metrics.grafanaDashboard.labels`, `annotations` and `namespace`
+  match it to your sidecar's settings.
+
+The JSON is generated: edit `tools/grafana-dashboard.py` and run
+`tools/grafana-dashboard.py > deploy/helm/selvedge/dashboards/selvedge.json`. CI checks that the two
+match and that every query parses.

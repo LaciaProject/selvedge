@@ -17,8 +17,14 @@ D1=$(auth -X POST "$API/accounts/$ACCOUNT/d1/database" -d '{"name":"dash-db"}' |
 auth -X POST "$API/accounts/$ACCOUNT/r2/buckets" -d '{"name":"dash-bucket"}' > /dev/null
 auth -X POST "$API/accounts/$ACCOUNT/queues" -d '{"queue_name":"dash-queue"}' > /dev/null
 auth -X PUT "$API/accounts/$ACCOUNT/storage/kv/namespaces/$KV/values/greeting" -H 'content-type: text/plain' --data-binary 'hello' > /dev/null
-auth -X POST "$API/accounts/$ACCOUNT/d1/database/$D1/query" \
-  -d '{"sql":"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES (\"first\"), (\"second\")"}' > /dev/null
+# The first query starts the account's process: on a busy machine it may take
+# a few tries. The statements may run again harmlessly.
+SQL='{"sql":"CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) SELECT b FROM (SELECT \"first\" AS b UNION ALL SELECT \"second\") WHERE NOT EXISTS (SELECT 1 FROM notes)"}'
+for try in $(seq 1 10); do
+  auth -X POST "$API/accounts/$ACCOUNT/d1/database/$D1/query" -d "$SQL" > /dev/null && break
+  [ "$try" = 10 ] && { echo "the D1 database never answered" >&2; exit 1; }
+  sleep 2
+done
 
 APP=$(mktemp -d)
 trap 'rm -rf "$APP"' EXIT

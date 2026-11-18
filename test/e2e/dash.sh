@@ -64,7 +64,9 @@ for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$API_PORT/healthz" > /dev/nu
 for _ in $(seq 1 60); do curl -sf "$SELVEDGE_OIDC_ISSUER/.well-known/openid-configuration" > /dev/null && break; sleep 0.5; done
 
 API=http://127.0.0.1:$API_PORT/client/v4
-eval "$(API=$API ADMIN_TOKEN=$SELVEDGE_ADMIN_TOKEN WRANGLER="$E2E/node_modules/.bin/wrangler" "$DASH/e2e/seed.sh" dash)"
+# An assignment, so that a failing seed stops here (an `eval "$(...)"` would not).
+SEED=$(API=$API ADMIN_TOKEN=$SELVEDGE_ADMIN_TOKEN WRANGLER="$E2E/node_modules/.bin/wrangler" "$DASH/e2e/seed.sh" dash)
+eval "$SEED"
 echo "     seeded account $ACCOUNT"
 
 cd "$DASH"

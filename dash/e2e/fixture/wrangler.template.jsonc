@@ -1,0 +1,16 @@
+{
+  "name": "dash-app",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "vars": { "GREETING": "__GREETING__" },
+  "kv_namespaces": [{ "binding": "KV", "id": "__KV__" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "dash-db", "database_id": "__D1__" }],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "dash-bucket" }],
+  "queues": {
+    "producers": [{ "binding": "QUEUE", "queue": "dash-queue" }],
+    "consumers": [{ "queue": "dash-queue" }]
+  },
+  "durable_objects": { "bindings": [{ "name": "COUNTER", "class_name": "Counter" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Counter"] }],
+  "triggers": { "crons": ["*/30 * * * *"] }
+}

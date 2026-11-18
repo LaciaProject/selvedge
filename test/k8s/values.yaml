@@ -4,6 +4,8 @@
 profile: ha
 image: { repository: selvedge, tag: ci, pullPolicy: Never }
 gateway: { service: { type: ClusterIP } }
+# The dashboard, reached through `kubectl port-forward` (test/k8s/e2e.sh).
+dash: { url: http://localhost:18785 }
 runner:
   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }
 api: { resources: { requests: { cpu: 50m, memory: 64Mi } } }

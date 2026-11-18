@@ -8,6 +8,7 @@ pub mod blobs;
 pub mod containers;
 pub mod cron;
 pub mod d1transfer;
+pub mod dash;
 pub mod db;
 pub mod queues;
 pub mod r2;

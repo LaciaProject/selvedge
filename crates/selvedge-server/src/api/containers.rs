@@ -50,7 +50,7 @@ pub fn routes() -> Router<State> {
         .route(&format!("{base}/me"), get(me))
         .route(&format!("{base}/applications"), get(list).post(create))
         .route(&format!("{base}/applications/{{id}}"), get(describe).patch(modify).delete(remove))
-        .route(&format!("{base}/applications/{{id}}/rollouts"), post(rollout))
+        .route(&format!("{base}/applications/{{id}}/rollouts"), get(rollouts).post(rollout))
         .route(&format!("{base}/registries/{{domain}}/credentials"), post(credentials))
         .route("/registry/token", get(registry_token))
 }
@@ -382,6 +382,32 @@ async fn rollout(
         "steps": [],
         "progress": { "total_steps": 0, "current_step": 0, "updated_instances": 0, "total_instances": 0 },
     })))
+}
+
+/// An application's rollouts, newest first. Each one is applied at once,
+/// so each is `completed`.
+async fn rollouts(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, app)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let app = state.db.container_app(&id, &app).await?.ok_or_else(not_found)?;
+    let list = state.db.container_rollouts(&app.id).await?;
+    Ok(ok(json!(
+        list.iter()
+            .map(|(rollout, created, req)| json!({
+                "id": rollout,
+                "created_at": created,
+                "last_updated_at": created,
+                "description": req.get("description").cloned().unwrap_or(json!("")),
+                "status": "completed",
+                "kind": req.get("kind").cloned().unwrap_or(json!("full_auto")),
+                "strategy": req.get("strategy").cloned().unwrap_or(json!("rolling")),
+                "target_configuration": req.get("target_configuration").cloned().unwrap_or(Value::Null),
+            }))
+            .collect::<Vec<_>>()
+    )))
 }
 
 #[derive(Deserialize)]

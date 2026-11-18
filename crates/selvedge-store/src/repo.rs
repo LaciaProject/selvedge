@@ -6,10 +6,15 @@ use serde_json::Value;
 
 use crate::{Db, SecretBox};
 
+/// Who a request acts for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
+    /// A platform admin: an admin token, or an admin user of the dashboard.
     Admin,
+    /// An account token.
     Account(AccountId),
+    /// A dashboard user, with the accounts they may use (RFC 0003).
+    User { id: String, accounts: Vec<AccountId> },
 }
 
 impl Principal {
@@ -17,6 +22,7 @@ impl Principal {
         match self {
             Self::Admin => true,
             Self::Account(a) => a == account,
+            Self::User { accounts, .. } => accounts.contains(account),
         }
     }
 }
@@ -184,6 +190,15 @@ impl Db {
             Principal::Account(a) => {
                 client.query("SELECT id, name, subdomain FROM accounts WHERE id = $1", &[&a.as_str()]).await?
             }
+            Principal::User { accounts, .. } => {
+                let ids: Vec<&str> = accounts.iter().map(HexId::as_str).collect();
+                client
+                    .query(
+                        "SELECT id, name, subdomain FROM accounts WHERE id = ANY($1) ORDER BY created_at",
+                        &[&ids],
+                    )
+                    .await?
+            }
         };
         rows.iter()
             .map(|r| Ok(Account { id: r.get::<_, String>(0).parse()?, name: r.get(1), subdomain: r.get(2) }))
@@ -203,17 +218,22 @@ impl Db {
         }
     }
 
-    /// Creates an API token and returns its plaintext, which is not stored.
-    /// Creates a token. Returns its id and its value.
-    pub async fn create_token(&self, account: Option<&AccountId>, name: &str) -> Result<(String, String)> {
+    /// Creates a token, by a dashboard user if `created_by`. Returns its id
+    /// and its value, which is not stored.
+    pub async fn create_token(
+        &self,
+        account: Option<&AccountId>,
+        name: &str,
+        created_by: Option<&str>,
+    ) -> Result<(String, String)> {
         let bytes: [u8; 24] = rand::random();
         let token = format!("slv_{}", hex::encode(bytes));
         let id = HexId::random().to_string();
         self.client()
             .await?
             .execute(
-                "INSERT INTO api_tokens (token_sha256, account_id, name, id) VALUES ($1, $2, $3, $4)",
-                &[&token_hash(&token), &account.map(HexId::as_str), &name, &id],
+                "INSERT INTO api_tokens (token_sha256, account_id, name, id, created_by) VALUES ($1, $2, $3, $4, $5)",
+                &[&token_hash(&token), &account.map(HexId::as_str), &name, &id, &created_by],
             )
             .await?;
         Ok((id, token))

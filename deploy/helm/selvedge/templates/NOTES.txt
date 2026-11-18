@@ -14,6 +14,16 @@ Create an account and an account token:
 Deploy with wrangler:
   CLOUDFLARE_API_BASE_URL=http://localhost:8787/client/v4 CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... wrangler deploy
 
+{{- if and .Values.dash.enabled .Values.dash.url }}
+The web dashboard is the {{ include "selvedge.name" . }}-dash Service (port {{ .Values.dash.service.port }}).
+Route {{ .Values.dash.url }} to it{{ if hasPrefix "https://" .Values.dash.url }}, terminating TLS in front{{ end }}.
+{{- if .Values.dash.oidc.issuer }}
+Register {{ trimSuffix "/" .Values.dash.url }}/auth/callback as a redirect URI with {{ .Values.dash.oidc.issuer }}.
+{{- end }}
+{{- else }}
+The web dashboard is off: set dash.url (e.g. https://dash.example.com) to serve it.
+{{- end }}
+
 Workers are served by the {{ include "selvedge.name" . }}-gateway Service at
 <script>.<account subdomain>.{{ .Values.workersDevZone }} and at attached custom domains.
 {{- if .Values.containers.enabled }}

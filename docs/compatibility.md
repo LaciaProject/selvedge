@@ -57,7 +57,9 @@ multipart uploads. ETags are the MD5 of the object, or `<md5 of part MD5s>-<part
 uploads, as in R2. Object metadata is strongly consistent: it lives in PostgreSQL and every
 conditional write is one transaction.
 
-`wrangler r2 bucket create/list/delete` and `wrangler r2 object put/get/delete` work.
+`wrangler r2 bucket create/list/delete` and `wrangler r2 object put/get/delete` work. The REST
+API also lists a bucket's objects (`GET /accounts/{id}/r2/buckets/{bucket}/objects` with `prefix`,
+`delimiter`, `cursor` and `per_page`), as Cloudflare's does.
 
 Differences:
 
@@ -359,7 +361,11 @@ against `/client/v4`. Set `CLOUDFLARE_API_BASE_URL` to Selvedge's API.
   `Cloudflare-Workers-Version-Overrides` picks one, as on Cloudflare. Service bindings, Cron Triggers
   and queue batches go to the version with the larger share. Workers that define Durable Objects or
   have static assets cannot be split.
-- Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported.
+- Authentication is by API token (`Authorization: Bearer`). Global API keys are not supported. The
+  web dashboard has its own listener and logs people in with OpenID Connect
+  ([dashboard.md](dashboard.md)).
+- `DELETE /accounts/{id}` (admin token) deletes an account with everything recorded for it; its
+  Durable Object storage stays in the runners' cluster bucket for the operator to remove.
 - `inherit` bindings, which wrangler sends for resources the deployed version already binds, keep
   the deployed version's binding of that name; an upload naming one it does not have is refused.
 - Hostnames: `<script>.<account subdomain>.<zone>` for scripts with workers.dev enabled, and custom

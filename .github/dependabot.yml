@@ -1,0 +1,16 @@
+# The dashboard's dependencies (RFC 0003 §3.2). Kumo is pinned to an exact
+# version and moves only through these pull requests, after CI (with the
+# Playwright suite) passes on them.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /dash
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      kumo:
+        patterns: ["@cloudflare/kumo"]
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+      tooling:
+        dependency-type: development

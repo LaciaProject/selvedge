@@ -8,6 +8,7 @@ mod d1;
 mod domains;
 mod internal;
 mod kv;
+mod members;
 mod notifications;
 mod queues;
 mod r2;
@@ -55,6 +56,7 @@ pub const MAX_UPLOAD: usize = 64 << 20;
 pub fn router(state: State) -> Router {
     Router::new()
         .merge(accounts::routes())
+        .merge(members::routes())
         .merge(scripts::routes())
         .merge(assets::routes())
         .merge(tails::routes())
@@ -93,12 +95,26 @@ async fn no_method(method: axum::http::Method, uri: axum::http::Uri) -> ApiError
     )
 }
 
-/// The caller, from `Authorization: Bearer <token>`.
+/// The caller: from the dashboard session if the dashboard listener found one
+/// (see [`DashCaller`]), otherwise from `Authorization: Bearer <token>`.
 pub struct Caller(pub Principal);
+
+/// Who a request on the dashboard listener acts for, from its session cookie
+/// (RFC 0003). That listener drops `Authorization` headers, and the public
+/// listener never sets this, so each listener has exactly one way in.
+#[derive(Clone, Debug)]
+pub struct DashCaller {
+    pub principal: Principal,
+    /// The user, for a user's session (not a token's).
+    pub user: Option<selvedge_store::dash::User>,
+}
 
 impl FromRequestParts<State> for Caller {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, state: &State) -> ApiResult<Self> {
+        if let Some(d) = parts.extensions.get::<DashCaller>() {
+            return Ok(Caller(d.principal.clone()));
+        }
         let token = parts
             .headers
             .get(http::header::AUTHORIZATION)
@@ -138,6 +154,16 @@ impl FromRequestParts<State> for Internal {
 }
 
 pub type AccountPath = Path<String>;
+
+/// The dashboard user making the request, if any.
+pub fn dash_user(parts: &axum::http::Extensions) -> Option<&selvedge_store::dash::User> {
+    parts.get::<DashCaller>().and_then(|d| d.user.as_ref())
+}
+
+/// Refuses anyone but a platform admin.
+pub fn require_admin(caller: &Caller) -> ApiResult<()> {
+    if caller.0 == Principal::Admin { Ok(()) } else { Err(ApiError::forbidden()) }
+}
 
 /// A JSON body, whatever its `Content-Type`: clients (wrangler among them)
 /// do not always send one.

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+url.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 selvedge-core.workspace = true

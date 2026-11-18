@@ -138,14 +138,27 @@ async fn list(
     caller: Caller,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Response> {
-    let account: Option<AccountId> = match (&caller.0, &q.account_id) {
-        (Principal::Account(a), _) => Some(a.clone()),
-        (Principal::Admin, Some(a)) => {
-            Some(a.parse().map_err(|_| ApiError::bad_request("invalid account.id"))?)
+    let wanted: Option<AccountId> = q
+        .account_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| ApiError::bad_request("invalid account.id"))?;
+    let zones = match (&caller.0, wanted) {
+        (Principal::Account(a), _) => state.db.zones(Some(a), q.name.as_deref()).await?,
+        (Principal::Admin, a) => state.db.zones(a.as_ref(), q.name.as_deref()).await?,
+        (p @ Principal::User { .. }, Some(a)) if p.may_access(&a) => {
+            state.db.zones(Some(&a), q.name.as_deref()).await?
         }
-        (Principal::Admin, None) => None,
+        (Principal::User { .. }, Some(_)) => Vec::new(),
+        (Principal::User { accounts, .. }, None) => {
+            let mut all = Vec::new();
+            for a in accounts {
+                all.extend(state.db.zones(Some(a), q.name.as_deref()).await?);
+            }
+            all
+        }
     };
-    let zones = state.db.zones(account.as_ref(), q.name.as_deref()).await?;
     Ok(ok(json!(zones.iter().map(zone_json).collect::<Vec<_>>())))
 }
 

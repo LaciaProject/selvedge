@@ -165,7 +165,10 @@ async fn get_queue(
     Path((account, queue)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let (_, q) = queue_access(&state, &caller, &account, &queue).await?;
-    Ok(ok(queue_json(&state, &q).await?))
+    let mut v = queue_json(&state, &q).await?;
+    // A Selvedge extension, for the dashboard: what `queue.metrics()` gives.
+    v["message_backlog_count"] = json!(state.db.backlog(&q.id).await?.0);
+    Ok(ok(v))
 }
 
 async fn delete_queue(

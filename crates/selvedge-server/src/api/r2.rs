@@ -2,7 +2,7 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State as AxState};
+use axum::extract::{Path, Query, State as AxState};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -21,6 +21,7 @@ pub fn routes() -> Router<State> {
     Router::new()
         .route(base, get(list).post(create))
         .route(&format!("{base}/{{bucket}}"), get(get_bucket).delete(delete_bucket))
+        .route(&format!("{base}/{{bucket}}/objects"), get(list_objects))
         .route(
             &format!("{base}/{{bucket}}/objects/{{*key}}"),
             get(get_object).put(put_object).delete(delete_object),
@@ -174,6 +175,77 @@ async fn put_object(
             ApiError::new(http::StatusCode::PRECONDITION_FAILED, 10031, "Precondition failed")
         })?;
     Ok(ok(object_json(&o, false, false)))
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    prefix: Option<String>,
+    delimiter: Option<String>,
+    cursor: Option<String>,
+    start_after: Option<String>,
+    per_page: Option<u32>,
+}
+
+/// Lists a bucket's objects, as Cloudflare's REST API does: `result` the
+/// objects, `result_info` the cursor, whether there is more, and the common
+/// prefixes when a delimiter is given.
+async fn list_objects(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    Path((account, bucket)): Path<(String, String)>,
+    Query(q): Query<ListQuery>,
+) -> ApiResult<Response> {
+    let id = account_access(&state, &caller, &account).await?;
+    let b = Bucket { db: &state.db, blobs: &state.blobs, id: bucket_id(&state, &id, &bucket).await? };
+    let per_page = q.per_page.unwrap_or(1000).clamp(1, 1000);
+    let mut req = json!({ "limit": per_page, "include": [0, 1] });
+    for (field, value) in [
+        ("prefix", &q.prefix),
+        ("delimiter", &q.delimiter),
+        ("cursor", &q.cursor),
+        ("startAfter", &q.start_after),
+    ] {
+        if let Some(v) = value.as_deref().filter(|v| !v.is_empty()) {
+            req[field] = json!(v);
+        }
+    }
+    let listed = b.list(&req).await.map_err(r2_error)?;
+    let objects: Vec<Value> = listed["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|o| {
+            let custom: serde_json::Map<String, Value> = o["customFields"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| Some((f["k"].as_str()?.to_owned(), f["v"].clone())))
+                .collect();
+            let uploaded = o["uploaded"].as_i64().unwrap_or(0);
+            json!({
+                "key": o["name"],
+                "etag": o["etag"],
+                "size": o["size"],
+                "last_modified": selvedge_store::repo::rfc3339(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_millis(uploaded.max(0) as u64)
+                ),
+                "storage_class": o["storageClass"],
+                "http_metadata": o["httpFields"],
+                "custom_metadata": custom,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({
+        "success": true, "errors": [], "messages": [],
+        "result": objects,
+        "result_info": {
+            "cursor": listed.get("cursor").cloned().unwrap_or(Value::Null),
+            "is_truncated": listed["truncated"],
+            "per_page": per_page,
+            "delimited": listed["delimitedPrefixes"],
+        },
+    }))
+    .into_response())
 }
 
 async fn get_object(

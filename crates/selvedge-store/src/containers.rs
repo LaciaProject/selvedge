@@ -233,6 +233,21 @@ impl Db {
         Ok((id, r.get(0)))
     }
 
+    /// An application's rollouts, newest first: id, creation time and the
+    /// request that made it.
+    pub async fn container_rollouts(&self, application: &str) -> Result<Vec<(String, String, Value)>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), spec
+                 FROM container_rollouts WHERE application_id = $1 ORDER BY created_at DESC LIMIT 50",
+                &[&application],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+    }
+
     /// Runs `f` while holding a lock that serializes container starts for an
     /// account across controller replicas: the controller counts instances
     /// and creates one under it, so two starts cannot both pass a limit.

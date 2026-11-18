@@ -32,11 +32,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Serve the /client/v4 API and internal endpoints.
-    Api(ApiArgs),
+    Api(Box<ApiArgs>),
     /// Serve the binding data service (KV).
     Data(DataArgs),
     /// Run workers: one workerd process per account.
-    Agent(AgentArgs),
+    Agent(Box<AgentArgs>),
     /// Route requests by hostname to runners.
     Gateway(GatewayArgs),
     /// Start and stop container instances for runners (RFC 0002).
@@ -100,7 +100,98 @@ struct ApiArgs {
     #[command(flatten)]
     registry: RegistryArgs,
     #[command(flatten)]
+    dash: DashArgs,
+    #[command(flatten)]
     drain: DrainArgs,
+}
+
+/// The web dashboard (RFC 0003): its own listener, for its own domain.
+#[derive(Args, Clone)]
+struct DashArgs {
+    /// Serve the dashboard here. It takes only session cookies, never Bearer
+    /// tokens; put it behind its own domain.
+    #[arg(long, env = "SELVEDGE_DASH_LISTEN")]
+    dash_listen: Option<SocketAddr>,
+    /// The dashboard's public URL, e.g. https://dash.example.com. Requests
+    /// must come from its origin; the OpenID Connect provider redirects to
+    /// <url>/auth/callback.
+    #[arg(long, env = "SELVEDGE_DASH_URL")]
+    dash_url: Option<String>,
+    /// The built dashboard (dash/dist).
+    #[arg(long, env = "SELVEDGE_DASH_DIR")]
+    dash_dir: Option<PathBuf>,
+    /// Allow logging in with an API token.
+    #[arg(long, env = "SELVEDGE_DASH_TOKEN_LOGIN", default_value_t = true, action = clap::ArgAction::Set)]
+    dash_token_login: bool,
+    /// End a session after this many idle seconds.
+    #[arg(long, env = "SELVEDGE_DASH_SESSION_IDLE", default_value_t = 8 * 3600)]
+    dash_session_idle: u64,
+    /// End a session this many seconds after login, idle or not.
+    #[arg(long, env = "SELVEDGE_DASH_SESSION_MAX", default_value_t = 24 * 3600)]
+    dash_session_max: u64,
+    /// The OpenID Connect issuer, e.g. https://id.example.com/realms/main.
+    #[arg(long, env = "SELVEDGE_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    #[arg(long, env = "SELVEDGE_OIDC_CLIENT_ID")]
+    oidc_client_id: Option<String>,
+    /// Empty for a public client.
+    #[arg(long, env = "SELVEDGE_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    oidc_client_secret: Option<String>,
+    /// The provider's name on the login button.
+    #[arg(long, env = "SELVEDGE_OIDC_NAME", default_value = "SSO")]
+    oidc_name: String,
+    #[arg(long, env = "SELVEDGE_OIDC_SCOPES", value_delimiter = ',', default_value = "openid,email,profile")]
+    oidc_scopes: Vec<String>,
+    /// The claim with the user's groups; a dotted path reaches into objects
+    /// (realm_access.roles).
+    #[arg(long, env = "SELVEDGE_OIDC_GROUPS_CLAIM", default_value = "groups")]
+    oidc_groups_claim: String,
+    /// Members of these groups are platform admins.
+    #[arg(long, env = "SELVEDGE_OIDC_ADMIN_GROUPS", value_delimiter = ',')]
+    oidc_admin_groups: Vec<String>,
+    /// People with these verified emails are platform admins.
+    #[arg(long, env = "SELVEDGE_OIDC_ADMIN_EMAILS", value_delimiter = ',')]
+    oidc_admin_emails: Vec<String>,
+}
+
+/// The dashboard's router, if its listener is configured.
+fn dash_router(a: &DashArgs, state: &Arc<ApiState>) -> Result<Option<(SocketAddr, axum::Router)>> {
+    let Some(listen) = a.dash_listen else { return Ok(None) };
+    let url = a.dash_url.as_deref().context("--dash-listen needs --dash-url, the dashboard's public URL")?;
+    let url = url::Url::parse(url).with_context(|| format!("parsing --dash-url {url}"))?;
+    let nonempty = |v: &[String]| v.iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+    let oidc = match a.oidc_issuer.as_deref().filter(|i| !i.is_empty()) {
+        None => None,
+        Some(issuer) => Some(selvedge_server::dash::OidcConfig {
+            issuer: issuer.to_owned(),
+            client_id: a
+                .oidc_client_id
+                .clone()
+                .filter(|c| !c.is_empty())
+                .context("--oidc-issuer needs --oidc-client-id")?,
+            client_secret: a.oidc_client_secret.clone().filter(|s| !s.is_empty()),
+            name: a.oidc_name.clone(),
+            scopes: nonempty(&a.oidc_scopes),
+            groups_claim: a.oidc_groups_claim.clone(),
+            admin_groups: nonempty(&a.oidc_admin_groups),
+            admin_emails: nonempty(&a.oidc_admin_emails),
+        }),
+    };
+    if oidc.is_none() && !a.dash_token_login {
+        anyhow::bail!("the dashboard needs --oidc-issuer or token login: nobody could log in");
+    }
+    let dash = selvedge_server::dash::Dash::new(
+        selvedge_server::dash::DashConfig {
+            url,
+            static_dir: a.dash_dir.clone(),
+            token_login: a.dash_token_login,
+            session_idle: Duration::from_secs(a.dash_session_idle),
+            session_max: Duration::from_secs(a.dash_session_max),
+            oidc,
+        },
+        state.clone(),
+    )?;
+    Ok(Some((listen, selvedge_server::dash::router(dash))))
 }
 
 #[derive(Args, Clone)]
@@ -714,7 +805,7 @@ async fn main() -> Result<()> {
         Command::Admin(AdminCommand::CreateAccount { db, name }) => {
             let db = open_db(&db).await?;
             let account = db.create_account(&name).await?;
-            let (token_id, token) = db.create_token(Some(&account.id), "initial").await?;
+            let (token_id, token) = db.create_token(Some(&account.id), "initial", None).await?;
             println!(
                 "account_id={}\napi_token={token}\nr2_access_key_id={token_id}\nr2_secret_access_key={}",
                 account.id,
@@ -724,6 +815,13 @@ async fn main() -> Result<()> {
         Command::Api(args) => {
             let drain = Duration::from_secs(args.drain.drain_delay);
             let state = api_state(&args).await?;
+            if let Some((addr, dash)) = dash_router(&args.dash, &state)? {
+                tokio::spawn(async move {
+                    if let Err(e) = serve_axum(addr, dash, shutdown_after(drain)).await {
+                        tracing::error!(error = %format!("{e:#}"), "dashboard listener failed");
+                    }
+                });
+            }
             let router = selvedge_server::api::router(state);
             if selvedge_server::tls::get().is_some() {
                 let addr = args
@@ -1001,6 +1099,9 @@ async fn run_all(mut args: AllArgs) -> Result<()> {
     tokio::spawn(queues.run());
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(serve_axum(args.api.listen, selvedge_server::api::router(state.clone()), stop(&tx)));
+    if let Some((addr, dash)) = dash_router(&args.api.dash, &state)? {
+        tasks.spawn(serve_axum(addr, dash, stop(&tx)));
+    }
     tasks.spawn(serve_axum(args.data_listen, selvedge_server::data::router(data), stop(&tx)));
     if let Some(addr) = args.r2_s3_listen {
         tasks.spawn(serve_axum(addr, selvedge_server::r2s3::router(s3_state), stop(&tx)));

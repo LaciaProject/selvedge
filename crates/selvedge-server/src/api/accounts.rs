@@ -17,15 +17,19 @@ pub fn routes() -> Router<State> {
         .route("/client/v4/user/tokens/verify", get(verify))
         .route("/client/v4/memberships", get(memberships))
         .route("/client/v4/accounts", get(list).post(create))
-        .route("/client/v4/accounts/{account}", get(account))
+        .route("/client/v4/accounts/{account}", get(account).delete(delete))
         .route("/client/v4/accounts/{account}/tokens/verify", get(verify))
         .route("/client/v4/accounts/{account}/selvedge/tokens", post(create_token))
 }
 
-async fn user(caller: Caller) -> Response {
+async fn user(caller: Caller, ext: axum::http::Extensions) -> Response {
+    if let Some(u) = super::dash_user(&ext) {
+        return ok(json!({ "id": u.id, "email": u.email, "first_name": u.name }));
+    }
     let id = match &caller.0 {
         Principal::Admin => "admin".to_owned(),
         Principal::Account(a) => a.to_string(),
+        Principal::User { id, .. } => id.clone(),
     };
     ok(json!({ "id": id, "email": format!("{id}@selvedge.invalid") }))
 }
@@ -95,23 +99,46 @@ struct CreateToken {
     name: String,
 }
 
-/// Creates an API token scoped to one account. A Selvedge extension; platform
-/// admins only, since an account token can do everything in its account.
+/// Deletes an account and everything in it. Platform admins only.
+async fn delete(
+    AxState(state): AxState<State>,
+    caller: Caller,
+    ext: axum::http::Extensions,
+    Path(account): Path<String>,
+) -> ApiResult<Response> {
+    super::require_admin(&caller)?;
+    let id = account_access(&state, &caller, &account).await?;
+    if !state.db.delete_account(&id).await? {
+        return Err(ApiError::not_found("Account not found"));
+    }
+    tracing::info!(account = %id, by = super::dash_user(&ext).map(|u| u.id.as_str()), "account deleted");
+    Ok(ok(json!({ "id": id })))
+}
+
+/// Creates an API token scoped to one account. A Selvedge extension. Platform
+/// admins and the account's dashboard users may; an account token may not
+/// make more of itself.
 async fn create_token(
     AxState(state): AxState<State>,
     caller: Caller,
+    ext: axum::http::Extensions,
     Path(account): Path<String>,
     super::JsonBody(body): super::JsonBody<CreateToken>,
 ) -> ApiResult<Response> {
-    if caller.0 != Principal::Admin {
+    if matches!(caller.0, Principal::Account(_)) {
         return Err(ApiError::forbidden());
     }
     let id = account_access(&state, &caller, &account).await?;
-    let (token_id, token) = state.db.create_token(Some(&id), &body.name).await?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 255 {
+        return Err(ApiError::bad_request("token name must be 1-255 characters"));
+    }
+    let creator = super::dash_user(&ext).map(|u| u.id.as_str());
+    let (token_id, token) = state.db.create_token(Some(&id), name, creator).await?;
     // R2's S3 API: access key id = the token's id, secret = SHA-256 of its value.
     Ok(ok(json!({
         "id": token_id,
-        "name": body.name,
+        "name": name,
         "value": token,
         "s3": { "access_key_id": token_id, "secret_access_key": selvedge_core::sha256_hex(token.as_bytes()) },
     })))

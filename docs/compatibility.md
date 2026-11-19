@@ -6,7 +6,7 @@ If you find a difference that is not listed, please open an issue.
 
 ## Runtime
 
-Workers run on the official workerd release pinned in the image (currently `1.20261117.1`). A
+Workers run on the official workerd release pinned in the image (currently `1.20261119.1`). A
 compatibility date later than that release supports is lowered to the newest one it supports.
 
 | Feature | Status | Notes |

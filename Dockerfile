@@ -16,9 +16,9 @@ RUN --mount=type=cache,id=cargo-registry-$TARGETPLATFORM,target=/usr/local/cargo
 
 FROM debian:bookworm-slim AS workerd
 ARG TARGETARCH
-ARG WORKERD_VERSION=1.20261117.1
-ARG WORKERD_SHA512_AMD64=gZLA8X11m/luZwn+YA3+mDu61vdxNJzpksP/QZqjydKTQ+VUCulsK5gtn9Bqst1p3KJu2kafQpJ1nDQv4B23jA==
-ARG WORKERD_SHA512_ARM64=gxWngFojq41ULKNKb9rpWYvKotN5hT2I/xot+Bpy31cXzrwcTgtDLSMb2t75sW5BJxH7hihFvikgYb577kB3Zg==
+ARG WORKERD_VERSION=1.20261124.1
+ARG WORKERD_SHA512_AMD64=8oVILSKHRo8eveOUQOcOdfjq/nlW+LVfHkpR0oIrm0htRiOW4htYa/fbkViNuYcjqITYFJa2FLhWbE1B/cOc2A==
+ARG WORKERD_SHA512_ARM64=Kh2pXc/FEWs8Rdtei53xO54u8+KsgsXGBjhv44q0x3YkwC2+2nbx+FImfAuBx3mB1TENulvo5MlBbK/wEFFyrA==
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     case "$TARGETARCH" in \
